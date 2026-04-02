@@ -1,0 +1,16 @@
+{
+  "name": "bloomfilter-plugins",
+  "owner": {
+    "name": "Bloomfilter"
+  },
+  "metadata": {
+    "description": "Bloomfilter's Claude Code plugin marketplace"
+  },
+  "plugins": [
+    {
+      "name": "bloomfilter-agent-miner",
+      "source": "./plugins/bloomfilter-agent-miner",
+      "description": "Agent mining hooks for Bloomfilter"
+    }
+  ]
+}
