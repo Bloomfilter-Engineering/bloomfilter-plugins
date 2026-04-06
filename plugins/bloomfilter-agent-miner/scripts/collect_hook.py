@@ -22,7 +22,6 @@ from bloomfilter_common import (
     read_payload,
     resolve_api_key,
     resolve_api_url,
-    rewrite_batch,
     upload_batch,
     utcnow_iso,
 )
@@ -73,15 +72,7 @@ def main():
     # Extract transcript token summary on Stop
     if hook_event_name in TRANSCRIPT_HOOKS:
         transcript_path = payload.get("transcript_path", "")
-        debug_log = os.path.join(os.path.expanduser("~"), ".config", "bloomfilter", "debug.log")
-        with open(debug_log, "a") as _dbg:
-            _dbg.write(f"--- Stop hook fired ---\n")
-            _dbg.write(f"transcript_path={transcript_path}\n")
-            _dbg.write(f"exists={os.path.exists(transcript_path) if transcript_path else False}\n")
-            if transcript_path and os.path.exists(transcript_path):
-                _dbg.write(f"size={os.path.getsize(transcript_path)}\n")
-            summary = extract_transcript_summary(transcript_path)
-            _dbg.write(f"summary={summary}\n")
+        summary = extract_transcript_summary(transcript_path)
         if summary:
             envelope["transcript_summary"] = summary
 
