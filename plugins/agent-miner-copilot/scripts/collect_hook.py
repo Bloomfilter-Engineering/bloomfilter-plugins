@@ -253,6 +253,6 @@ def main():
 if __name__ == "__main__":
     try:
         main()
-    except Exception:
-        pass  # Never block Copilot
+    except Exception as exc:
+        print(f"[bloomfilter] collect_hook failed: {exc}", file=sys.stderr)
     sys.exit(0)

@@ -1,5 +1,6 @@
 {
   "name": "bloomfilter-agent-miner-claude-code",
   "version": "0.1.0",
-  "description": "Agent mining hooks for Bloomfilter (Claude Code)"
+  "description": "Agent mining hooks for Bloomfilter (Claude Code)",
+  "author": "Bloomfilter Engineering"
 }

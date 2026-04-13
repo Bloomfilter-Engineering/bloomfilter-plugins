@@ -59,6 +59,8 @@ def bootstrap_config(plugin_root):
     if not os.path.isfile(config_file):
         secure_makedirs(config_dir)
         shutil.copy2(template, config_file)
+        if platform.system() != "Windows":
+            os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
         print(
             f"[bloomfilter] Created config at {config_file} — add your API key to get started."
         )
@@ -85,9 +87,6 @@ def resolve_api_key(project_dir):
 
 def resolve_api_url(project_dir):
     """Resolve the API URL: env var > project config > user config > default."""
-    # TODO: Remove hardcoded localhost URL before pushing — restore normal resolution logic
-    return "http://localhost:8000"
-
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
         return env_url
@@ -140,8 +139,30 @@ def get_git_branch(project_dir):
 
 
 # ---------------------------------------------------------------------------
-# Batch file helpers
+# Batch file helpers (with file locking for concurrent hook processes)
 # ---------------------------------------------------------------------------
+
+import contextlib
+
+if platform.system() != "Windows":
+    import fcntl
+
+    @contextlib.contextmanager
+    def _lock_file(fp, exclusive=True):
+        """Acquire an flock on an open file, release on exit."""
+        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(fp, op)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+
+else:
+
+    @contextlib.contextmanager
+    def _lock_file(fp, exclusive=True):
+        """No-op lock on Windows."""
+        yield
 
 
 def get_batch_dir():
@@ -164,7 +185,8 @@ def append_to_batch(session_id, entry):
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     with open(batch_file, "a") as f:
-        f.write(line)
+        with _lock_file(f, exclusive=True):
+            f.write(line)
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
@@ -175,7 +197,8 @@ def read_batch(session_id):
     if not os.path.isfile(batch_file):
         return []
     with open(batch_file, "r") as f:
-        lines = f.readlines()
+        with _lock_file(f, exclusive=False):
+            lines = f.readlines()
     entries = []
     for line in lines:
         line = line.strip()
@@ -198,8 +221,9 @@ def rewrite_batch(session_id, entries):
     """Re-write entries back to the batch file (used on upload failure)."""
     batch_file = get_batch_file(session_id)
     with open(batch_file, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+        with _lock_file(f, exclusive=True):
+            for entry in entries:
+                f.write(json.dumps(entry, separators=(",", ":")) + "\n")
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
@@ -244,6 +268,24 @@ def utcnow_iso():
 # Copilot transcript discovery and parsing
 # ---------------------------------------------------------------------------
 
+def _get_vscode_data_dirs():
+    """Return existing VS Code data directories for the current platform."""
+    system = platform.system()
+    home = os.path.expanduser("~")
+    if system == "Darwin":
+        base = os.path.join(home, "Library", "Application Support")
+    elif system == "Windows":
+        base = os.environ.get("APPDATA", os.path.join(home, "AppData", "Roaming"))
+    else:  # Linux
+        base = os.environ.get("XDG_CONFIG_HOME", os.path.join(home, ".config"))
+    dirs = []
+    for variant in ("Code", "Code - Insiders"):
+        path = os.path.join(base, variant)
+        if os.path.isdir(path):
+            dirs.append(path)
+    return dirs
+
+
 # Cache: session_id → transcript file path (avoid re-searching per hook)
 _transcript_cache = {}
 
@@ -266,30 +308,27 @@ def find_copilot_transcript(session_id):
     if not session_id:
         return ""
 
-    code_support = os.path.join(
-        os.path.expanduser("~"), "Library", "Application Support", "Code"
-    )
-    if not os.path.isdir(code_support):
-        return ""
-
     search_dirs = []
+    for code_base in _get_vscode_data_dirs():
+        # New format: globalStorage/emptyWindowChatSessions/
+        global_dir = os.path.join(
+            code_base, "User", "globalStorage", "emptyWindowChatSessions"
+        )
+        if os.path.isdir(global_dir):
+            search_dirs.append(global_dir)
 
-    # New format: globalStorage/emptyWindowChatSessions/
-    global_dir = os.path.join(
-        code_support, "User", "globalStorage", "emptyWindowChatSessions"
-    )
-    if os.path.isdir(global_dir):
-        search_dirs.append(global_dir)
+        # Old format: workspaceStorage/*/GitHub.copilot-chat/transcripts/
+        ws_dir = os.path.join(code_base, "User", "workspaceStorage")
+        if os.path.isdir(ws_dir):
+            for ws in os.listdir(ws_dir):
+                transcript_dir = os.path.join(
+                    ws_dir, ws, "GitHub.copilot-chat", "transcripts"
+                )
+                if os.path.isdir(transcript_dir):
+                    search_dirs.append(transcript_dir)
 
-    # Old format: workspaceStorage/*/GitHub.copilot-chat/transcripts/
-    ws_dir = os.path.join(code_support, "User", "workspaceStorage")
-    if os.path.isdir(ws_dir):
-        for ws in os.listdir(ws_dir):
-            transcript_dir = os.path.join(
-                ws_dir, ws, "GitHub.copilot-chat", "transcripts"
-            )
-            if os.path.isdir(transcript_dir):
-                search_dirs.append(transcript_dir)
+    if not search_dirs:
+        return ""
 
     # Search most recently modified files first
     candidates = []
