@@ -106,8 +106,8 @@ You can optionally add a project-level config at `{project}/.bloomfilter/config.
 
 ### Prerequisites
 
-- Python 3.8+
-- Claude Code CLI (for Claude Code plugin) or VS Code with GitHub Copilot (for Copilot plugin)
+- Python 3.9+
+- VS Code 1.115+ with GitHub Copilot 0.43+ (for Copilot plugin)
 
 ### Local setup
 
