@@ -290,6 +290,29 @@ def _get_vscode_data_dirs():
 _transcript_cache = {}
 
 
+def derive_chat_sessions_path(transcript_path):
+    """Derive the chatSessions path from a GitHub.copilot-chat/transcripts/ path.
+
+    Both formats share the same workspace ID and UUID filename:
+      old: .../workspaceStorage/{ws}/GitHub.copilot-chat/transcripts/{uuid}.jsonl
+      new: .../workspaceStorage/{ws}/chatSessions/{uuid}.jsonl
+
+    The new chatSessions format contains token counts and resolved model data
+    that the old format lacks.
+
+    Returns the chatSessions path if it exists on disk, or '' otherwise.
+    """
+    if not transcript_path:
+        return ""
+
+    marker = os.path.join("GitHub.copilot-chat", "transcripts")
+    if marker not in transcript_path:
+        return ""
+
+    chat_sessions_path = transcript_path.replace(marker, "chatSessions")
+    return chat_sessions_path if os.path.isfile(chat_sessions_path) else ""
+
+
 def find_copilot_transcript(session_id):
     """Find the Copilot transcript file that contains the given session_id.
 
@@ -317,10 +340,16 @@ def find_copilot_transcript(session_id):
         if os.path.isdir(global_dir):
             search_dirs.append(global_dir)
 
-        # Old format: workspaceStorage/*/GitHub.copilot-chat/transcripts/
+        # Workspace sessions: workspaceStorage/*/chatSessions/ (new format, has tokens)
+        # and workspaceStorage/*/GitHub.copilot-chat/transcripts/ (old format, no tokens)
         ws_dir = os.path.join(code_base, "User", "workspaceStorage")
         if os.path.isdir(ws_dir):
             for ws in os.listdir(ws_dir):
+                # Prefer chatSessions (new format with token data)
+                chat_dir = os.path.join(ws_dir, ws, "chatSessions")
+                if os.path.isdir(chat_dir):
+                    search_dirs.append(chat_dir)
+                # Fallback: old transcript format
                 transcript_dir = os.path.join(
                     ws_dir, ws, "GitHub.copilot-chat", "transcripts"
                 )

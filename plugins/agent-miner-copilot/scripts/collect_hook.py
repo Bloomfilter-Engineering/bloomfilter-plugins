@@ -18,6 +18,7 @@ from bloomfilter_common import (
     append_to_batch,
     bootstrap_config,
     clear_batch,
+    derive_chat_sessions_path,
     find_copilot_transcript,
     get_git_branch,
     parse_copilot_transcript,
@@ -95,23 +96,30 @@ def main():
             if e.get("hook_event_name") == "UserPromptSubmit"
         )
 
-        # Retry up to 3 s (0.5 s intervals) — the transcript file may
-        # not exist yet on the first Stop (I/O race with VS Code).
+        # Two transcript locations with different timing and data:
+        #
+        #   transcripts/   (payload.transcript_path)
+        #     Written synchronously — available immediately on Stop.
+        #     Has response content and reasoning, NO tokens or model.
+        #
+        #   chatSessions/  (derived or discovered)
+        #     Written ~15 s after Stop (VS Code flushes late).
+        #     Has everything: content, tokens, model, IDs.
+        #     Previous turns' data IS ready — only current turn delayed.
+        #
+        # Strategy: parse old transcript for messages (critical, fast),
+        # then overlay token/model/ID data from chatSessions.  Backfill
+        # previous turns' tokens from chatSessions on each Stop.
+
+        # --- Phase 1: Old transcript for messages (retry until ready) ---
+        payload_path = payload.get("transcript_path", "")
         parsed = None
-        transcript_path = ""
         max_wait = 3.0
         waited = 0.0
         while waited < max_wait:
-            if not transcript_path:
-                transcript_path = (
-                    payload.get("transcript_path", "")
-                    or find_copilot_transcript(session_id)
-                )
-            if transcript_path:
-                parsed = parse_copilot_transcript(transcript_path)
+            if payload_path:
+                parsed = parse_copilot_transcript(payload_path)
                 requests = parsed.get("requests", [])
-                # Only break when the transcript has all turns and the
-                # current (last) turn has response content.
                 if (len(requests) >= expected_turns
                         and requests[-1].get("response_content")):
                     break
@@ -123,11 +131,46 @@ def main():
             len(requests) >= expected_turns
             and requests[-1].get("response_content")
         )
-        current_req = requests[-1] if have_current_turn else None
+        current_req = (
+            requests[-1]
+            if len(requests) >= expected_turns
+            else None
+        )
 
-        # Set envelope fields ONLY from the current turn's request.
-        # If the transcript didn't flush in time, these stay empty and
-        # will be backfilled on a later Stop.
+        # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
+        chat_path = (
+            derive_chat_sessions_path(payload_path)
+            or find_copilot_transcript(session_id)
+            or ""
+        )
+        chat_requests = []
+        if chat_path:
+            chat_parsed = parse_copilot_transcript(chat_path)
+            chat_requests = chat_parsed.get("requests", [])
+
+        # Overlay token/model/ID data from chatSessions onto current
+        # turn when available.
+        if current_req:
+            turn_idx = len(requests) - 1
+            if turn_idx < len(chat_requests):
+                chat_req = chat_requests[turn_idx]
+                if chat_req.get("input_tokens") or chat_req.get("output_tokens"):
+                    current_req["input_tokens"] = chat_req["input_tokens"]
+                    current_req["output_tokens"] = chat_req["output_tokens"]
+                if chat_req.get("resolvedModel"):
+                    current_req["resolvedModel"] = chat_req["resolvedModel"]
+                if chat_req.get("requestId"):
+                    current_req["requestId"] = chat_req["requestId"]
+                if chat_req.get("responseId"):
+                    current_req["responseId"] = chat_req["responseId"]
+                # Prefer chatSessions reasoning_parts (has thinking_id
+                # and timestamps from toolCallRounds).
+                if chat_req.get("reasoning_parts"):
+                    current_req["reasoning_parts"] = chat_req["reasoning_parts"]
+                    if chat_req.get("reasoning_text"):
+                        current_req["reasoning_text"] = chat_req["reasoning_text"]
+
+        # Build envelope fields from the combined data.
         if current_req:
             if current_req.get("response_content"):
                 envelope["agent_response"] = current_req["response_content"]
@@ -136,8 +179,6 @@ def main():
             if current_req.get("userMessage"):
                 envelope["user_message"] = current_req["userMessage"]
 
-            # Current turn's api_call only — earlier turns get their
-            # data via backfill into their own Stop entries.
             envelope["transcript_summary"] = {
                 "api_calls": [
                     {
@@ -154,33 +195,44 @@ def main():
             }
 
         # Backfill earlier Stop entries that are missing agent_response
-        # OR have 0 token counts.  Match by turn order: the Nth Stop
-        # entry in the batch corresponds to the Nth request record.
-        if len(requests) > 1:
-            earlier = requests[:-1] if have_current_turn else requests
-            prior_stops = []
+        # OR have 0 token counts.  Use chatSessions data when available
+        # — it has token counts for previous turns even though the
+        # current turn's data isn't ready yet.  Match by turn order:
+        # the Nth Stop entry corresponds to the Nth request record.
+        backfill_source = chat_requests if chat_requests else requests
+        if len(backfill_source) > 1:
+            earlier = backfill_source[:-1] if have_current_turn else backfill_source
+            # Walk Stop entries and transcript records in lockstep so
+            # the Nth Stop always matches the Nth record — even when
+            # some Stops already have tokens from a prior backfill.
+            rec_idx = 0
+            updated = False
             for idx, e in enumerate(batch_entries):
                 if e.get("hook_event_name") != "Stop":
                     continue
-                # Needs backfill if missing response or missing tokens
+                if rec_idx >= len(earlier):
+                    break
+                rec = earlier[rec_idx]
+                rec_idx += 1
+
+                # Check if this entry needs backfill
                 summary = e.get("transcript_summary", {})
                 calls = summary.get("api_calls", [{}])
                 has_tokens = any(
                     c.get("input_tokens") or c.get("output_tokens")
                     for c in calls
                 )
-                if not e.get("agent_response") or not has_tokens:
-                    prior_stops.append((idx, e))
-            updated = False
-            for (batch_idx, entry), rec in zip(prior_stops, earlier):
-                if rec.get("response_content") and not entry.get("agent_response"):
-                    entry["agent_response"] = rec["response_content"]
-                if rec.get("reasoning_text") and not entry.get("reasoning_text"):
-                    entry["reasoning_text"] = rec["reasoning_text"]
-                if rec.get("userMessage") and not entry.get("user_message"):
-                    entry["user_message"] = rec["userMessage"]
+                if e.get("agent_response") and has_tokens:
+                    continue  # already complete
+
+                if rec.get("response_content") and not e.get("agent_response"):
+                    e["agent_response"] = rec["response_content"]
+                if rec.get("reasoning_text") and not e.get("reasoning_text"):
+                    e["reasoning_text"] = rec["reasoning_text"]
+                if rec.get("userMessage") and not e.get("user_message"):
+                    e["user_message"] = rec["userMessage"]
                 if rec.get("input_tokens") or rec.get("output_tokens"):
-                    entry["transcript_summary"] = {
+                    e["transcript_summary"] = {
                         "api_calls": [
                             {
                                 "input_tokens": rec.get("input_tokens", 0),
@@ -194,7 +246,7 @@ def main():
                             }
                         ]
                     }
-                batch_entries[batch_idx] = entry
+                batch_entries[idx] = e
                 updated = True
             if updated:
                 rewrite_batch(session_id, batch_entries)
