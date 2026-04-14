@@ -1,5 +1,8 @@
 {
   "name": "agent-miner-copilot",
   "version": "0.1.0",
-  "description": "Agent mining hooks for Bloomfilter (Copilot)"
+  "description": "Agent mining hooks for Bloomfilter (Copilot)",
+  "author": {
+    "name": "Bloomfilter Engineering"
+  }
 }
