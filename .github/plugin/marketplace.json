@@ -1,0 +1,16 @@
+{
+  "name": "bloomfilter-plugins",
+  "owner": {
+    "name": "Bloomfilter"
+  },
+  "metadata": {
+    "description": "Bloomfilter's Copilot plugin marketplace"
+  },
+  "plugins": [
+    {
+      "name": "bloomfilter-agent-miner-copilot",
+      "source": "./plugins/agent-miner-copilot",
+      "description": "Agent mining hooks for Bloomfilter (Copilot)"
+    }
+  ]
+}
