@@ -1,6 +1,6 @@
 # bloomfilter-plugins
 
-Bloomfilter Agent Miner plugins for Claude Code and VS Code Copilot. Captures agent events (sessions, tool calls, prompts, responses) and sends them to the Bloomfilter API for observability and analysis.
+Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Captures agent events (sessions, tool calls, prompts, responses) and sends them to the Bloomfilter API for observability and analysis.
 
 ## Plugins
 
@@ -8,6 +8,7 @@ Bloomfilter Agent Miner plugins for Claude Code and VS Code Copilot. Captures ag
 |--------|----------|-------------|
 | `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor` | Cursor | `.cursor-plugin/marketplace.json` |
 
 ## Install
 
@@ -89,6 +90,45 @@ Open any project in VS Code with GitHub Copilot -- the plugin activates automati
 
 ---
 
+### Cursor
+
+Cursor distributes third-party plugins through **Team Marketplaces**, a feature available on the **Teams (Business)** and **Enterprise** plans. A Cursor org admin adds the Bloomfilter marketplace once; individual users then install from it.
+
+> **Plan requirement:** Team Marketplaces require Teams or Enterprise. Free and Pro users should follow the [local development setup](#cursor-1) below.
+
+#### 1. Admin — add the Bloomfilter marketplace (one-time, org-wide)
+
+1. Open the **Cursor Dashboard** → **Settings** → **Plugins** → **Team Marketplaces** → **Import**.
+2. Paste the GitHub URL: `https://github.com/Bloomfilter-Engineering/bloomfilter-plugins`
+3. Review the parsed plugins (Cursor reads `.cursor-plugin/marketplace.json` at the repo root and lists `bloomfilter-agent-miner-cursor`). Optionally scope the marketplace to specific Team Access groups.
+4. Set the marketplace name and description, then **Save**.
+5. (Recommended) Mark `bloomfilter-agent-miner-cursor` as **required** so it auto-installs for every member of the selected Team Access groups.
+
+Reference: [Cursor — Plugins docs](https://cursor.com/docs/plugins#creating-plugins).
+
+#### 2. End-user — install the plugin
+
+- If the admin marked the plugin **required**, it auto-installs — nothing to do.
+- Otherwise, open the **Plugins** panel in Cursor, find **bloomfilter-agent-miner-cursor** under the Bloomfilter team marketplace, and click **Install**. Cursor registers the bundled `hooks/hooks.json` automatically.
+
+#### 3. Configure your API key
+
+```bash
+mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
+{
+  "api_key": "YOUR_API_KEY",
+}
+EOF
+```
+
+The plugin also creates this file automatically on the first `sessionStart` hook.
+
+#### 4. Start using Cursor's agent
+
+Open any project and use the Cursor agent -- the plugin activates on `sessionStart` and uploads the hook batch on every `stop` and `sessionEnd`.
+
+---
+
 ## Configuration
 
 The config file lives at `~/.config/bloomfilter/config.json`. Both plugins share the same config.
@@ -126,6 +166,18 @@ Add to your VS Code `settings.json`:
     "/path/to/bloomfilter-plugins/plugins/agent-miner-copilot": true
 }
 ```
+
+#### Cursor
+
+For plugin development, or for Cursor users on Free/Pro plans (Team Marketplaces aren't available to them), install the plugin locally. Copy it into Cursor's local-plugin directory, then reload the Cursor window (**Developer: Reload Window**):
+
+```bash
+mkdir -p ~/.cursor/plugins/local
+cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
+      ~/.cursor/plugins/local/agent-miner-cursor
+```
+
+Re-copy after any code change (symlinking is not reliable — Cursor's loader did not pick up a symlinked plugin dir in testing).
 
 ### Debugging
 
