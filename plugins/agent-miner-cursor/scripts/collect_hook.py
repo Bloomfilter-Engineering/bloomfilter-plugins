@@ -103,7 +103,7 @@ def main():
     if hook_event_name == "sessionStart":
         bootstrap_config(plugin_root)
         clear_batch(session_id)
-        api_key = resolve_api_key(project_dir)
+        api_key = resolve_api_key()
         if not api_key:
             return
 
@@ -175,7 +175,7 @@ def main():
     append_to_batch(session_id, envelope)
 
     if hook_event_name in UPLOAD_HOOKS:
-        api_key = resolve_api_key(project_dir)
+        api_key = resolve_api_key()
         if not api_key:
             return
 

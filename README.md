@@ -117,6 +117,7 @@ Reference: [Cursor — Plugins docs](https://cursor.com/docs/plugins#creating-pl
 mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
 {
   "api_key": "YOUR_API_KEY",
+  "url": ""
 }
 EOF
 ```
