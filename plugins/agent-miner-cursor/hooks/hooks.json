@@ -3,105 +3,105 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py sessionStart",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py sessionStart",
         "type": "command",
         "timeout": 10
       }
     ],
     "sessionEnd": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py sessionEnd",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py sessionEnd",
         "type": "command",
         "timeout": 30
       }
     ],
     "stop": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py stop",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py stop",
         "type": "command",
         "timeout": 30
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py beforeSubmitPrompt",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py beforeSubmitPrompt",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUse": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py postToolUse",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py postToolUse",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUseFailure": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py postToolUseFailure",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py postToolUseFailure",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStart": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py subagentStart",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py subagentStart",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStop": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py subagentStop",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py subagentStop",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterShellExecution": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterShellExecution",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterShellExecution",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterMCPExecution": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterMCPExecution",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterMCPExecution",
         "type": "command",
         "timeout": 10
       }
     ],
     "beforeReadFile": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py beforeReadFile",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py beforeReadFile",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterFileEdit": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterFileEdit",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterFileEdit",
         "type": "command",
         "timeout": 10
       }
     ],
     "preCompact": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py preCompact",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py preCompact",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentResponse": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterAgentResponse",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterAgentResponse",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentThought": [
       {
-        "command": "python3 ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterAgentThought",
+        "command": "$(command -v python || command -v python3) ${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py afterAgentThought",
         "type": "command",
         "timeout": 10
       }

@@ -8,7 +8,7 @@ import sys
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.1.1"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
@@ -284,7 +284,7 @@ def extract_transcript_summary(transcript_path):
             last_user_idx = i
 
         # Collect all assistant entries in the current turn
-        turn_entries = entries[last_user_idx + 1:] if last_user_idx >= 0 else entries
+        turn_entries = entries[last_user_idx + 1 :] if last_user_idx >= 0 else entries
         all_assistant = [
             e
             for e in turn_entries

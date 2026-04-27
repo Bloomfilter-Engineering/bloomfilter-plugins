@@ -6,9 +6,10 @@ import stat
 import subprocess
 import sys
 import urllib.request
+import contextlib
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
@@ -142,7 +143,6 @@ def get_git_branch(project_dir):
 # Batch file helpers (with file locking for concurrent hook processes)
 # ---------------------------------------------------------------------------
 
-import contextlib
 
 if platform.system() != "Windows":
     import fcntl
@@ -267,6 +267,7 @@ def utcnow_iso():
 # ---------------------------------------------------------------------------
 # Copilot transcript discovery and parsing
 # ---------------------------------------------------------------------------
+
 
 def _get_vscode_data_dirs():
     """Return existing VS Code data directories for the current platform."""
@@ -462,9 +463,7 @@ def parse_copilot_transcript(transcript_path):
                 result["reasoning_text"] = rec.get("reasoning_text", "")
                 result["input_tokens"] = rec.get("input_tokens", 0)
                 result["output_tokens"] = rec.get("output_tokens", 0)
-                result["model"] = (
-                    rec.get("resolvedModel") or rec.get("modelId", "")
-                )
+                result["model"] = rec.get("resolvedModel") or rec.get("modelId", "")
                 break
 
         return result
@@ -482,9 +481,7 @@ def _set_nested(obj, key_path, value):
     for i, segment in enumerate(key_path[:-1]):
         next_segment = key_path[i + 1]
         if isinstance(obj, dict):
-            obj = obj.setdefault(
-                segment, [] if isinstance(next_segment, int) else {}
-            )
+            obj = obj.setdefault(segment, [] if isinstance(next_segment, int) else {})
         elif isinstance(obj, list) and isinstance(segment, int):
             while len(obj) <= segment:
                 obj.append({})
@@ -613,23 +610,27 @@ def _extract_request_record(req):
                         continue
                     thinking = rnd.get("thinking")
                     if isinstance(thinking, dict) and thinking.get("text"):
-                        record["reasoning_parts"].append({
-                            "type": "thinking",
-                            "content": thinking["text"],
-                            "thinking_id": thinking.get("id", ""),
-                            "timestamp": rnd.get("timestamp", 0),
-                        })
+                        record["reasoning_parts"].append(
+                            {
+                                "type": "thinking",
+                                "content": thinking["text"],
+                                "thinking_id": thinking.get("id", ""),
+                                "timestamp": rnd.get("timestamp", 0),
+                            }
+                        )
 
     # If toolCallRounds wasn't available (result not flushed yet), fall back
     # to the inline response[] thinking blocks.
     if not record["reasoning_parts"] and fallback_reasoning:
         for text in fallback_reasoning:
-            record["reasoning_parts"].append({
-                "type": "thinking",
-                "content": text,
-                "thinking_id": "",
-                "timestamp": 0,
-            })
+            record["reasoning_parts"].append(
+                {
+                    "type": "thinking",
+                    "content": text,
+                    "thinking_id": "",
+                    "timestamp": 0,
+                }
+            )
 
     # Flat reasoning_text for backward compat
     all_thinking = [p["content"] for p in record["reasoning_parts"]]
@@ -665,20 +666,30 @@ def _parse_old_format(entries):
         reasoning = data.get("reasoningText", "")
         if not content and not reasoning:
             continue
-        records.append({
-            "requestId": "",
-            "responseId": "",
-            "modelId": "",
-            "resolvedModel": "",
-            "userMessage": "",
-            "response_content": content,
-            "reasoning_text": reasoning,
-            "reasoning_parts": (
-                [{"type": "thinking", "content": reasoning, "thinking_id": "", "timestamp": 0}]
-                if reasoning else []
-            ),
-            "input_tokens": 0,
-            "output_tokens": 0,
-            "timestamp": 0,
-        })
+        records.append(
+            {
+                "requestId": "",
+                "responseId": "",
+                "modelId": "",
+                "resolvedModel": "",
+                "userMessage": "",
+                "response_content": content,
+                "reasoning_text": reasoning,
+                "reasoning_parts": (
+                    [
+                        {
+                            "type": "thinking",
+                            "content": reasoning,
+                            "thinking_id": "",
+                            "timestamp": 0,
+                        }
+                    ]
+                    if reasoning
+                    else []
+                ),
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "timestamp": 0,
+            }
+        )
     return records
