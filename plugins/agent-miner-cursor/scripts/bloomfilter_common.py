@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
@@ -233,7 +234,17 @@ def rewrite_batch(session_id, entries):
 
 
 def upload_batch(api_url, api_key, payload):
-    """POST raw hook batch to the Bloomfilter API. Returns True on success."""
+    """POST raw hook batch to the Bloomfilter API. Returns True on success.
+
+    Validates the URL scheme up front: only http/https are allowed. Other
+    schemes (file://, ftp://, gopher://, ...) would otherwise be honoured
+    by urllib.request.urlopen and could be abused if a project-level
+    config supplies a malicious url.
+    """
+    parsed = urllib.parse.urlparse(api_url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return False
+
     try:
         data = json.dumps(payload).encode("utf-8")
         url = f"{api_url}/api/agent-sessions/hooks/"
