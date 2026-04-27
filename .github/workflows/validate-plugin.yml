@@ -26,6 +26,13 @@ jobs:
         run: |
           shopt -s nullglob
           for plugin_dir in plugins/*/; do
+            # Only validate Claude Code plugins. Other plugins in this
+            # monorepo (e.g. agent-miner-cursor) have their own manifest
+            # format (.cursor-plugin/plugin.json) and would fail here.
+            if [ ! -f "${plugin_dir}.claude-plugin/plugin.json" ]; then
+              echo "Skipping $plugin_dir (no .claude-plugin/plugin.json)"
+              continue
+            fi
             echo "Validating $plugin_dir"
             claude plugin validate "$plugin_dir"
           done
