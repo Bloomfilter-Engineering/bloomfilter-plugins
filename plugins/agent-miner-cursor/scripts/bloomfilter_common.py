@@ -10,6 +10,12 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
+# Platform-specific stdlib modules used by ``_lock_file`` below.
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import fcntl
+
 PLUGIN_VERSION = "0.1.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
@@ -145,7 +151,6 @@ def get_git_branch(project_dir):
 
 
 if platform.system() != "Windows":
-    import fcntl
 
     @contextlib.contextmanager
     def _lock_file(fp, exclusive=True):
@@ -161,8 +166,53 @@ else:
 
     @contextlib.contextmanager
     def _lock_file(fp, exclusive=True):
-        """No-op lock on Windows."""
-        yield
+        """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
+
+        msvcrt only supports exclusive locks — the ``exclusive`` arg is
+        accepted for API parity with the POSIX implementation but ignored.
+        Locks 1 byte at offset 0 as a coordination token. ``LK_LOCK``
+        retries every second up to 10 times before raising; if it does
+        raise we proceed unlocked (better than crashing the hook).
+
+        File position is saved and restored so the lock's seek to offset 0
+        does not disturb append-mode writes.
+        """
+        try:
+            fp.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            pos = fp.tell()
+        except (OSError, ValueError):
+            pos = None
+
+        try:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError:
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
+            yield
+            return
+
+        try:
+            if pos is not None:
+                fp.seek(pos)
+            yield
+        finally:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
 
 
 def get_batch_dir():
@@ -210,22 +260,32 @@ def read_batch(session_id):
     return entries
 
 
-def clear_batch(session_id):
-    """Delete the batch file for *session_id*."""
-    batch_file = get_batch_file(session_id)
-    if os.path.isfile(batch_file):
-        os.remove(batch_file)
-
-
 def rewrite_batch(session_id, entries):
-    """Re-write entries back to the batch file."""
+    """Re-write entries back to the batch file (race-safe).
+
+    Opens with ``a+`` so the file is not truncated until *after* the
+    exclusive lock is acquired. Concurrent ``append_to_batch`` calls
+    block on the same lock and never lose a line.
+    """
     batch_file = get_batch_file(session_id)
-    with open(batch_file, "w") as f:
+    with open(batch_file, "a+") as f:
         with _lock_file(f, exclusive=True):
+            f.seek(0)
+            f.truncate()
             for entry in entries:
                 f.write(json.dumps(entry, separators=(",", ":")) + "\n")
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def clear_batch(session_id):
+    """Truncate the batch file for *session_id* (race-safe).
+
+    Delegates to ``rewrite_batch`` so the truncation is performed while
+    holding the exclusive lock. Leaves a zero-byte file rather than
+    deleting; ``read_batch`` returns ``[]`` for both cases.
+    """
+    rewrite_batch(session_id, [])
 
 
 # ---------------------------------------------------------------------------
@@ -274,151 +334,3 @@ def utcnow_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
-# ---------------------------------------------------------------------------
-# Cursor transcript parsing
-# ---------------------------------------------------------------------------
-
-# Probe the transcript JSONL with a wide net of token field names. The file
-# format is not publicly documented — this is deliberately permissive so the
-# parser survives schema drift. Returns {} if nothing matches.
-
-_INPUT_TOKEN_KEYS = (
-    "input_tokens", "promptTokens", "prompt_tokens",
-    "inputTokens", "tokens_in",
-)
-_OUTPUT_TOKEN_KEYS = (
-    "output_tokens", "outputTokens", "completionTokens", "completion_tokens",
-    "tokens_out",
-)
-_GENERATION_ID_KEYS = ("generation_id", "generationId", "generationID")
-_MODEL_KEYS = ("model", "resolvedModel", "modelId", "model_id")
-
-
-def _first_key(obj, keys):
-    """Return the first non-empty value from *obj* for any key in *keys*."""
-    if not isinstance(obj, dict):
-        return None
-    for k in keys:
-        v = obj.get(k)
-        if v not in (None, "", 0):
-            return v
-    return None
-
-
-def _scan_usage(obj):
-    """Find input/output token counts anywhere in a nested dict.
-
-    Checks the top level, then ``usage``, then ``metadata``, then any nested
-    dict one level deep. Returns (input_tokens, output_tokens).
-    """
-    if not isinstance(obj, dict):
-        return 0, 0
-
-    candidates = [obj]
-    for key in ("usage", "metadata", "result", "response"):
-        val = obj.get(key)
-        if isinstance(val, dict):
-            candidates.append(val)
-            nested_usage = val.get("usage")
-            if isinstance(nested_usage, dict):
-                candidates.append(nested_usage)
-
-    for cand in candidates:
-        in_tok = _first_key(cand, _INPUT_TOKEN_KEYS)
-        out_tok = _first_key(cand, _OUTPUT_TOKEN_KEYS)
-        if in_tok or out_tok:
-            return int(in_tok or 0), int(out_tok or 0)
-
-    return 0, 0
-
-
-def _scan_generation_id(obj):
-    """Find a generation_id anywhere shallow inside *obj*."""
-    if not isinstance(obj, dict):
-        return ""
-    gid = _first_key(obj, _GENERATION_ID_KEYS)
-    if gid:
-        return str(gid)
-    for key in ("payload", "request", "response", "metadata", "data"):
-        nested = obj.get(key)
-        gid = _first_key(nested, _GENERATION_ID_KEYS) if isinstance(nested, dict) else None
-        if gid:
-            return str(gid)
-    return ""
-
-
-def _scan_model(obj):
-    """Find a model ID anywhere shallow inside *obj*."""
-    if not isinstance(obj, dict):
-        return ""
-    model = _first_key(obj, _MODEL_KEYS)
-    if model:
-        return str(model)
-    for key in ("metadata", "request", "response", "result"):
-        nested = obj.get(key)
-        model = _first_key(nested, _MODEL_KEYS) if isinstance(nested, dict) else None
-        if model:
-            return str(model)
-    return ""
-
-
-def parse_cursor_transcript(transcript_path):
-    """Parse a Cursor transcript JSONL file and return per-turn token data.
-
-    Returns a dict keyed by ``generation_id`` with values
-    ``{ "input_tokens": int, "output_tokens": int, "model": str }``.
-    Returns ``{}`` on any error — the caller is expected to upload the batch
-    regardless so the BE can fall back to a token estimator.
-
-    The Cursor transcript format is not publicly documented; this parser is
-    deliberately defensive and probes a wide set of field names.
-    """
-    if not transcript_path or not os.path.exists(transcript_path):
-        return {}
-
-    try:
-        file_size = os.path.getsize(transcript_path)
-        read_start = max(0, file_size - 200_000)
-        with open(transcript_path, "rb") as tf:
-            if read_start > 0:
-                tf.seek(read_start)
-            raw = tf.read()
-        lines = raw.decode("utf-8", errors="replace").splitlines()
-
-        entries = []
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-
-        if not entries:
-            return {}
-
-        results = {}
-        for entry in entries:
-            gid = _scan_generation_id(entry)
-            if not gid:
-                continue
-            in_tok, out_tok = _scan_usage(entry)
-            if not in_tok and not out_tok:
-                continue
-            model = _scan_model(entry)
-            # Keep the record with the highest output_tokens for a given
-            # generation_id (streaming produces incremental snapshots).
-            prev = results.get(gid)
-            if prev and prev.get("output_tokens", 0) >= out_tok:
-                continue
-            results[gid] = {
-                "input_tokens": in_tok,
-                "output_tokens": out_tok,
-                "model": model,
-            }
-
-        return results
-
-    except Exception:
-        return {}

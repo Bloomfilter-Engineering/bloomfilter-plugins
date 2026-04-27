@@ -17,19 +17,16 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     get_git_branch,
-    parse_cursor_transcript,
     read_batch,
     read_payload,
     resolve_api_key,
     resolve_api_url,
-    rewrite_batch,
     upload_batch,
     utcnow_iso,
 )
 
 UPLOAD_HOOKS = {"stop", "sessionEnd"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
-TRANSCRIPT_HOOKS = {"stop"}
 
 
 def _resolve_project_dir(payload):
@@ -49,32 +46,6 @@ def _resolve_project_dir(payload):
 
 def _resolve_session_id(payload):
     return payload.get("conversation_id") or payload.get("session_id") or ""
-
-
-def _attach_token_summary(entry, token_by_gid):
-    gid = entry.get("payload", {}).get("generation_id", "")
-    if not gid:
-        return False
-    summary_data = token_by_gid.get(gid)
-    if not summary_data:
-        return False
-    existing = entry.get("transcript_summary") or {}
-    existing_calls = existing.get("api_calls", [{}])
-    if existing_calls and any(
-        c.get("input_tokens") or c.get("output_tokens") for c in existing_calls
-    ):
-        return False
-    entry["transcript_summary"] = {
-        "api_calls": [
-            {
-                "input_tokens": summary_data.get("input_tokens", 0),
-                "output_tokens": summary_data.get("output_tokens", 0),
-                "model": summary_data.get("model", ""),
-                "generation_id": gid,
-            }
-        ]
-    }
-    return True
 
 
 def main():
@@ -141,36 +112,6 @@ def main():
                 }
             ]
         }
-
-    if hook_event_name in TRANSCRIPT_HOOKS:
-        transcript_path = (
-            payload.get("transcript_path")
-            or os.environ.get("CURSOR_TRANSCRIPT_PATH", "")
-        )
-        token_by_gid = parse_cursor_transcript(transcript_path)
-
-        if token_by_gid:
-            gid = payload.get("generation_id", "")
-            summary = token_by_gid.get(gid)
-            if summary:
-                envelope["transcript_summary"] = {
-                    "api_calls": [
-                        {
-                            "input_tokens": summary.get("input_tokens", 0),
-                            "output_tokens": summary.get("output_tokens", 0),
-                            "model": summary.get("model", ""),
-                            "generation_id": gid,
-                        }
-                    ]
-                }
-
-            batch_entries = read_batch(session_id)
-            updated = False
-            for e in batch_entries:
-                if _attach_token_summary(e, token_by_gid):
-                    updated = True
-            if updated:
-                rewrite_batch(session_id, batch_entries)
 
     append_to_batch(session_id, envelope)
 
