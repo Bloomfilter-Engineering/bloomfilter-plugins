@@ -16,7 +16,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.0"
+PLUGIN_VERSION = "0.1.1"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
@@ -332,5 +332,3 @@ def upload_batch(api_url, api_key, payload):
 def utcnow_iso():
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
-
-
