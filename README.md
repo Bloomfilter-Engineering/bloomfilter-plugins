@@ -1,6 +1,6 @@
 # bloomfilter-plugins
 
-Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Captures agent events (sessions, tool calls, prompts, responses) and sends them to the Bloomfilter API for observability and analysis.
+Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, Cursor, and Codex. Captures agent events (sessions, tool calls, prompts, responses) and sends them to the Bloomfilter API for observability and analysis.
 
 ## Plugins
 
@@ -9,6 +9,7 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Ca
 | `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-codex` | Codex | `.agents/plugins/marketplace.json` |
 
 ## Install
 
@@ -130,9 +131,50 @@ Open any project and use the Cursor agent -- the plugin activates on `sessionSta
 
 ---
 
+### Codex
+
+#### 1. Add the plugin marketplace
+
+```bash
+codex plugin marketplace add /path/to/bloomfilter-plugins
+```
+
+#### 2. Install the plugin
+
+Open Codex's plugin manager and install **Bloomfilter Agent Miner for Codex** from the Bloomfilter marketplace.
+
+#### 3. Register the hooks with Codex
+
+Codex 0.124 does not yet wire plugin-bundled `hooks.json` into active sessions, so a one-time install step is required to write the hook entries into `~/.codex/hooks.json` with absolute paths:
+
+```bash
+python3 ~/.codex/plugins/cache/bloomfilter-plugins/bloomfilter-agent-miner-codex/*/scripts/install_codex_hooks.py
+```
+
+The script is idempotent and tags its entries so re-running on upgrade refreshes the paths cleanly. Pass `--uninstall` to remove only Bloomfilter entries from `~/.codex/hooks.json`. This step will be removed once Codex supports plugin-contributed hooks natively.
+
+#### 4. Configure your API key
+
+```bash
+mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
+{
+  "api_key": "YOUR_API_KEY",
+  "url": ""
+}
+EOF
+```
+
+The Codex plugin also creates this file automatically on the first `SessionStart` hook if it does not exist.
+
+#### 5. Start using Codex
+
+Open any project in Codex. The plugin captures the supported Codex hooks: `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`. It uploads the accumulated hook batch on `Stop`.
+
+---
+
 ## Configuration
 
-The config file lives at `~/.config/bloomfilter/config.json`. Both plugins share the same config.
+The config file lives at `~/.config/bloomfilter/config.json`. All Bloomfilter Agent Miner plugins share the same config.
 
 The `url` field can be left empty -- it defaults to `https://api.bloomfilter.app`.
 
@@ -149,6 +191,7 @@ You can optionally add a project-level config at `{project}/.bloomfilter/config.
 
 - Python 3.9+
 - VS Code 1.115+ with GitHub Copilot 0.43+ (for Copilot plugin)
+- Codex 0.124.0+ (for Codex plugin hooks)
 
 ### Local setup
 
@@ -180,10 +223,22 @@ cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
 
 Re-copy after any code change (symlinking is not reliable — Cursor's loader did not pick up a symlinked plugin dir in testing).
 
+#### Codex
+
+Register this repo as a local Codex marketplace, then run the hook installer:
+
+```bash
+codex plugin marketplace add /path/to/bloomfilter-plugins
+# install the plugin from Codex's UI, then:
+python3 ~/.codex/plugins/cache/bloomfilter-plugins/bloomfilter-agent-miner-codex/*/scripts/install_codex_hooks.py
+```
+
+After changing plugin files, run `codex plugin marketplace upgrade` (or remove + re-add the marketplace, then reinstall) and re-run `install_codex_hooks.py` so `~/.codex/hooks.json` points at the freshly cached version. This extra step exists only because Codex 0.124 ignores the `hooks` field on plugin manifests; once that lands upstream, the installer goes away.
+
 ### Debugging
 
 - Batch files are stored at `~/.config/bloomfilter/batches/`
-- stderr output from hook scripts appears in VS Code's output channels
+- stderr output from hook scripts appears in the host application's output channels
 
 ### API URL override for testing
 
