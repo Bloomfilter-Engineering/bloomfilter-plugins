@@ -1,8 +1,8 @@
 # bloomfilter-plugins
 
-Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Captures agent events (sessions, tool calls, prompts, responses) and sends them to the Bloomfilter API for observability and analysis.
+Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. The plugins capture agent events such as sessions, prompts, tool calls, responses, and session stops, then send them to Bloomfilter for observability and analysis.
 
-## Plugins
+## Available Plugins
 
 | Plugin | Platform | Marketplace |
 |--------|----------|-------------|
@@ -10,11 +10,141 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Ca
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor | `.cursor-plugin/marketplace.json` |
 
-## Install
+## Setup
+
+Do this once on each machine before installing a plugin.
+
+### Dependencies
+
+- Python 3.9 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
+- A Bloomfilter API key.
+- Git, if you want Git branch metadata captured. The plugins still work without Git.
+- The host application for the plugin you want to use:
+  - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
+  - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
+  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor`.
+
+### macOS Dependencies
+
+Check whether Python is already installed:
+
+```bash
+python3 --version || python --version
+```
+
+If Python is missing, install it with Homebrew:
+
+```bash
+brew install python
+```
+
+If you do not have Homebrew, install Python from <https://www.python.org/downloads/macos/>.
+
+Check whether Git is already installed:
+
+```bash
+git --version
+```
+
+If Git is missing, install Apple's command line tools:
+
+```bash
+xcode-select --install
+```
+
+You can also install Git with Homebrew:
+
+```bash
+brew install git
+```
+
+### Windows Dependencies
+
+Check whether Python is already installed:
+
+```powershell
+python3 --version
+python --version
+```
+
+If either command prints Python 3.9 or newer, you are set. If Python is missing, install it with `winget`:
+
+```powershell
+winget install Python.Python.3.12
+```
+
+You can also install Python from <https://www.python.org/downloads/windows/>. During installation, enable **Add python.exe to PATH**.
+
+Check whether Git is already installed:
+
+```powershell
+git --version
+```
+
+If Git is missing, install it with `winget`:
+
+```powershell
+winget install Git.Git
+```
+
+You can also install Git from <https://git-scm.com/download/win>. Restart PowerShell, Cursor, VS Code, or Claude Code after installing Python or Git so the updated `PATH` is available.
+
+## Configure Your API Key
+
+All Bloomfilter Agent Miner plugins share the same user-level config file. You only need to create it once per machine.
+
+### macOS
+
+```bash
+mkdir -p ~/.config/bloomfilter
+cat > ~/.config/bloomfilter/config.json << 'EOF'
+{
+  "api_key": "YOUR_API_KEY"
+}
+EOF
+chmod 600 ~/.config/bloomfilter/config.json
+```
+
+### Windows
+
+```powershell
+New-Item -ItemType Directory -Force "$env:APPDATA\bloomfilter"
+@'
+{
+  "api_key": "YOUR_API_KEY"
+}
+'@ | Set-Content -Encoding UTF8 "$env:APPDATA\bloomfilter\config.json"
+```
+
+You can also provide the API key with an environment variable.
+
+macOS:
+
+```bash
+export BLOOMFILTER_API_KEY="YOUR_API_KEY"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:BLOOMFILTER_API_KEY = "YOUR_API_KEY"
+```
+
+To make the Windows environment variable persistent:
+
+```powershell
+[Environment]::SetEnvironmentVariable("BLOOMFILTER_API_KEY", "YOUR_API_KEY", "User")
+```
+
+Restart your agent application after changing persistent environment variables.
+
+## Install Plugins
+
+Choose the plugin for the agent platform you use.
 
 ### Claude Code
 
-#### 1. Add the plugin marketplace
+Add the Bloomfilter plugin marketplace:
 
 ```bash
 claude plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
@@ -30,174 +160,84 @@ Or add it manually to your Claude Code settings:
 }
 ```
 
-#### 2. Install the plugin
+Install the plugin:
 
 ```bash
 claude plugin install bloomfilter-agent-miner-claude-code
 ```
 
-#### 3. Configure your API key
-
-```bash
-mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
-{
-  "api_key": "YOUR_API_KEY",
-  "url": ""
-}
-EOF
-```
-
-The plugin will also create this file automatically on first run if it doesn't exist.
-
----
+Open any project in Claude Code. The plugin creates the config file automatically on first run if it does not exist, but you still need to add your API key.
 
 ### VS Code Copilot
-
-#### 1. Add the plugin marketplace
 
 Open your VS Code `settings.json` and add the Bloomfilter marketplace:
 
 ```json
 "chat.plugins.marketplaces": [
-    "Bloomfilter-Engineering/bloomfilter-plugins"
+  "Bloomfilter-Engineering/bloomfilter-plugins"
 ]
 ```
 
-Or open **Settings** and search for `chat.plugins.marketplaces`, then add `Bloomfilter-Engineering/bloomfilter-plugins` as an item.
+Or open **Settings**, search for `chat.plugins.marketplaces`, and add `Bloomfilter-Engineering/bloomfilter-plugins` as an item.
 
-#### 2. Install the plugin
+Install the plugin:
 
-1. Open the Extensions view (`Cmd+Shift+X` / `Ctrl+Shift+X`)
-2. Type `@agentPlugins` in the search field
-3. Find **bloomfilter-agent-miner-copilot** and select **Install**
+1. Open the Extensions view with `Cmd+Shift+X` on macOS or `Ctrl+Shift+X` on Windows.
+2. Type `@agentPlugins` in the search field.
+3. Find **bloomfilter-agent-miner-copilot** and select **Install**.
 
-You can also manage installed plugins from the Chat view by selecting the gear icon > **Plugins**.
-
-#### 3. Configure your API key
-
-```bash
-mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
-{
-  "api_key": "YOUR_API_KEY",
-  "url": ""
-}
-EOF
-```
-
-#### 4. Start using Copilot
-
-Open any project in VS Code with GitHub Copilot -- the plugin activates automatically.
-
----
+Open any project in VS Code with GitHub Copilot. The plugin activates automatically.
 
 ### Cursor
 
-Cursor distributes third-party plugins through **Team Marketplaces**, a feature available on the **Teams (Business)** and **Enterprise** plans. A Cursor org admin adds the Bloomfilter marketplace once; individual users then install from it.
+Cursor distributes third-party plugins through **Team Marketplaces**, a feature available on Teams and Enterprise plans. A Cursor org admin adds the Bloomfilter marketplace once, then users install from it.
 
-> **Plan requirement:** Team Marketplaces require Teams or Enterprise. Free and Pro users should follow the [local development setup](#cursor-1) below.
+Admin setup:
 
-#### 1. Admin — add the Bloomfilter marketplace (one-time, org-wide)
+1. Open the **Cursor Dashboard**.
+2. Go to **Settings** > **Plugins** > **Team Marketplaces** > **Import**.
+3. Paste `https://github.com/Bloomfilter-Engineering/bloomfilter-plugins`.
+4. Confirm that Cursor finds `bloomfilter-agent-miner-cursor`.
+5. Save the marketplace.
+6. Optional but recommended: mark `bloomfilter-agent-miner-cursor` as **required** so it installs automatically for selected Team Access groups.
 
-1. Open the **Cursor Dashboard** → **Settings** → **Plugins** → **Team Marketplaces** → **Import**.
-2. Paste the GitHub URL: `https://github.com/Bloomfilter-Engineering/bloomfilter-plugins`
-3. Review the parsed plugins (Cursor reads `.cursor-plugin/marketplace.json` at the repo root and lists `bloomfilter-agent-miner-cursor`). Optionally scope the marketplace to specific Team Access groups.
-4. Set the marketplace name and description, then **Save**.
-5. (Recommended) Mark `bloomfilter-agent-miner-cursor` as **required** so it auto-installs for every member of the selected Team Access groups.
+User setup:
 
-Reference: [Cursor — Plugins docs](https://cursor.com/docs/plugins#creating-plugins).
+- If the plugin is required by your admin, it installs automatically.
+- Otherwise, open Cursor's **Plugins** panel, find `bloomfilter-agent-miner-cursor` in the Bloomfilter team marketplace, and click **Install**.
 
-#### 2. End-user — install the plugin
+For local development, or for Cursor users on Free or Pro plans, copy the plugin into Cursor's local plugin directory.
 
-- If the admin marked the plugin **required**, it auto-installs — nothing to do.
-- Otherwise, open the **Plugins** panel in Cursor, find **bloomfilter-agent-miner-cursor** under the Bloomfilter team marketplace, and click **Install**. Cursor registers the bundled `hooks/hooks.json` automatically.
-
-#### 3. Configure your API key
-
-```bash
-mkdir -p ~/.config/bloomfilter && cat > ~/.config/bloomfilter/config.json << 'EOF'
-{
-  "api_key": "YOUR_API_KEY",
-  "url": ""
-}
-EOF
-```
-
-The plugin also creates this file automatically on the first `sessionStart` hook.
-
-#### 4. Start using Cursor's agent
-
-Open any project and use the Cursor agent -- the plugin activates on `sessionStart` and uploads the hook batch on every `stop` and `sessionEnd`.
-
----
-
-## Configuration
-
-The config file lives at `~/.config/bloomfilter/config.json`. Both plugins share the same config.
-
-The `url` field can be left empty -- it defaults to `https://api.bloomfilter.app`.
-
-You can optionally add a project-level config at `{project}/.bloomfilter/config.json` for non-secret overrides like `url`. **Do not store API keys in project-level config** -- use the user config or the `BLOOMFILTER_API_KEY` environment variable.
-
-### Environment variable overrides
-
-- `BLOOMFILTER_API_KEY` -- override the API key
-- `BLOOMFILTER_URL` -- override the API URL
-
-## Development
-
-### Prerequisites
-
-- Python 3.9+
-- VS Code 1.115+ with GitHub Copilot 0.43+ (for Copilot plugin)
-
-### Local setup
-
-#### Claude Code
-
-```bash
-claude plugin add /path/to/bloomfilter-plugins/plugins/agent-miner-claude-code
-```
-
-#### VS Code Copilot
-
-Add to your VS Code `settings.json`:
-
-```json
-"chat.pluginLocations": {
-    "/path/to/bloomfilter-plugins/plugins/agent-miner-copilot": true
-}
-```
-
-#### Cursor
-
-For plugin development, or for Cursor users on Free/Pro plans (Team Marketplaces aren't available to them), install the plugin locally. Copy it into Cursor's local-plugin directory, then reload the Cursor window (**Developer: Reload Window**):
+macOS:
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
 cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
-      ~/.cursor/plugins/local/agent-miner-cursor
+  ~/.cursor/plugins/local/agent-miner-cursor
 ```
 
-Re-copy after any code change (symlinking is not reliable — Cursor's loader did not pick up a symlinked plugin dir in testing).
+Windows PowerShell:
 
-### Debugging
-
-- Batch files are stored at `~/.config/bloomfilter/batches/`
-- stderr output from hook scripts appears in VS Code's output channels
-
-### API URL override for testing
-
-Point the plugin at a local API server:
-
-```json
-{
-  "api_key": "your-key",
-  "url": "http://localhost:8000"
-}
+```powershell
+New-Item -ItemType Directory -Force "$env:USERPROFILE\.cursor\plugins\local"
+Copy-Item -Recurse -Force `
+  "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor" `
+  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor"
 ```
 
-Or use an environment variable:
+Reload Cursor after installing or copying the plugin by running **Developer: Reload Window** from the Command Palette.
 
-```bash
-BLOOMFILTER_URL=http://localhost:8000
-```
+## Verify and Debug
+
+Start a session in your agent application, send a prompt, let the agent respond, then stop or end the session. Confirm that data appears in Bloomfilter.
+
+Local batch files are written before upload:
+
+- macOS: `~/.config/bloomfilter/batches/`
+- Windows: `%APPDATA%\bloomfilter\batches\`
+
+If data does not appear in Bloomfilter, check that:
+
+- Python is available from the agent application's environment. Run `python3 --version` or `python --version` to confirm.
+- Your user config contains a valid `api_key`.
+- The plugin is installed and the agent application was restarted or reloaded after installation.

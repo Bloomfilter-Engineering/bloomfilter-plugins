@@ -53,7 +53,7 @@ def main():
     # On SessionStart: bootstrap config and check for API key
     if hook_event_name == "SessionStart":
         bootstrap_config(plugin_root)
-        api_key = resolve_api_key(project_dir)
+        api_key = resolve_api_key()
         if not api_key:
             return
 
@@ -81,11 +81,11 @@ def main():
 
     # Upload on Stop/SessionEnd
     if hook_event_name in UPLOAD_HOOKS:
-        api_key = resolve_api_key(project_dir)
+        api_key = resolve_api_key()
         if not api_key:
             return
 
-        api_url = resolve_api_url(project_dir)
+        api_url = resolve_api_url()
         entries = read_batch(session_id)
         if not entries:
             return
