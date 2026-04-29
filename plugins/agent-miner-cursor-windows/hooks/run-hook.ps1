@@ -8,28 +8,6 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8NoBom
 $OutputEncoding = $utf8NoBom
 
-function Test-PythonVersion {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Executable,
-        [string[]]$Arguments = @()
-    )
-
-    try {
-        $versionOutput = & $Executable @Arguments -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')" 2>$null
-        if ($LASTEXITCODE -ne 0) {
-            return $false
-        }
-
-        $parts = ($versionOutput | Select-Object -First 1).Split(".")
-        $major = [int]$parts[0]
-        $minor = [int]$parts[1]
-        return ($major -gt 3) -or ($major -eq 3 -and $minor -ge 9)
-    } catch {
-        return $false
-    }
-}
-
 function Resolve-Python {
     $candidates = @(
         @{ Command = "py"; Args = @("-3") },
@@ -39,11 +17,7 @@ function Resolve-Python {
 
     foreach ($candidate in $candidates) {
         $command = Get-Command $candidate.Command -ErrorAction SilentlyContinue
-        if (-not $command) {
-            continue
-        }
-
-        if (Test-PythonVersion -Executable $command.Source -Arguments $candidate.Args) {
+        if ($command) {
             return @{
                 Executable = $command.Source
                 Arguments = $candidate.Args
@@ -65,7 +39,7 @@ function Quote-ProcessArgument {
 
 $python = Resolve-Python
 if (-not $python) {
-    [Console]::Error.WriteLine("[bloomfilter] Python 3.9+ was not found; skipping hook collection.")
+    [Console]::Error.WriteLine("[bloomfilter] Python was not found on PATH; skipping hook collection.")
     Write-Output "{}"
     exit 0
 }
