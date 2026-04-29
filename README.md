@@ -21,8 +21,8 @@ Do this once on each machine before installing a plugin.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
-  - VS Code 1.115+ with GitHub Copilot 0.43+ for `bloomfilter-agent-miner-copilot`.
-  - Cursor with Plugins support for `bloomfilter-agent-miner-cursor`.
+  - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
+  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor`.
 
 ### macOS Dependencies
 
