@@ -8,7 +8,8 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 |--------|----------|-------------|
 | `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
-| `bloomfilter-agent-miner-cursor` | Cursor | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
 
 ## Setup
 
@@ -22,7 +23,7 @@ Do this once on each machine before installing a plugin.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
   - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
-  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor`.
+  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
 ### macOS Dependencies
 
@@ -192,19 +193,24 @@ Open any project in VS Code with GitHub Copilot. The plugin activates automatica
 
 Cursor distributes third-party plugins through **Team Marketplaces**, a feature available on Teams and Enterprise plans. A Cursor org admin adds the Bloomfilter marketplace once, then users install from it.
 
+Bloomfilter publishes separate Cursor plugins by operating system:
+
+- Use `bloomfilter-agent-miner-cursor` on macOS and Linux.
+- Use `bloomfilter-agent-miner-cursor-windows` on Windows.
+
 Admin setup:
 
 1. Open the **Cursor Dashboard**.
 2. Go to **Settings** > **Plugins** > **Team Marketplaces** > **Import**.
 3. Paste `https://github.com/Bloomfilter-Engineering/bloomfilter-plugins`.
-4. Confirm that Cursor finds `bloomfilter-agent-miner-cursor`.
+4. Confirm that Cursor finds both `bloomfilter-agent-miner-cursor` and `bloomfilter-agent-miner-cursor-windows`.
 5. Save the marketplace.
-6. Optional but recommended: mark `bloomfilter-agent-miner-cursor` as **required** so it installs automatically for selected Team Access groups.
+6. Optional but recommended: mark the correct OS-specific plugin as **required** so it installs automatically for selected Team Access groups.
 
 User setup:
 
 - If the plugin is required by your admin, it installs automatically.
-- Otherwise, open Cursor's **Plugins** panel, find `bloomfilter-agent-miner-cursor` in the Bloomfilter team marketplace, and click **Install**.
+- Otherwise, open Cursor's **Plugins** panel, find the plugin for your operating system in the Bloomfilter team marketplace, and click **Install**.
 
 For local development, or for Cursor users on Free or Pro plans, copy the plugin into Cursor's local plugin directory.
 
@@ -221,8 +227,8 @@ Windows PowerShell:
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.cursor\plugins\local"
 Copy-Item -Recurse -Force `
-  "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor" `
-  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor"
+  "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor-windows" `
+  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-windows"
 ```
 
 Reload Cursor after installing or copying the plugin by running **Developer: Reload Window** from the Command Palette.
