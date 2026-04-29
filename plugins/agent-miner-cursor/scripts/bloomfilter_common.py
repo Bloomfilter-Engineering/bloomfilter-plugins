@@ -78,13 +78,7 @@ def bootstrap_config(plugin_root):
 
 
 def resolve_api_key():
-    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config.
-
-    Project-level config is intentionally NOT consulted for the API key —
-    project configs live in the repo and can be accidentally committed.
-    The user config (~/.config/bloomfilter/config.json) and the env var
-    are the only supported places to store the API key.
-    """
+    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config."""
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return key

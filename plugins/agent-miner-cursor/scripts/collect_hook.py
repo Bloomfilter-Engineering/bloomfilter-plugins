@@ -19,7 +19,7 @@ from bloomfilter_common import (
 )
 
 UPLOAD_HOOKS = {"stop", "sessionEnd"}
-GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt", "afterAgentResponse"}
+GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
 
 
 def _resolve_project_dir(payload):
