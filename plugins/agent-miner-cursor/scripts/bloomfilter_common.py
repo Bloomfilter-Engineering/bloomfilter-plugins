@@ -77,13 +77,7 @@ def bootstrap_config(plugin_root):
 
 
 def resolve_api_key():
-    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config.
-
-    Project-level config is intentionally NOT consulted for the API key —
-    project configs live in the repo and can be accidentally committed.
-    The user config (~/.config/bloomfilter/config.json) and the env var
-    are the only supported places to store the API key.
-    """
+    """Resolve the API key: env var > user config."""
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return key
@@ -92,20 +86,13 @@ def resolve_api_key():
     return read_json_config(user_config, "api_key")
 
 
-def resolve_api_url(project_dir):
-    """Resolve the API URL: env var > project config > user config > default."""
+def resolve_api_url():
+    """Resolve the API URL: env var > user config > default."""
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
         return env_url
 
-    project_config = os.path.join(project_dir, ".bloomfilter", "config.json")
     user_config = os.path.join(get_config_dir(), "config.json")
-
-    if os.path.isfile(project_config):
-        url = read_json_config(project_config, "url")
-        if url:
-            return url
-
     url = read_json_config(user_config, "url")
     if url:
         return url
@@ -298,8 +285,7 @@ def upload_batch(api_url, api_key, payload):
 
     Validates the URL scheme up front: only http/https are allowed. Other
     schemes (file://, ftp://, gopher://, ...) would otherwise be honoured
-    by urllib.request.urlopen and could be abused if a project-level
-    config supplies a malicious url.
+    by urllib.request.urlopen if a local config supplies a malicious url.
     """
     parsed = urllib.parse.urlparse(api_url or "")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:

@@ -120,7 +120,7 @@ def main():
         if not api_key:
             return
 
-        api_url = resolve_api_url(project_dir)
+        api_url = resolve_api_url()
         entries = read_batch(session_id)
         if not entries:
             return
