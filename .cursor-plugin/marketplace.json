@@ -10,7 +10,7 @@
     {
       "name": "bloomfilter-agent-miner-cursor",
       "source": "./plugins/agent-miner-cursor",
-      "description": "Agent mining hooks for Bloomfilter (Cursor)"
+      "description": "Agent mining hooks for Bloomfilter (Cursor on macOS and Linux)"
     },
     {
       "name": "bloomfilter-agent-miner-cursor-windows",
