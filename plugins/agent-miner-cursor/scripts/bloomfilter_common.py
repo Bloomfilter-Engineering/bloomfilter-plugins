@@ -131,11 +131,39 @@ def read_payload():
 # ---------------------------------------------------------------------------
 
 
+def _resolve_git_executable():
+    """Return a git executable path if available."""
+    git = shutil.which("git")
+    if git:
+        return git
+
+    if platform.system() != "Windows":
+        return ""
+
+    candidates = [
+        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "cmd", "git.exe"),
+        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "bin", "git.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "cmd", "git.exe"),
+        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "bin", "git.exe"),
+        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "cmd", "git.exe"),
+        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "git.exe"),
+    ]
+    for candidate in candidates:
+        if candidate and os.path.isfile(candidate):
+            return candidate
+
+    return ""
+
+
 def get_git_branch(project_dir):
     """Return the current git branch, or '' on failure."""
+    git = _resolve_git_executable()
+    if not git:
+        return ""
+
     try:
         result = subprocess.run(
-            ["git", "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            [git, "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,

@@ -1,10 +1,3 @@
-#!/usr/bin/env python3
-"""Universal hook handler for Bloomfilter agent mining (Cursor).
-
-Collects raw hook payloads, batches them in a JSONL file, and uploads the
-batch to the Bloomfilter API on stop / sessionEnd events.
-"""
-
 import json
 import os
 import sys
@@ -26,7 +19,7 @@ from bloomfilter_common import (
 )
 
 UPLOAD_HOOKS = {"stop", "sessionEnd"}
-GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
+GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt", "afterAgentResponse"}
 
 
 def _resolve_project_dir(payload):
