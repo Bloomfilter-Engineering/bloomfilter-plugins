@@ -69,37 +69,23 @@ def bootstrap_config(plugin_root):
     return config_file
 
 
-def resolve_api_key(project_dir):
-    """Resolve the API key: project config > env var > user config."""
-    project_config = os.path.join(project_dir, ".bloomfilter", "config.json")
-    user_config = os.path.join(get_config_dir(), "config.json")
-
-    if os.path.isfile(project_config):
-        key = read_json_config(project_config, "api_key")
-        if key:
-            return key
-
+def resolve_api_key():
+    """Resolve the API key: env var > user config."""
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return key
 
+    user_config = os.path.join(get_config_dir(), "config.json")
     return read_json_config(user_config, "api_key")
 
 
-def resolve_api_url(project_dir):
-    """Resolve the API URL: env var > project config > user config > default."""
+def resolve_api_url():
+    """Resolve the API URL: env var > user config > default."""
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
         return env_url
 
-    project_config = os.path.join(project_dir, ".bloomfilter", "config.json")
     user_config = os.path.join(get_config_dir(), "config.json")
-
-    if os.path.isfile(project_config):
-        url = read_json_config(project_config, "url")
-        if url:
-            return url
-
     url = read_json_config(user_config, "url")
     if url:
         return url
