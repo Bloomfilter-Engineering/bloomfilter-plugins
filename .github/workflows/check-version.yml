@@ -1,0 +1,72 @@
+name: Check Plugin Version Bump
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Check plugin versions are bumped
+        run: |
+          failed=false
+
+          changed_files=$(git diff --name-only origin/main...HEAD)
+
+          for plugin_dir in plugins/*/; do
+            plugin_json=$(find "$plugin_dir" -maxdepth 2 -type f -name plugin.json \
+              \( -path "*/.claude-plugin/*" -o -path "*/.cursor-plugin/*" \) | head -n1)
+
+            if [ -z "$plugin_json" ]; then
+              echo "⏭ ${plugin_dir} has no plugin.json, skipping"
+              continue
+            fi
+
+            plugin_changes=$(echo "$changed_files" | grep "^${plugin_dir}" | grep -v -E '(README\.md|CHANGELOG\.md|marketplace/)' || true)
+            if [ -z "$plugin_changes" ]; then
+              echo "⏭ ${plugin_dir} has no plugin code changes, skipping version check"
+              continue
+            fi
+
+            pr_version=$(jq -r '.version // empty' "$plugin_json")
+            if [ -z "$pr_version" ]; then
+              echo "⚠ ${plugin_json} has no version field, skipping"
+              continue
+            fi
+
+            if ! git show "origin/main:${plugin_json}" > /dev/null 2>&1; then
+              echo "✓ ${plugin_dir} is a new plugin (no version on main), skipping"
+              continue
+            fi
+
+            main_version=$(git show "origin/main:${plugin_json}" | jq -r '.version // empty')
+            if [ -z "$main_version" ]; then
+              echo "⚠ ${plugin_dir} has no version on main, skipping"
+              continue
+            fi
+
+            if [ "$pr_version" = "$main_version" ]; then
+              echo "✗ ${plugin_dir} version was not bumped (still ${main_version})"
+              failed=true
+            else
+              higher=$(printf '%s\n%s\n' "$main_version" "$pr_version" | sort -V | tail -n1)
+              if [ "$higher" = "$pr_version" ]; then
+                echo "✓ ${plugin_dir} version bumped: ${main_version} → ${pr_version}"
+              else
+                echo "✗ ${plugin_dir} version was downgraded: ${main_version} → ${pr_version}"
+                failed=true
+              fi
+            fi
+          done
+
+          if [ "$failed" = true ]; then
+            echo ""
+            echo "Error: One or more plugins did not have their version bumped."
+            echo "Please update the 'version' field in the affected plugin's plugin.json."
+            exit 1
+          fi

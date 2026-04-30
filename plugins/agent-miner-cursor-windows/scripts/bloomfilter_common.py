@@ -78,7 +78,13 @@ def bootstrap_config(plugin_root):
 
 
 def resolve_api_key():
-    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config."""
+    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config.
+
+    Project-level config is intentionally NOT consulted for the API key —
+    project configs live in the repo and can be accidentally committed.
+    The user config (~/.config/bloomfilter/config.json) and the env var
+    are the only supported places to store the API key.
+    """
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return key
@@ -134,16 +140,18 @@ def _resolve_git_executable():
     if platform.system() != "Windows":
         return ""
 
-    candidates = [
-        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "bin", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "bin", "git.exe"),
-        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "git.exe"),
-    ]
+    candidates = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(os.path.join(base, "Git", "cmd", "git.exe"))
+            candidates.append(os.path.join(base, "Git", "bin", "git.exe"))
+    local_app_data = os.environ.get("LocalAppData")
+    if local_app_data:
+        candidates.append(os.path.join(local_app_data, "Programs", "Git", "cmd", "git.exe"))
+        candidates.append(os.path.join(local_app_data, "Programs", "Git", "bin", "git.exe"))
     for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
+        if os.path.isabs(candidate) and os.path.isfile(candidate):
             return candidate
 
     return ""
@@ -211,7 +219,12 @@ else:
         try:
             fp.seek(0)
             msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
-        except OSError:
+        except OSError as exc:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                "proceeding unsynchronized.",
+                file=sys.stderr,
+            )
             if pos is not None:
                 try:
                     fp.seek(pos)
