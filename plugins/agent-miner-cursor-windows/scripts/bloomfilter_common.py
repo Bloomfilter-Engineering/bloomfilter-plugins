@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
@@ -16,7 +17,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
@@ -337,6 +338,10 @@ def upload_batch(api_url, api_key, payload):
     """
     parsed = urllib.parse.urlparse(api_url or "")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        print(
+            "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
+            file=sys.stderr,
+        )
         return False
 
     try:
@@ -352,9 +357,26 @@ def upload_batch(api_url, api_key, payload):
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
+            status = resp.getcode()
             resp.read()
-        return True
-    except Exception:
+        if status != 201:
+            print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
+        return 200 <= status < 300
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace").strip()
+        reason = getattr(exc, "reason", "")
+        message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
+        if reason:
+            message += f" {reason}"
+        print(message, file=sys.stderr)
+        if body:
+            print(f"[bloomfilter] Upload response body: {body[:500]}", file=sys.stderr)
+        return False
+    except urllib.error.URLError as exc:
+        print(f"[bloomfilter] Upload failed: {exc.reason}", file=sys.stderr)
+        return False
+    except Exception as exc:
+        print(f"[bloomfilter] Upload failed: {exc}", file=sys.stderr)
         return False
 
 

@@ -10,9 +10,9 @@ $OutputEncoding = $utf8NoBom
 
 function Resolve-Python {
     $candidates = @(
-        @{ Command = "py"; Args = @("-3") },
         @{ Command = "python"; Args = @() },
-        @{ Command = "python3"; Args = @() }
+        @{ Command = "python3"; Args = @() },
+        @{ Command = "py"; Args = @("-3") }
     )
 
     foreach ($candidate in $candidates) {
