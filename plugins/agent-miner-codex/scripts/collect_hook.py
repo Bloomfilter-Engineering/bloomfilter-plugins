@@ -135,8 +135,12 @@ def main():
                 envelope["agent_response"] = payload["last_assistant_message"]
 
             api_calls = parsed.get("api_calls") or []
-            if api_calls:
-                envelope["transcript_summary"] = {"api_calls": api_calls}
+            ttft = parsed.get("time_to_first_token_ms")
+            if api_calls or ttft is not None:
+                summary = {"api_calls": api_calls}
+                if ttft is not None:
+                    summary["time_to_first_token_ms"] = ttft
+                envelope["transcript_summary"] = summary
 
             for thinking in parsed.get("thinking_blocks", []) or []:
                 append_to_batch(session_id, {
@@ -148,6 +152,8 @@ def main():
                         "turn_id": turn_id,
                         "encrypted": True,
                         "duration_ms": thinking.get("duration_ms"),
+                        "reasoning_output_tokens": thinking.get("reasoning_output_tokens"),
+                        "api_call_seq": thinking.get("api_call_seq"),
                         "permission_mode": payload.get("permission_mode", ""),
                     },
                 })
@@ -195,6 +201,15 @@ def main():
     append_to_batch(session_id, envelope)
 
     if hook_event_name in UPLOAD_HOOKS:
+        # Codex spawns short-lived utility sessions (e.g. the title generator
+        # that runs gpt-5.4-mini in parallel with the real chat) which fire the
+        # full SessionStart/UserPromptSubmit/Stop sequence but never produce a
+        # rollout. Skip uploading those — they'd land as empty single-turn
+        # sessions with no thinking/tool/file activity.
+        if not transcript_path:
+            clear_batch(session_id)
+            return
+
         api_key = resolve_api_key()
         if not api_key:
             return

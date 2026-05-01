@@ -89,12 +89,14 @@ def parse_turn(path, turn_id):
     current_turn_id = None
     turn_model = ""
     assistant_chunks = []
-    reasoning_starts = []  # list of (timestamp, prev_timestamp_for_duration)
+    reasoning_starts = []  # list of (timestamp, prev_ts, api_call_seq_at_emit)
     function_calls = {}    # call_id -> {timestamp, tool_name, tool_input}
     function_outputs = {}  # call_id -> output string
     exec_meta = {}         # call_id -> {exit_code, duration_ms}
     api_calls = []
     last_event_ts = None   # used to estimate reasoning block duration
+    pending_api_call_seq = 0  # sequence of the next token_count event in this turn
+    time_to_first_token_ms = None  # captured from event_msg.task_complete
 
     def in_turn():
         return current_turn_id == turn_id
@@ -152,6 +154,12 @@ def parse_turn(path, turn_id):
                     "model": turn_model,
                     "reasoning_output_tokens": last.get("reasoning_output_tokens", 0) or 0,
                 })
+                # token_count closes the current API-call window.
+                pending_api_call_seq += 1
+            elif sub == "task_complete":
+                ttft = p.get("time_to_first_token_ms")
+                if isinstance(ttft, (int, float)):
+                    time_to_first_token_ms = int(ttft)
             last_event_ts = ts
 
         elif etype == "response_item":
@@ -164,7 +172,7 @@ def parse_turn(path, turn_id):
                         if text:
                             assistant_chunks.append(text)
             elif sub == "reasoning":
-                reasoning_starts.append((ts, last_event_ts))
+                reasoning_starts.append((ts, last_event_ts, pending_api_call_seq))
             elif sub in ("function_call", "custom_tool_call"):
                 cid = p.get("call_id")
                 if not cid:
@@ -216,11 +224,22 @@ def parse_turn(path, turn_id):
 
     # Build thinking blocks. Duration is best-effort: time between the
     # reasoning's preceding event and the reasoning timestamp itself.
+    # reasoning_output_tokens is the call-level total for the API call this
+    # block belongs to; multiple blocks in the same call share that total —
+    # use api_call_seq to dedupe at aggregation time.
     thinking_blocks = []
-    for ts, prev_ts in reasoning_starts:
+    for ts, prev_ts, call_seq in reasoning_starts:
+        call_idx = call_seq if 0 <= call_seq < len(api_calls) else None
+        reasoning_tokens = (
+            api_calls[call_idx].get("reasoning_output_tokens", 0)
+            if call_idx is not None
+            else 0
+        )
         thinking_blocks.append({
             "timestamp": _to_iso(ts),
             "duration_ms": _ms_between(prev_ts, ts) if prev_ts and ts else None,
+            "api_call_seq": call_idx,
+            "reasoning_output_tokens": reasoning_tokens,
         })
 
     return {
@@ -230,6 +249,7 @@ def parse_turn(path, turn_id):
         "file_edits": file_edits,
         "api_calls": api_calls,
         "model": turn_model,
+        "time_to_first_token_ms": time_to_first_token_ms,
     }
 
 
@@ -241,6 +261,7 @@ def _empty_turn():
         "file_edits": [],
         "api_calls": [],
         "model": "",
+        "time_to_first_token_ms": None,
     }
 
 

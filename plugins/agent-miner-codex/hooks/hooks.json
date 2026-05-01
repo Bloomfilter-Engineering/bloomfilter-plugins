@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py SessionStart",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py SessionStart",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py UserPromptSubmit",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py UserPromptSubmit",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py PreToolUse",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py PreToolUse",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py PermissionRequest",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py PermissionRequest",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py PostToolUse",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py PostToolUse",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CODEX_PLUGIN_ROOT}/scripts/collect_hook.py Stop",
+            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py Stop",
             "timeout": 30
           }
         ]

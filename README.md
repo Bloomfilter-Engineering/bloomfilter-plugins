@@ -7,6 +7,7 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 | Plugin | Platform | Marketplace |
 |--------|----------|-------------|
 | `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
+| `agent-miner-codex` | Codex CLI and desktop app | `.agents/plugins/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
@@ -22,6 +23,7 @@ Do this once on each machine before installing a plugin.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
+  - Codex CLI or Codex desktop app for `agent-miner-codex`.
   - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
@@ -168,6 +170,35 @@ claude plugin install bloomfilter-agent-miner-claude-code
 ```
 
 Open any project in Claude Code. The plugin creates the config file automatically on first run if it does not exist, but you still need to add your API key.
+
+### Codex
+
+Codex hooks are behind feature flags. Enable them before installing the plugin:
+
+```bash
+codex features enable codex_hooks
+codex features enable plugin_hooks
+```
+
+These commands update `~/.codex/config.toml`. You can also edit the file manually:
+
+```toml
+[features]
+codex_hooks = true
+plugin_hooks = true
+```
+
+If your config already has a `[features]` table, add only the two keys inside the existing table when editing manually.
+
+Add the Bloomfilter plugin marketplace with the Codex CLI:
+
+```bash
+codex plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
+```
+
+Open Codex, find **Bloomfilter Agent Miner for Codex** in the plugin marketplace, and install `agent-miner-codex`. Restart Codex after enabling the feature flags or installing the plugin so hook registration is reloaded.
+
+Note: Codex thinking text is encrypted by Codex and is not readable by this plugin.
 
 ### VS Code Copilot
 

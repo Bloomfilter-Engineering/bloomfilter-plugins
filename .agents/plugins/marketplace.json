@@ -5,7 +5,7 @@
   },
   "plugins": [
     {
-      "name": "bloomfilter-agent-miner-codex",
+      "name": "agent-miner-codex",
       "source": {
         "source": "local",
         "path": "./plugins/agent-miner-codex"
