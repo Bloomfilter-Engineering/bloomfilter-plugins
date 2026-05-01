@@ -387,8 +387,8 @@ def parse_apply_patch(text):
 
 def _finalize_hunk(lines):
     """Wrap a list of patch lines in the structured_patch hunk shape."""
-    old_lines = sum(1 for l in lines if l.startswith(("-", " ")))
-    new_lines = sum(1 for l in lines if l.startswith(("+", " ")))
+    old_lines = sum(1 for line in lines if line.startswith(("-", " ")))
+    new_lines = sum(1 for line in lines if line.startswith(("+", " ")))
     return {
         "old_start": 1,
         "new_start": 1,

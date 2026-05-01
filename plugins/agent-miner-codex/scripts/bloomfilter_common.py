@@ -15,8 +15,45 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
+DEBUG_LOG_NAME = "debug.log"
+
+
+def _resolve_debug_log_dir():
+    """Return the directory for debug.log.
+
+    Codex injects ${PLUGIN_DATA} / ${CLAUDE_PLUGIN_DATA} into hook env, pointing
+    at ~/.codex/plugins/data/<marketplace>/<plugin>/. Use that when present so
+    diagnostic logs live alongside other plugin data per Codex convention.
+    Fall back to the bloomfilter config dir for non-hook invocations
+    (manual tests, future tools).
+    """
+    return (
+        os.environ.get("PLUGIN_DATA")
+        or os.environ.get("CLAUDE_PLUGIN_DATA")
+        or get_config_dir()
+    )
+
+
+def debug_log(msg):
+    """Append a timestamped line to <plugin-data>/debug.log.
+
+    Always writes — silent on failure. Intended for ops/diagnostic visibility
+    of hook firing and upload responses without polluting Codex's TUI stderr.
+    """
+    try:
+        log_dir = _resolve_debug_log_dir()
+        secure_makedirs(log_dir)
+        log_path = os.path.join(log_dir, DEBUG_LOG_NAME)
+        line = f"{datetime.now(timezone.utc).isoformat()} {msg}\n"
+        with open(log_path, "a") as f:
+            f.write(line)
+        if platform.system() != "Windows":
+            os.chmod(log_path, stat.S_IRUSR | stat.S_IWUSR)
+    except Exception:
+        # Logger must never crash the hook.
+        pass
 
 
 def get_config_dir():
@@ -240,14 +277,25 @@ def clear_batch(session_id):
 
 
 def upload_batch(api_url, api_key, payload):
-    """POST a raw hook batch to the Bloomfilter API."""
+    """POST a raw hook batch to the Bloomfilter API.
+
+    Logs request URL, response status, and (truncated) body to the debug log.
+    Returns True on 2xx, False otherwise.
+    """
     parsed = urllib.parse.urlparse(api_url or "")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        debug_log(f"upload_batch: skipped — invalid api_url={api_url!r}")
         return False
+
+    url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
+    session_id = payload.get("session_id", "?") if isinstance(payload, dict) else "?"
+    hook_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
+    debug_log(
+        f"upload_batch: POST {url} session_id={session_id} hooks={hook_count}"
+    )
 
     try:
         data = json.dumps(payload).encode("utf-8")
-        url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
         req = urllib.request.Request(
             url,
             data=data,
@@ -258,9 +306,23 @@ def upload_batch(api_url, api_key, payload):
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-        return True
-    except Exception:
+            status = resp.status
+            body = resp.read().decode("utf-8", errors="replace")
+        debug_log(
+            f"upload_batch: response status={status} body={body[:500]!r}"
+        )
+        return 200 <= status < 300
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = ""
+        debug_log(
+            f"upload_batch: HTTPError status={e.code} body={body[:500]!r}"
+        )
+        return False
+    except Exception as e:
+        debug_log(f"upload_batch: error={type(e).__name__}: {e}")
         return False
 
 

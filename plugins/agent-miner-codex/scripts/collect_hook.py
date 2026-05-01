@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-"""Universal hook handler for Bloomfilter agent mining (Codex)."""
-
 import os
 import sys
 
@@ -11,6 +8,7 @@ from bloomfilter_common import (
     append_to_batch,
     bootstrap_config,
     clear_batch,
+    debug_log,
     get_git_branch,
     read_batch,
     read_payload,
@@ -105,7 +103,11 @@ def main():
 
     # Enrich SessionStart with rollout-level metadata (cli_version, originator).
     # The rollout file usually exists by the time SessionStart fires.
-    if hook_event_name in SESSION_META_HOOKS and transcript_path and os.path.isfile(transcript_path):
+    if (
+        hook_event_name in SESSION_META_HOOKS
+        and transcript_path
+        and os.path.isfile(transcript_path)
+    ):
         try:
             meta = parse_session_meta(transcript_path)
         except Exception:
@@ -143,59 +145,75 @@ def main():
                 envelope["transcript_summary"] = summary
 
             for thinking in parsed.get("thinking_blocks", []) or []:
-                append_to_batch(session_id, {
-                    "hook_event_name": "Thinking",
-                    "received_at": thinking.get("timestamp") or envelope["received_at"],
-                    "plugin_version": PLUGIN_VERSION,
-                    "payload": {
-                        "session_id": session_id,
-                        "turn_id": turn_id,
-                        "encrypted": True,
-                        "duration_ms": thinking.get("duration_ms"),
-                        "reasoning_output_tokens": thinking.get("reasoning_output_tokens"),
-                        "api_call_seq": thinking.get("api_call_seq"),
-                        "permission_mode": payload.get("permission_mode", ""),
+                append_to_batch(
+                    session_id,
+                    {
+                        "hook_event_name": "Thinking",
+                        "received_at": thinking.get("timestamp")
+                        or envelope["received_at"],
+                        "plugin_version": PLUGIN_VERSION,
+                        "payload": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "encrypted": True,
+                            "duration_ms": thinking.get("duration_ms"),
+                            "reasoning_output_tokens": thinking.get(
+                                "reasoning_output_tokens"
+                            ),
+                            "api_call_seq": thinking.get("api_call_seq"),
+                            "permission_mode": payload.get("permission_mode", ""),
+                        },
                     },
-                })
+                )
 
             for tool in parsed.get("tool_calls", []) or []:
-                append_to_batch(session_id, {
-                    "hook_event_name": "ToolCall",
-                    "received_at": tool.get("timestamp") or envelope["received_at"],
-                    "plugin_version": PLUGIN_VERSION,
-                    "payload": {
-                        "session_id": session_id,
-                        "turn_id": turn_id,
-                        "tool_name": tool.get("tool_name", ""),
-                        "tool_input": tool.get("tool_input"),
-                        "tool_output": tool.get("tool_output"),
-                        "tool_call_id": tool.get("tool_call_id", ""),
-                        "exit_code": tool.get("exit_code"),
-                        "duration_ms": tool.get("duration_ms"),
-                        "permission_mode": payload.get("permission_mode", ""),
+                append_to_batch(
+                    session_id,
+                    {
+                        "hook_event_name": "ToolCall",
+                        "received_at": tool.get("timestamp") or envelope["received_at"],
+                        "plugin_version": PLUGIN_VERSION,
+                        "payload": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "tool_name": tool.get("tool_name", ""),
+                            "tool_input": tool.get("tool_input"),
+                            "tool_output": tool.get("tool_output"),
+                            "tool_call_id": tool.get("tool_call_id", ""),
+                            "exit_code": tool.get("exit_code"),
+                            "duration_ms": tool.get("duration_ms"),
+                            "permission_mode": payload.get("permission_mode", ""),
+                        },
                     },
-                })
+                )
 
             for edit in parsed.get("file_edits", []) or []:
-                append_to_batch(session_id, {
-                    "hook_event_name": "FileEdit",
-                    "received_at": edit.get("timestamp") or envelope["received_at"],
-                    "plugin_version": PLUGIN_VERSION,
-                    "payload": {
-                        "session_id": session_id,
-                        "turn_id": turn_id,
-                        "tool_name": "apply_patch",
-                        "tool_call_id": edit.get("tool_call_id", ""),
-                        "file_path": edit.get("file_path", ""),
-                        "file_action": edit.get("file_action", "MODIFY"),
-                        "structured_patch": edit.get("structured_patch", []),
-                        "permission_mode": payload.get("permission_mode", ""),
+                append_to_batch(
+                    session_id,
+                    {
+                        "hook_event_name": "FileEdit",
+                        "received_at": edit.get("timestamp") or envelope["received_at"],
+                        "plugin_version": PLUGIN_VERSION,
+                        "payload": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "tool_name": "apply_patch",
+                            "tool_call_id": edit.get("tool_call_id", ""),
+                            "file_path": edit.get("file_path", ""),
+                            "file_action": edit.get("file_action", "MODIFY"),
+                            "structured_patch": edit.get("structured_patch", []),
+                            "permission_mode": payload.get("permission_mode", ""),
+                        },
                     },
-                })
+                )
 
     # Fall back to last_assistant_message if the rollout didn't provide one
     # (early Stop, missing transcript, etc.).
-    if hook_event_name == "Stop" and "agent_response" not in envelope and payload.get("last_assistant_message"):
+    if (
+        hook_event_name == "Stop"
+        and "agent_response" not in envelope
+        and payload.get("last_assistant_message")
+    ):
         envelope["agent_response"] = payload["last_assistant_message"]
 
     append_to_batch(session_id, envelope)
@@ -207,15 +225,21 @@ def main():
         # rollout. Skip uploading those — they'd land as empty single-turn
         # sessions with no thinking/tool/file activity.
         if not transcript_path:
+            debug_log(
+                f"upload skipped: session_id={session_id} "
+                "reason=utility-session-no-transcript_path"
+            )
             clear_batch(session_id)
             return
 
         api_key = resolve_api_key()
         if not api_key:
+            debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
             return
 
         entries = read_batch(session_id)
         if not entries:
+            debug_log(f"upload skipped: session_id={session_id} reason=empty-batch")
             return
 
         api_url = resolve_api_url(project_dir)
