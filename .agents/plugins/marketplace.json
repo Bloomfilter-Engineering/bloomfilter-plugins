@@ -1,0 +1,20 @@
+{
+  "name": "bloomfilter-plugins",
+  "interface": {
+    "displayName": "Bloomfilter Plugins"
+  },
+  "plugins": [
+    {
+      "name": "agent-miner-codex",
+      "source": {
+        "source": "local",
+        "path": "./plugins/agent-miner-codex"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Engineering"
+    }
+  ]
+}
