@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 import os
 import sys
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -9,8 +12,8 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    freeze_batch,
     get_git_branch,
-    read_batch,
     read_payload,
     resolve_api_key,
     resolve_api_url,
@@ -19,7 +22,7 @@ from bloomfilter_common import (
 )
 from codex_rollout import parse_session_meta, parse_turn
 
-SUPPORTED_HOOKS = {
+SUPPORTED_HOOKS: set[str] = {
     "SessionStart",
     "UserPromptSubmit",
     "PreToolUse",
@@ -27,24 +30,28 @@ SUPPORTED_HOOKS = {
     "PostToolUse",
     "Stop",
 }
-UPLOAD_HOOKS = {"Stop"}
-GIT_BRANCH_HOOKS = {"SessionStart", "UserPromptSubmit"}
-TRANSCRIPT_EXTRACT_HOOKS = {"Stop"}
-SESSION_META_HOOKS = {"SessionStart"}
+UPLOAD_HOOKS: set[str] = {"Stop"}
+GIT_BRANCH_HOOKS: set[str] = {"SessionStart", "UserPromptSubmit"}
+TRANSCRIPT_EXTRACT_HOOKS: set[str] = {"Stop"}
+SESSION_META_HOOKS: set[str] = {"SessionStart"}
 
 
-def _first_string(values):
-    for value in values:
-        if isinstance(value, str) and value:
-            return value
+def _first_string(candidates: list[Any]) -> str:
+    """Return the first non-empty string from a list, else ''."""
+    for candidate in candidates:
+        if isinstance(candidate, str) and candidate:
+            return candidate
     return ""
 
 
-def _resolve_project_dir(payload):
+def _resolve_project_dir(payload: dict[str, Any]) -> str:
+    """Pick the most reliable signal of the user's working directory."""
     workspace_roots = payload.get("workspace_roots") or payload.get("workspaceRoots")
-    root = ""
+    first_workspace_root: str = ""
     if isinstance(workspace_roots, list) and workspace_roots:
-        root = workspace_roots[0] if isinstance(workspace_roots[0], str) else ""
+        first_workspace_root = (
+            workspace_roots[0] if isinstance(workspace_roots[0], str) else ""
+        )
 
     return _first_string(
         [
@@ -52,13 +59,14 @@ def _resolve_project_dir(payload):
             payload.get("project_dir", ""),
             os.environ.get("CODEX_PROJECT_DIR", ""),
             os.environ.get("CLAUDE_PROJECT_DIR", ""),
-            root,
+            first_workspace_root,
             os.getcwd(),
         ]
     )
 
 
-def _resolve_session_id(payload):
+def _resolve_session_id(payload: dict[str, Any]) -> str:
+    """Pick the session identifier from the payload, preferring `session_id`."""
     return _first_string(
         [
             payload.get("session_id", ""),
@@ -68,7 +76,7 @@ def _resolve_session_id(payload):
     )
 
 
-def main():
+def main() -> None:
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if hook_event_name not in SUPPORTED_HOOKS:
         return
@@ -85,7 +93,7 @@ def main():
         bootstrap_config(plugin_root)
         clear_batch(session_id)
 
-    envelope = {
+    envelope: dict[str, Any] = {
         "hook_event_name": hook_event_name,
         "received_at": utcnow_iso(),
         "plugin_version": PLUGIN_VERSION,
@@ -109,12 +117,12 @@ def main():
         and os.path.isfile(transcript_path)
     ):
         try:
-            meta = parse_session_meta(transcript_path)
+            session_metadata = parse_session_meta(transcript_path)
         except Exception:
-            meta = {}
-        for key, value in meta.items():
-            if value:
-                payload[key] = value
+            session_metadata = {}
+        for metadata_key, metadata_value in session_metadata.items():
+            if metadata_value:
+                payload[metadata_key] = metadata_value
 
     # On Stop, parse the rollout for the just-finished turn and inject the
     # data the BE config can't get from raw hook payloads (assistant_text,
@@ -126,82 +134,89 @@ def main():
         and os.path.isfile(transcript_path)
     ):
         try:
-            parsed = parse_turn(transcript_path, turn_id)
+            parsed_turn: dict[str, Any] | None = parse_turn(transcript_path, turn_id)
         except Exception:
-            parsed = None
-        if parsed:
-            assistant_text = parsed.get("assistant_text") or ""
+            parsed_turn = None
+        if parsed_turn:
+            assistant_text = parsed_turn.get("assistant_text") or ""
             if assistant_text:
                 envelope["agent_response"] = assistant_text
             elif payload.get("last_assistant_message"):
                 envelope["agent_response"] = payload["last_assistant_message"]
 
-            api_calls = parsed.get("api_calls") or []
-            ttft = parsed.get("time_to_first_token_ms")
-            if api_calls or ttft is not None:
-                summary = {"api_calls": api_calls}
-                if ttft is not None:
-                    summary["time_to_first_token_ms"] = ttft
-                envelope["transcript_summary"] = summary
+            api_calls = parsed_turn.get("api_calls") or []
+            time_to_first_token_ms = parsed_turn.get("time_to_first_token_ms")
+            if api_calls or time_to_first_token_ms is not None:
+                transcript_summary: dict[str, Any] = {"api_calls": api_calls}
+                if time_to_first_token_ms is not None:
+                    transcript_summary["time_to_first_token_ms"] = (
+                        time_to_first_token_ms
+                    )
+                envelope["transcript_summary"] = transcript_summary
 
-            for thinking in parsed.get("thinking_blocks", []) or []:
+            for thinking_block in parsed_turn.get("thinking_blocks", []) or []:
                 append_to_batch(
                     session_id,
                     {
                         "hook_event_name": "Thinking",
-                        "received_at": thinking.get("timestamp")
-                        or envelope["received_at"],
+                        "received_at": (
+                            thinking_block.get("timestamp") or envelope["received_at"]
+                        ),
                         "plugin_version": PLUGIN_VERSION,
                         "payload": {
                             "session_id": session_id,
                             "turn_id": turn_id,
                             "encrypted": True,
-                            "duration_ms": thinking.get("duration_ms"),
-                            "reasoning_output_tokens": thinking.get(
+                            "duration_ms": thinking_block.get("duration_ms"),
+                            "reasoning_output_tokens": thinking_block.get(
                                 "reasoning_output_tokens"
                             ),
-                            "api_call_seq": thinking.get("api_call_seq"),
+                            "api_call_seq": thinking_block.get("api_call_seq"),
                             "permission_mode": payload.get("permission_mode", ""),
                         },
                     },
                 )
 
-            for tool in parsed.get("tool_calls", []) or []:
+            for tool_call in parsed_turn.get("tool_calls", []) or []:
                 append_to_batch(
                     session_id,
                     {
                         "hook_event_name": "ToolCall",
-                        "received_at": tool.get("timestamp") or envelope["received_at"],
+                        "received_at": (
+                            tool_call.get("timestamp") or envelope["received_at"]
+                        ),
                         "plugin_version": PLUGIN_VERSION,
                         "payload": {
                             "session_id": session_id,
                             "turn_id": turn_id,
-                            "tool_name": tool.get("tool_name", ""),
-                            "tool_input": tool.get("tool_input"),
-                            "tool_output": tool.get("tool_output"),
-                            "tool_call_id": tool.get("tool_call_id", ""),
-                            "exit_code": tool.get("exit_code"),
-                            "duration_ms": tool.get("duration_ms"),
+                            "tool_name": tool_call.get("tool_name", ""),
+                            "tool_input": tool_call.get("tool_input"),
+                            "tool_output": tool_call.get("tool_output"),
+                            "tool_call_id": tool_call.get("tool_call_id", ""),
+                            "exit_code": tool_call.get("exit_code"),
+                            "duration_ms": tool_call.get("duration_ms"),
                             "permission_mode": payload.get("permission_mode", ""),
                         },
                     },
                 )
 
-            for edit in parsed.get("file_edits", []) or []:
+            for file_edit in parsed_turn.get("file_edits", []) or []:
                 append_to_batch(
                     session_id,
                     {
                         "hook_event_name": "FileEdit",
-                        "received_at": edit.get("timestamp") or envelope["received_at"],
+                        "received_at": (
+                            file_edit.get("timestamp") or envelope["received_at"]
+                        ),
                         "plugin_version": PLUGIN_VERSION,
                         "payload": {
                             "session_id": session_id,
                             "turn_id": turn_id,
                             "tool_name": "apply_patch",
-                            "tool_call_id": edit.get("tool_call_id", ""),
-                            "file_path": edit.get("file_path", ""),
-                            "file_action": edit.get("file_action", "MODIFY"),
-                            "structured_patch": edit.get("structured_patch", []),
+                            "tool_call_id": file_edit.get("tool_call_id", ""),
+                            "file_path": file_edit.get("file_path", ""),
+                            "file_action": file_edit.get("file_action", "MODIFY"),
+                            "structured_patch": file_edit.get("structured_patch", []),
                             "permission_mode": payload.get("permission_mode", ""),
                         },
                     },
@@ -237,22 +252,29 @@ def main():
             debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
             return
 
-        entries = read_batch(session_id)
-        if not entries:
+        # Atomic read+truncate under lock so we don't race with concurrent
+        # appenders and don't re-upload previous turns' events on every Stop.
+        batch_entries = freeze_batch(session_id)
+        if not batch_entries:
             debug_log(f"upload skipped: session_id={session_id} reason=empty-batch")
             return
 
         api_url = resolve_api_url(project_dir)
-        upload_batch(
+        upload_succeeded = upload_batch(
             api_url,
             api_key,
             {
                 "session_id": session_id,
                 "source": "codex",
                 "plugin_version": PLUGIN_VERSION,
-                "hooks": entries,
+                "hooks": batch_entries,
             },
         )
+
+        # On failure, re-append so the next Stop retries with the new entries.
+        if not upload_succeeded:
+            for entry in batch_entries:
+                append_to_batch(session_id, entry)
 
 
 if __name__ == "__main__":
