@@ -6,16 +6,26 @@ from typing import Any, Iterator
 
 
 def _read_lines(path: str) -> Iterator[dict[str, Any]]:
-    """Yield each non-empty JSON object from a rollout JSONL file."""
-    with open(path) as rollout_file:
+    """Yield each non-empty JSON object from a rollout JSONL file.
+
+    Codex writes rollouts as UTF-8 from its Rust core; we open explicitly so
+    Windows users with non-UTF-8 locales don't fall back to cp1252 etc.
+    `errors="replace"` keeps a single bad byte from killing the whole parse —
+    affected lines just fail JSON decoding (caught below) and are skipped.
+    Non-object JSON values (arrays/scalars) are filtered out so callers can
+    rely on dict-shaped entries.
+    """
+    with open(path, encoding="utf-8", errors="replace") as rollout_file:
         for raw_line in rollout_file:
             stripped_line = raw_line.strip()
             if not stripped_line:
                 continue
             try:
-                yield json.loads(stripped_line)
+                parsed_value = json.loads(stripped_line)
             except (json.JSONDecodeError, ValueError):
                 continue
+            if isinstance(parsed_value, dict):
+                yield parsed_value
 
 
 def _parse_iso(timestamp_string: str | None) -> datetime | None:
