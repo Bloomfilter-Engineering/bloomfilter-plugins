@@ -70,10 +70,10 @@ python3 --version
 python --version
 ```
 
-If either command prints Python 3.10 or newer, you are set. If Python is missing, install it with `winget`:
+If either command prints Python 3.13 or newer, you are set. If Python is missing, install it with `winget`:
 
 ```powershell
-winget install Python.Python.3.12
+winget install Python.Python.3.13
 ```
 
 You can also install Python from <https://www.python.org/downloads/windows/>. During installation, enable **Add python.exe to PATH**.
