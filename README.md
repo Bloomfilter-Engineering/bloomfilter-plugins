@@ -18,7 +18,7 @@ Do this once on each machine before installing a plugin.
 
 ### Dependencies
 
-- Python 3.10 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
+- Python 3.13 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
 - A Bloomfilter API key.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
