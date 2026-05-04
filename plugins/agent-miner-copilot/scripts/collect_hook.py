@@ -92,8 +92,7 @@ def main():
         # previous turn whose transcript entry hasn't been superseded yet.
         batch_entries = read_batch(session_id)
         expected_turns = sum(
-            1 for e in batch_entries
-            if e.get("hook_event_name") == "UserPromptSubmit"
+            1 for e in batch_entries if e.get("hook_event_name") == "UserPromptSubmit"
         )
 
         # Two transcript locations with different timing and data:
@@ -120,22 +119,18 @@ def main():
             if payload_path:
                 parsed = parse_copilot_transcript(payload_path)
                 requests = parsed.get("requests", [])
-                if (len(requests) >= expected_turns
-                        and requests[-1].get("response_content")):
+                if len(requests) >= expected_turns and requests[-1].get(
+                    "response_content"
+                ):
                     break
             time.sleep(0.5)
             waited += 0.5
 
         requests = parsed.get("requests", []) if parsed else []
-        have_current_turn = (
-            len(requests) >= expected_turns
-            and requests[-1].get("response_content")
+        have_current_turn = len(requests) >= expected_turns and requests[-1].get(
+            "response_content"
         )
-        current_req = (
-            requests[-1]
-            if len(requests) >= expected_turns
-            else None
-        )
+        current_req = requests[-1] if len(requests) >= expected_turns else None
 
         # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
         chat_path = (
@@ -219,8 +214,7 @@ def main():
                 summary = e.get("transcript_summary", {})
                 calls = summary.get("api_calls", [{}])
                 has_tokens = any(
-                    c.get("input_tokens") or c.get("output_tokens")
-                    for c in calls
+                    c.get("input_tokens") or c.get("output_tokens") for c in calls
                 )
                 if e.get("agent_response") and has_tokens:
                     continue  # already complete
@@ -238,8 +232,7 @@ def main():
                                 "input_tokens": rec.get("input_tokens", 0),
                                 "output_tokens": rec.get("output_tokens", 0),
                                 "model": (
-                                    rec.get("resolvedModel")
-                                    or rec.get("modelId", "")
+                                    rec.get("resolvedModel") or rec.get("modelId", "")
                                 ),
                                 "request_id": rec.get("requestId", ""),
                                 "response_id": rec.get("responseId", ""),
@@ -258,9 +251,7 @@ def main():
                 thinking_hook = {
                     "hook_event_name": "Thinking",
                     "received_at": (
-                        datetime.fromtimestamp(
-                            ts / 1000, tz=timezone.utc
-                        ).isoformat()
+                        datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
                         if ts
                         else envelope["received_at"]
                     ),

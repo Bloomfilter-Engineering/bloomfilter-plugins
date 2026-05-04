@@ -9,6 +9,7 @@ from bloomfilter_common import (
     append_to_batch,
     bootstrap_config,
     clear_batch,
+    debug_log,
     get_git_branch,
     read_batch,
     read_payload,
@@ -44,11 +45,22 @@ def _resolve_session_id(payload):
 def main():
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
+        debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
         return
 
     payload = read_payload()
+    if not isinstance(payload, dict):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=non-object-payload "
+            f"type={type(payload).__name__}"
+        )
+        return
     session_id = _resolve_session_id(payload)
     if not session_id:
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=no-session-id "
+            f"(payload missing conversation_id/session_id)"
+        )
         return
 
     # Cursor ships postToolUse tool_output as a JSON-encoded string; decode
@@ -69,6 +81,11 @@ def main():
         clear_batch(session_id)
         api_key = resolve_api_key()
         if not api_key:
+            debug_log(
+                f"hook skipped: hook=sessionStart session_id={session_id} "
+                "reason=no-api-key (config.json missing api_key and "
+                "BLOOMFILTER_API_KEY unset)"
+            )
             return
 
     envelope = {
@@ -111,11 +128,19 @@ def main():
     if hook_event_name in UPLOAD_HOOKS:
         api_key = resolve_api_key()
         if not api_key:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=no-api-key"
+            )
             return
 
         api_url = resolve_api_url()
         entries = read_batch(session_id)
         if not entries:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=empty-batch"
+            )
             return
 
         batch_payload = {
@@ -134,6 +159,10 @@ if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
+        debug_log(
+            f"collect_hook: unhandled exception type={type(exc).__name__} "
+            f"message={exc!s}"
+        )
         print(f"[bloomfilter] collect_hook failed: {exc}", file=sys.stderr)
     # Empty JSON on stdout — signals Cursor to proceed without modification.
     print("{}")
