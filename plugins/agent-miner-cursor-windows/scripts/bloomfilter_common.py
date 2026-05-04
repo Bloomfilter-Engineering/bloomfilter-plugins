@@ -417,6 +417,19 @@ def clear_batch(session_id):
 # ---------------------------------------------------------------------------
 
 
+def _sanitize_url_for_log(url):
+    """Return scheme://host[:port]/path — drops userinfo, query, and fragment.
+
+    debug.log is user-local but lives next to config.json; sanitization keeps
+    embedded credentials or signed query params out of the rotating log.
+    """
+    parts = urllib.parse.urlsplit(url or "")
+    netloc = parts.hostname or ""
+    if parts.port:
+        netloc = f"{netloc}:{parts.port}"
+    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+
+
 def upload_batch(api_url, api_key, payload):
     """POST raw hook batch to the Bloomfilter API. Returns True on success.
 
@@ -424,13 +437,16 @@ def upload_batch(api_url, api_key, payload):
     schemes (file://, ftp://, gopher://, ...) would otherwise be honoured
     by urllib.request.urlopen if a local config supplies a malicious url.
 
-    Network interactions are logged to <plugin-data>/debug.log: the request
-    URL + session_id + hook count, the response status + truncated body,
-    and any HTTPError / URLError / unexpected exception.
+    Network interactions are logged to <plugin-data>/debug.log: the sanitized
+    request URL + session_id + hook count, the response status (and body
+    length on HTTPError), and any HTTPError / URLError / unexpected exception.
     """
     parsed = urllib.parse.urlparse(api_url or "")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        debug_log(f"upload_batch: skipped — invalid api_url={api_url!r}")
+        debug_log(
+            "upload_batch: skipped — invalid api_url "
+            f"scheme={parsed.scheme!r} host={parsed.hostname!r}"
+        )
         print(
             "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
             file=sys.stderr,
@@ -438,8 +454,10 @@ def upload_batch(api_url, api_key, payload):
         return False
 
     full_url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
+    safe_url = _sanitize_url_for_log(full_url)
     session_id = payload.get("session_id", "?") if isinstance(payload, dict) else "?"
-    hook_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
+    raw_hooks = payload.get("hooks", []) if isinstance(payload, dict) else []
+    hook_count = len(raw_hooks) if isinstance(raw_hooks, (list, tuple)) else 0
 
     try:
         data = json.dumps(payload).encode("utf-8")
@@ -451,7 +469,7 @@ def upload_batch(api_url, api_key, payload):
         return False
 
     debug_log(
-        f"upload_batch: sending POST {full_url} session_id={session_id} "
+        f"upload_batch: sending POST {safe_url} session_id={session_id} "
         f"hooks={hook_count} bytes={len(data)}"
     )
 
