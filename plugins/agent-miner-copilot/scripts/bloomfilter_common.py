@@ -9,7 +9,7 @@ import urllib.request
 import contextlib
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
