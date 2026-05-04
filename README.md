@@ -18,7 +18,7 @@ Do this once on each machine before installing a plugin.
 
 ### Dependencies
 
-- Python 3.10 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
+- Python 3.13 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
 - A Bloomfilter API key.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
@@ -70,10 +70,10 @@ python3 --version
 python --version
 ```
 
-If either command prints Python 3.10 or newer, you are set. If Python is missing, install it with `winget`:
+If either command prints Python 3.13 or newer, you are set. If Python is missing, install it with `winget`:
 
 ```powershell
-winget install Python.Python.3.12
+winget install Python.Python.3.13
 ```
 
 You can also install Python from <https://www.python.org/downloads/windows/>. During installation, enable **Add python.exe to PATH**.
