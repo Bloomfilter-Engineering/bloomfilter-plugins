@@ -1,11 +1,14 @@
 import contextlib
 import json
+import logging
+import logging.handlers
 import os
 import platform
 import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -17,8 +20,13 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
+DEBUG_LOG_NAME = "debug.log"
+DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
+DEBUG_LOG_BACKUP_COUNT = 1  # keep one rotated backup → ~2 MB max on disk
+
+_debug_logger = None  # Lazy-init singleton; populated on first debug_log() call.
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +51,74 @@ def secure_makedirs(path):
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
         os.chmod(path, stat.S_IRWXU)  # 0o700
+
+
+# ---------------------------------------------------------------------------
+# Debug logging
+# ---------------------------------------------------------------------------
+
+
+def _resolve_debug_log_dir():
+    """Return the directory for debug.log.
+
+    Cursor / Claude / Codex inject a plugin data dir env var when present.
+    Fall back to the bloomfilter config dir so the log lives next to the
+    user's batches and config.json (~/.config/bloomfilter on macOS/Linux).
+    """
+    return (
+        os.environ.get("PLUGIN_DATA")
+        or os.environ.get("CURSOR_PLUGIN_DATA")
+        or os.environ.get("CLAUDE_PLUGIN_DATA")
+        or get_config_dir()
+    )
+
+
+def _build_debug_logger():
+    """Construct the private debug logger backed by RotatingFileHandler.
+
+    Uses a dedicated logger name with propagate=False so it cannot affect
+    (or be affected by) other code that uses the stdlib logging module.
+    """
+    log_dir = _resolve_debug_log_dir()
+    secure_makedirs(log_dir)
+    log_path = os.path.join(log_dir, DEBUG_LOG_NAME)
+
+    logger = logging.getLogger("bloomfilter.debug")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+
+    if not logger.handlers:
+        handler = logging.handlers.RotatingFileHandler(
+            log_path,
+            maxBytes=DEBUG_LOG_MAX_BYTES,
+            backupCount=DEBUG_LOG_BACKUP_COUNT,
+            encoding="utf-8",
+        )
+        formatter = logging.Formatter(
+            fmt="%(asctime)s.%(msecs)03dZ %(message)s",
+            datefmt="%Y-%m-%dT%H:%M:%S",
+        )
+        formatter.converter = time.gmtime  # UTC timestamps
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+
+    return logger
+
+
+def debug_log(message):
+    """Append a timestamped line to <plugin-data>/debug.log.
+
+    Backed by ``logging.handlers.RotatingFileHandler``: 1 MB per file with one
+    rotated backup, so disk usage is capped at ~2 MB. Silent on failure — the
+    logger must never crash a hook.
+    """
+    global _debug_logger
+    try:
+        if _debug_logger is None:
+            _debug_logger = _build_debug_logger()
+        _debug_logger.info(message)
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -140,8 +216,12 @@ def _resolve_git_executable():
         os.path.join(os.environ.get("ProgramFiles", ""), "Git", "bin", "git.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "cmd", "git.exe"),
         os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "bin", "git.exe"),
-        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "git.exe"),
+        os.path.join(
+            os.environ.get("LocalAppData", ""), "Programs", "Git", "cmd", "git.exe"
+        ),
+        os.path.join(
+            os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "git.exe"
+        ),
     ]
     for candidate in candidates:
         if candidate and os.path.isfile(candidate):
@@ -322,20 +402,41 @@ def upload_batch(api_url, api_key, payload):
     Validates the URL scheme up front: only http/https are allowed. Other
     schemes (file://, ftp://, gopher://, ...) would otherwise be honoured
     by urllib.request.urlopen if a local config supplies a malicious url.
+
+    Network interactions are logged to <plugin-data>/debug.log: the request
+    URL + session_id + hook count, the response status + truncated body,
+    and any HTTPError / URLError / unexpected exception.
     """
     parsed = urllib.parse.urlparse(api_url or "")
     if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        debug_log(f"upload_batch: skipped — invalid api_url={api_url!r}")
         print(
             "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
             file=sys.stderr,
         )
         return False
 
+    full_url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
+    session_id = payload.get("session_id", "?") if isinstance(payload, dict) else "?"
+    hook_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
+
     try:
         data = json.dumps(payload).encode("utf-8")
-        url = f"{api_url}/api/agent-sessions/hooks/"
+    except (TypeError, ValueError) as exc:
+        debug_log(
+            f"upload_batch: skipped — payload not JSON-serializable "
+            f"session_id={session_id} error={type(exc).__name__}: {exc}"
+        )
+        return False
+
+    debug_log(
+        f"upload_batch: sending POST {full_url} session_id={session_id} "
+        f"hooks={hook_count} bytes={len(data)}"
+    )
+
+    try:
         req = urllib.request.Request(
-            url,
+            full_url,
             data=data,
             headers={
                 "Content-Type": "application/json",
@@ -345,13 +446,24 @@ def upload_batch(api_url, api_key, payload):
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.getcode()
-            resp.read()
+            body = resp.read().decode("utf-8", errors="replace")
+        debug_log(
+            f"upload_batch: response status={status} session_id={session_id} "
+            f"body={body[:500]!r}"
+        )
         if status != 201:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
         return 200 <= status < 300
     except urllib.error.HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace").strip()
+        try:
+            body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            body = ""
         reason = getattr(exc, "reason", "")
+        debug_log(
+            f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
+            f"session_id={session_id} body={body[:500]!r}"
+        )
         message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
         if reason:
             message += f" {reason}"
@@ -360,9 +472,16 @@ def upload_batch(api_url, api_key, payload):
             print(f"[bloomfilter] Upload response body: {body[:500]}", file=sys.stderr)
         return False
     except urllib.error.URLError as exc:
+        debug_log(
+            f"upload_batch: URLError session_id={session_id} reason={exc.reason!r}"
+        )
         print(f"[bloomfilter] Upload failed: {exc.reason}", file=sys.stderr)
         return False
     except Exception as exc:
+        debug_log(
+            f"upload_batch: error session_id={session_id} "
+            f"type={type(exc).__name__} message={exc!s}"
+        )
         print(f"[bloomfilter] Upload failed: {exc}", file=sys.stderr)
         return False
 
