@@ -25,6 +25,7 @@ DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
 DEBUG_LOG_BACKUP_COUNT = 1  # keep one rotated backup → ~2 MB max on disk
+DEBUG_LOG_TAG = "cursor-windows"  # disambiguates plugins sharing the same log dir
 
 _debug_logger = None  # Lazy-init singleton; populated on first debug_log() call.
 
@@ -90,7 +91,7 @@ def _build_debug_logger():
             encoding="utf-8",
         )
         formatter = logging.Formatter(
-            fmt="%(asctime)s.%(msecs)03dZ %(message)s",
+            fmt=f"%(asctime)s.%(msecs)03dZ [{DEBUG_LOG_TAG}] %(message)s",
             datefmt="%Y-%m-%dT%H:%M:%S",
         )
         formatter.converter = time.gmtime  # UTC timestamps
@@ -466,10 +467,8 @@ def upload_batch(api_url, api_key, payload):
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
         debug_log(
-            f"upload_batch: response status={status} session_id={session_id} "
-            f"body={body[:500]!r}"
+            f"upload_batch: response status={status} session_id={session_id}"
         )
         if status != 201:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
@@ -482,7 +481,7 @@ def upload_batch(api_url, api_key, payload):
         reason = getattr(exc, "reason", "")
         debug_log(
             f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
-            f"session_id={session_id} body={body[:500]!r}"
+            f"session_id={session_id} body_chars={len(body)}"
         )
         message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
         if reason:

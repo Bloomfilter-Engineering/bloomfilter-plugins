@@ -49,6 +49,12 @@ def main():
         return
 
     payload = read_payload()
+    if not isinstance(payload, dict):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=non-object-payload "
+            f"type={type(payload).__name__}"
+        )
+        return
     session_id = _resolve_session_id(payload)
     if not session_id:
         debug_log(
