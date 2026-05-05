@@ -87,7 +87,8 @@ def read_json_config(config_path: str, key: str, default: str = "") -> str:
     """
     try:
         with open(config_path, "r", encoding="utf-8-sig") as config_file:
-            return json.load(config_file).get(key, default) or default
+            value = json.load(config_file).get(key, default)
+            return value if isinstance(value, str) and value else default
     except Exception:
         return default
 
