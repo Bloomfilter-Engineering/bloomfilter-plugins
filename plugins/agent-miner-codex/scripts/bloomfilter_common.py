@@ -19,7 +19,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION: str = "0.1.0"
+PLUGIN_VERSION: str = "0.1.1"
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
 DEBUG_LOG_TAG: str = "codex"  # disambiguates plugins sharing the same log dir
