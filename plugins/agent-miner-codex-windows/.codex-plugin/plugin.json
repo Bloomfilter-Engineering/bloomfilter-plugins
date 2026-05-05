@@ -1,7 +1,7 @@
 {
-  "name": "agent-miner-codex",
-  "version": "0.1.1",
-  "description": "Agent mining hooks for Bloomfilter (Codex)",
+  "name": "agent-miner-codex-windows",
+  "version": "0.1.0",
+  "description": "Agent mining hooks for Bloomfilter (Codex on Windows)",
   "author": {
     "name": "Bloomfilter Engineering"
   },
@@ -12,13 +12,14 @@
     "bloomfilter",
     "codex",
     "agent-observability",
-    "hooks"
+    "hooks",
+    "windows"
   ],
   "hooks": "./hooks/hooks.json",
   "interface": {
-    "displayName": "Bloomfilter Agent Miner for Codex",
-    "shortDescription": "Capture Codex hook events for Bloomfilter observability",
-    "longDescription": "Collects supported Codex hook events, batches them locally by session, and uploads them to Bloomfilter for observability and analysis.",
+    "displayName": "Bloomfilter Agent Miner for Codex (Windows)",
+    "shortDescription": "Capture Codex hook events for Bloomfilter observability (Windows)",
+    "longDescription": "Collects supported Codex hook events on Windows, batches them locally by session, and uploads them to Bloomfilter for observability and analysis.",
     "developerName": "Bloomfilter Engineering",
     "category": "Engineering",
     "capabilities": [

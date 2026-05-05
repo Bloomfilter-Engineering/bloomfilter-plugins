@@ -7,7 +7,8 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 | Plugin | Platform | Marketplace |
 |--------|----------|-------------|
 | `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
-| `agent-miner-codex` | Codex CLI and desktop app | `.agents/plugins/marketplace.json` |
+| `agent-miner-codex` | Codex on macOS and Linux | `.agents/plugins/marketplace.json` |
+| `agent-miner-codex-windows` | Codex on Windows | `.agents/plugins/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
@@ -23,7 +24,7 @@ Do this once on each machine before installing a plugin.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
-  - Codex CLI or Codex desktop app for `agent-miner-codex`.
+  - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
   - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
@@ -173,6 +174,13 @@ Open any project in Claude Code. The plugin creates the config file automaticall
 
 ### Codex
 
+Bloomfilter publishes separate Codex plugins by operating system:
+
+- Use `agent-miner-codex` on macOS and Linux.
+- Use `agent-miner-codex-windows` on Windows.
+
+The setup commands below are identical on every OS; only the plugin you install differs.
+
 Codex hooks are behind feature flags. Enable them before installing the plugin:
 
 ```bash
@@ -196,7 +204,12 @@ Add the Bloomfilter plugin marketplace with the Codex CLI:
 codex plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
 ```
 
-Open Codex, find **Bloomfilter Agent Miner for Codex** in the plugin marketplace, and install `agent-miner-codex`. Restart Codex after enabling the feature flags or installing the plugin so hook registration is reloaded.
+Open Codex and find the Bloomfilter plugins in the marketplace:
+
+- On macOS or Linux, install **Bloomfilter Agent Miner for Codex** (`agent-miner-codex`).
+- On Windows, install **Bloomfilter Agent Miner for Codex (Windows)** (`agent-miner-codex-windows`).
+
+Restart Codex after enabling the feature flags or installing the plugin so hook registration is reloaded.
 
 Note: Codex thinking text is encrypted by Codex and is not readable by this plugin.
 
