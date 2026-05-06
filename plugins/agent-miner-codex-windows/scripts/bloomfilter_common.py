@@ -19,10 +19,10 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION: str = "0.1.1"
+PLUGIN_VERSION: str = "0.1.0"
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
-DEBUG_LOG_TAG: str = "codex"  # disambiguates plugins sharing the same log dir
+DEBUG_LOG_TAG: str = "codex-windows"  # disambiguates plugins sharing the same log dir
 
 
 def _resolve_debug_log_dir() -> str:
@@ -79,9 +79,14 @@ def secure_makedirs(directory_path: str) -> None:
 
 
 def read_json_config(config_path: str, key: str, default: str = "") -> str:
-    """Safely read a single key from a JSON config file."""
+    """Safely read a single key from a JSON config file.
+
+    Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
+    UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
+    snippet uses exactly that, so user-created configs land here BOM-prefixed.
+    """
     try:
-        with open(config_path, "r") as config_file:
+        with open(config_path, "r", encoding="utf-8-sig") as config_file:
             value = json.load(config_file).get(key, default)
             return value if isinstance(value, str) and value else default
     except Exception:

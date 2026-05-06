@@ -20,7 +20,7 @@ jobs:
 
           for plugin_dir in plugins/*/; do
             plugin_json=$(find "$plugin_dir" -maxdepth 2 -type f -name plugin.json \
-              \( -path "*/.claude-plugin/*" -o -path "*/.cursor-plugin/*" \) | head -n1)
+              \( -path "*/.claude-plugin/*" -o -path "*/.cursor-plugin/*" -o -path "*/.codex-plugin/*" \) | head -n1)
 
             if [ -z "$plugin_json" ]; then
               echo "⏭ ${plugin_dir} has no plugin.json, skipping"
