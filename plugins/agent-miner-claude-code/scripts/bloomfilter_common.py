@@ -5,11 +5,15 @@ import shutil
 import stat
 import subprocess
 import sys
+import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.1"
+PLUGIN_VERSION = "0.1.2"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
+DEBUG_LOG_NAME = "debug.log"
+DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
 
 
 # ---------------------------------------------------------------------------
@@ -34,6 +38,42 @@ def secure_makedirs(path):
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
         os.chmod(path, stat.S_IRWXU)  # 0o700
+
+
+# ---------------------------------------------------------------------------
+# Debug logging
+# ---------------------------------------------------------------------------
+
+
+def _resolve_debug_log_dir():
+    """Return the directory for debug.log.
+
+    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux).
+    Claude Code injects CLAUDE_PLUGIN_DATA pointing at ~/.claude/plugins/data/...,
+    but we deliberately ignore it so debug.log lives next to the user's
+    config.json and batches/ — one well-known place to look for diagnostics
+    across all plugins.
+    """
+    return get_config_dir()
+
+
+def debug_log(message):
+    """Append a timestamped line to <bloomfilter-config>/debug.log.
+
+    macOS/Linux only — Windows is out of scope for this plugin.
+    Silent on failure — the logger must never crash a hook.
+    """
+    try:
+        log_dir = _resolve_debug_log_dir()
+        secure_makedirs(log_dir)
+        log_path = os.path.join(log_dir, DEBUG_LOG_NAME)
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        line = f"{timestamp} [{DEBUG_LOG_TAG}] {message}\n"
+        with open(log_path, "a") as log_file:
+            log_file.write(line)
+        os.chmod(log_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -193,10 +233,43 @@ def rewrite_batch(session_id, entries):
 
 
 def upload_batch(api_url, api_key, payload):
-    """POST raw hook batch to the Bloomfilter API. Returns True on success."""
+    """POST raw hook batch to the Bloomfilter API. Returns True on 2xx.
+
+    Validates the URL scheme up front: only http/https are allowed.
+
+    Network interactions are logged to <bloomfilter-config>/debug.log: the
+    request URL + session_id + hook count + payload bytes, the response
+    status + truncated body, and any HTTPError / URLError / unexpected
+    exception.
+    """
+    parsed = urllib.parse.urlparse(api_url or "")
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        debug_log(f"upload_batch: skipped — invalid api_url={api_url!r}")
+        print(
+            "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
+            file=sys.stderr,
+        )
+        return False
+
+    url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
+    session_id = payload.get("session_id", "?") if isinstance(payload, dict) else "?"
+    hook_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
+
     try:
         data = json.dumps(payload).encode("utf-8")
-        url = f"{api_url}/api/agent-sessions/hooks/"
+    except (TypeError, ValueError) as exc:
+        debug_log(
+            f"upload_batch: skipped — payload not JSON-serializable "
+            f"session_id={session_id} error={type(exc).__name__}: {exc}"
+        )
+        return False
+
+    debug_log(
+        f"upload_batch: sending POST {url} session_id={session_id} "
+        f"hooks={hook_count} bytes={len(data)}"
+    )
+
+    try:
         req = urllib.request.Request(
             url,
             data=data,
@@ -207,9 +280,44 @@ def upload_batch(api_url, api_key, payload):
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
-            resp.read()
-        return True
-    except Exception:
+            status = resp.getcode()
+            body = resp.read().decode("utf-8", errors="replace")
+        debug_log(
+            f"upload_batch: response status={status} session_id={session_id} "
+            f"body={body[:500]!r}"
+        )
+        if status != 201:
+            print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
+        return 200 <= status < 300
+    except urllib.error.HTTPError as exc:
+        try:
+            err_body = exc.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            err_body = ""
+        reason = getattr(exc, "reason", "")
+        debug_log(
+            f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
+            f"session_id={session_id} body={err_body[:500]!r}"
+        )
+        message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
+        if reason:
+            message += f" {reason}"
+        print(message, file=sys.stderr)
+        if err_body:
+            print(f"[bloomfilter] Upload response body: {err_body[:500]}", file=sys.stderr)
+        return False
+    except urllib.error.URLError as exc:
+        debug_log(
+            f"upload_batch: URLError session_id={session_id} reason={exc.reason!r}"
+        )
+        print(f"[bloomfilter] Upload failed: {exc.reason}", file=sys.stderr)
+        return False
+    except Exception as exc:
+        debug_log(
+            f"upload_batch: error session_id={session_id} "
+            f"type={type(exc).__name__} message={exc!s}"
+        )
+        print(f"[bloomfilter] Upload failed: {exc}", file=sys.stderr)
         return False
 
 
