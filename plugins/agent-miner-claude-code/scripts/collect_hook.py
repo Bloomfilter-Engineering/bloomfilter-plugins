@@ -17,6 +17,7 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    extract_thread_id,
     extract_transcript_summary,
     get_git_branch,
     read_batch,
@@ -58,6 +59,19 @@ def main():
         )
         return
 
+    # Claude Code on the web rotates session_id on every resume. The transcript
+    # JSONL keeps the original sessionId on every entry, so we use that as the
+    # stable thread key for batch files and the uploaded session_id. The
+    # current (rotating) session_id is preserved on the envelope and payload
+    # so the backend can still see per-resume granularity.
+    transcript_path = payload.get("transcript_path", "")
+    thread_id = extract_thread_id(transcript_path) or session_id
+    if thread_id != session_id:
+        debug_log(
+            f"thread resolved: hook={hook_event_name} "
+            f"session_id={session_id} thread_id={thread_id}"
+        )
+
     project_dir = payload.get("cwd", "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
     plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -78,6 +92,8 @@ def main():
         "hook_event_name": hook_event_name,
         "received_at": utcnow_iso(),
         "plugin_version": PLUGIN_VERSION,
+        "session_id": session_id,
+        "thread_id": thread_id,
         "payload": payload,
     }
 
@@ -87,35 +103,35 @@ def main():
 
     # Extract transcript token summary on Stop
     if hook_event_name in TRANSCRIPT_HOOKS:
-        transcript_path = payload.get("transcript_path", "")
         summary = extract_transcript_summary(transcript_path)
         if summary:
             envelope["transcript_summary"] = summary
 
-    # Append to batch file
-    append_to_batch(session_id, envelope)
+    # Append to batch file keyed by thread_id so resumes merge with the original
+    append_to_batch(thread_id, envelope)
 
     # Upload on Stop/SessionEnd
     if hook_event_name in UPLOAD_HOOKS:
         api_key = resolve_api_key()
         if not api_key:
             debug_log(
-                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                f"upload skipped: hook={hook_event_name} thread_id={thread_id} "
                 "reason=no-api-key"
             )
             return
 
         api_url = resolve_api_url()
-        entries = read_batch(session_id)
+        entries = read_batch(thread_id)
         if not entries:
             debug_log(
-                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                f"upload skipped: hook={hook_event_name} thread_id={thread_id} "
                 "reason=empty-batch"
             )
             return
 
         batch_payload = {
-            "session_id": session_id,
+            "session_id": thread_id,
+            "current_session_id": session_id,
             "source": "claude_code",
             "plugin_version": PLUGIN_VERSION,
             "hooks": entries,
@@ -124,7 +140,7 @@ def main():
         success = upload_batch(api_url, api_key, batch_payload)
         if success and hook_event_name == "SessionEnd":
             # Only delete batch file on SessionEnd success
-            clear_batch(session_id)
+            clear_batch(thread_id)
 
 
 if __name__ == "__main__":

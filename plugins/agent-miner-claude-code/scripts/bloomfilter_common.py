@@ -10,7 +10,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -334,6 +334,26 @@ def utcnow_iso():
 # ---------------------------------------------------------------------------
 # Token extraction (kept client-side — transcript is a local file)
 # ---------------------------------------------------------------------------
+
+
+def extract_thread_id(transcript_path):
+    """Return the original session_id from a transcript, or '' on failure.
+
+    Claude Code on the web rotates session_id on every resume but preserves
+    the original sessionId inside the transcript JSONL entries. Reading the
+    first entry recovers the stable thread anchor so resumed sessions get
+    batched and uploaded under the same key as the original session.
+    """
+    if not transcript_path or not os.path.exists(transcript_path):
+        return ""
+    try:
+        with open(transcript_path, "r") as f:
+            first_line = f.readline().strip()
+        if not first_line:
+            return ""
+        return json.loads(first_line).get("sessionId", "") or ""
+    except Exception:
+        return ""
 
 
 def extract_transcript_summary(transcript_path):
