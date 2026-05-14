@@ -11,6 +11,11 @@
       "name": "bloomfilter-agent-miner-claude-code",
       "source": "./plugins/agent-miner-claude-code",
       "description": "Agent mining hooks for Bloomfilter (Claude Code)"
+    },
+    {
+      "name": "bloomfilter-agent-miner-claude-code-windows",
+      "source": "./plugins/agent-miner-claude-code-windows",
+      "description": "Agent mining hooks for Bloomfilter (Claude Code on Windows)"
     }
   ]
 }
