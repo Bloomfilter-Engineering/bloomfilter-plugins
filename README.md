@@ -6,7 +6,8 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 
 | Plugin | Platform | Marketplace |
 |--------|----------|-------------|
-| `bloomfilter-agent-miner-claude-code` | Claude Code CLI | `.claude-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-claude-code` | Claude Code CLI on macOS and Linux | `.claude-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-claude-code-windows` | Claude Code CLI on Windows | `.claude-plugin/marketplace.json` |
 | `agent-miner-codex` | Codex on macOS and Linux | `.agents/plugins/marketplace.json` |
 | `agent-miner-codex-windows` | Codex on Windows | `.agents/plugins/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
@@ -23,7 +24,7 @@ Do this once on each machine before installing a plugin.
 - A Bloomfilter API key.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
-  - Claude Code CLI for `bloomfilter-agent-miner-claude-code`.
+  - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (macOS / Linux) or `bloomfilter-agent-miner-claude-code-windows` (Windows).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
   - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
@@ -148,6 +149,13 @@ Choose the plugin for the agent platform you use.
 
 ### Claude Code
 
+Bloomfilter publishes separate Claude Code plugins by operating system:
+
+- Use `bloomfilter-agent-miner-claude-code` on macOS and Linux.
+- Use `bloomfilter-agent-miner-claude-code-windows` on Windows.
+
+The setup commands below are identical on every OS; only the plugin you install differs.
+
 Add the Bloomfilter plugin marketplace:
 
 ```bash
@@ -164,10 +172,14 @@ Or add it manually to your Claude Code settings:
 }
 ```
 
-Install the plugin:
+Install the plugin for your operating system:
 
 ```bash
+# macOS / Linux
 claude plugin install bloomfilter-agent-miner-claude-code
+
+# Windows
+claude plugin install bloomfilter-agent-miner-claude-code-windows
 ```
 
 Open any project in Claude Code. The plugin creates the config file automatically on first run if it does not exist, but you still need to add your API key.
