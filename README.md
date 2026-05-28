@@ -10,7 +10,7 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 | `bloomfilter-agent-miner-claude-code-windows` | Claude Code CLI on Windows | `.claude-plugin/marketplace.json` |
 | `agent-miner-codex` | Codex on macOS and Linux | `.agents/plugins/marketplace.json` |
 | `agent-miner-codex-windows` | Codex on Windows | `.agents/plugins/marketplace.json` |
-| `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-copilot` | VS Code Copilot and Copilot CLI | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
 
@@ -26,7 +26,7 @@ Do this once on each machine before installing a plugin.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (macOS / Linux) or `bloomfilter-agent-miner-claude-code-windows` (Windows).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
-  - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
+  - VS Code 1.115+ (Copilot extension) or GitHub Copilot CLI 1.0.54+ for `bloomfilter-agent-miner-copilot`.
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
 ### macOS Dependencies
@@ -244,6 +244,19 @@ Install the plugin:
 3. Find **bloomfilter-agent-miner-copilot** and select **Install**.
 
 Open any project in VS Code with GitHub Copilot. The plugin activates automatically.
+
+### Copilot CLI
+
+Requires GitHub Copilot CLI 1.0.54 or newer. Check with `copilot --version` and run `copilot update` to upgrade.
+
+Add the Bloomfilter marketplace and install the plugin:
+
+```bash
+copilot plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
+copilot plugin install bloomfilter-agent-miner-copilot@bloomfilter-plugins
+```
+
+The plugin activates automatically. Verify with `copilot plugin list`.
 
 ### Cursor
 
