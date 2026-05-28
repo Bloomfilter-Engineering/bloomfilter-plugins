@@ -9,7 +9,7 @@ import urllib.request
 import contextlib
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.2"
+PLUGIN_VERSION = "0.1.3"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 
 
@@ -104,6 +104,36 @@ def read_payload():
         sys.stdin.reconfigure(encoding="utf-8")
     raw = sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
+
+
+# ---------------------------------------------------------------------------
+# Process spawning
+# ---------------------------------------------------------------------------
+
+
+def spawn_detached(args):
+    """Launch *args* as a fully detached background process.
+
+    Returns immediately. The child is decoupled from the parent's stdio and
+    placed in its own session/process group, so it survives the parent (the
+    hook) exiting and never blocks it. Returns True if the spawn succeeded.
+    """
+    try:
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "close_fds": True,
+        }
+        if platform.system() == "Windows":
+            # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+            kwargs["creationflags"] = 0x00000008 | 0x00000200
+        else:
+            kwargs["start_new_session"] = True
+        subprocess.Popen(args, **kwargs)
+        return True
+    except Exception:
+        return False
 
 
 # ---------------------------------------------------------------------------

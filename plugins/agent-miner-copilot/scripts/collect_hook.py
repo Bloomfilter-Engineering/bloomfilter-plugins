@@ -27,6 +27,7 @@ from bloomfilter_common import (
     resolve_api_key,
     resolve_api_url,
     rewrite_batch,
+    spawn_detached,
     upload_batch,
     utcnow_iso,
 )
@@ -43,8 +44,132 @@ TRANSCRIPT_EXTRACT_HOOKS = {"Stop"}
 # Hooks where we bootstrap config (SessionStart may not fire)
 BOOTSTRAP_HOOKS = {"SessionStart", "UserPromptSubmit"}
 
+# Background re-upload tuning. VS Code flushes the chatSessions token/model
+# metadata ~10-22s after Stop (measured), so we poll with early-exit up to a
+# generous cap. Because the worker is detached, this wait never blocks the hook.
+REUPLOAD_POLL_INTERVAL = 1.5
+REUPLOAD_MAX_WAIT = 90.0
+
+
+def _chat_path_for_session(session_id, batch_entries):
+    """Resolve the chatSessions path for a session from its batch entries."""
+    for entry in batch_entries:
+        transcript_path = entry.get("payload", {}).get("transcript_path", "")
+        chat_path = derive_chat_sessions_path(transcript_path)
+        if chat_path:
+            return chat_path
+    return find_copilot_transcript(session_id)
+
+
+def _overlay_chat_onto_stops(batch_entries, chat_requests):
+    """Overlay exact response/tokens/model from chatSessions onto every Stop
+    entry, matched in turn order (Nth Stop <-> Nth request record).
+
+    Returns True if any entry changed.
+    """
+    updated = False
+    rec_idx = 0
+    for idx, entry in enumerate(batch_entries):
+        if entry.get("hook_event_name") != "Stop":
+            continue
+        if rec_idx >= len(chat_requests):
+            break
+        rec = chat_requests[rec_idx]
+        rec_idx += 1
+
+        changed = False
+        if rec.get("response_content") and not entry.get("agent_response"):
+            entry["agent_response"] = rec["response_content"]
+            changed = True
+        if rec.get("reasoning_text") and not entry.get("reasoning_text"):
+            entry["reasoning_text"] = rec["reasoning_text"]
+            changed = True
+        if rec.get("userMessage") and not entry.get("user_message"):
+            entry["user_message"] = rec["userMessage"]
+            changed = True
+        if rec.get("input_tokens") or rec.get("output_tokens"):
+            entry["transcript_summary"] = {
+                "api_calls": [
+                    {
+                        "input_tokens": rec.get("input_tokens", 0),
+                        "output_tokens": rec.get("output_tokens", 0),
+                        "model": rec.get("resolvedModel") or rec.get("modelId", ""),
+                        "request_id": rec.get("requestId", ""),
+                        "response_id": rec.get("responseId", ""),
+                    }
+                ]
+            }
+            changed = True
+        if changed:
+            batch_entries[idx] = entry
+            updated = True
+    return updated
+
+
+def run_reupload_worker(session_id):
+    """Detached worker: wait for VS Code to flush the chatSessions token/model
+    metadata, then overlay exact data onto every turn and re-upload.
+
+    Runs in its own process (see spawn_detached) so it never blocks the Stop
+    hook. The backend's update_or_create makes the re-upload idempotent, and
+    exact token counts clear any earlier estimate.
+    """
+    api_key = resolve_api_key()
+    if not api_key:
+        return
+
+    batch_entries = read_batch(session_id)
+    n_stops = sum(1 for e in batch_entries if e.get("hook_event_name") == "Stop")
+    if n_stops == 0:
+        return
+
+    chat_path = _chat_path_for_session(session_id, batch_entries)
+    if not chat_path:
+        return
+
+    # Poll until the last turn's tokens are flushed (early-exit), or until the
+    # budget is exhausted.
+    chat_requests = []
+    waited = 0.0
+    while waited <= REUPLOAD_MAX_WAIT:
+        parsed = parse_copilot_transcript(chat_path)
+        chat_requests = parsed.get("requests", [])
+        if len(chat_requests) >= n_stops:
+            last = chat_requests[n_stops - 1]
+            if last.get("input_tokens") or last.get("output_tokens"):
+                break
+        time.sleep(REUPLOAD_POLL_INTERVAL)
+        waited += REUPLOAD_POLL_INTERVAL
+
+    if not chat_requests:
+        return
+
+    # Re-read the batch (turns may have been appended while polling), overlay
+    # exact data onto all Stop turns, persist, and re-upload the full session.
+    batch_entries = read_batch(session_id)
+    if not batch_entries:
+        return
+    if _overlay_chat_onto_stops(batch_entries, chat_requests):
+        rewrite_batch(session_id, batch_entries)
+
+    api_url = resolve_api_url()
+    batch_payload = {
+        "session_id": session_id,
+        "source": "copilot",
+        "plugin_version": PLUGIN_VERSION,
+        "hooks": batch_entries,
+    }
+    upload_batch(api_url, api_key, batch_payload)
+
 
 def main():
+    # Detached background re-upload worker entrypoint.
+    if len(sys.argv) > 1 and sys.argv[1] == "__reupload":
+        session_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        if session_id:
+            run_reupload_worker(session_id)
+        return
+
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
         return
@@ -291,6 +416,21 @@ def main():
         }
 
         upload_batch(api_url, api_key, batch_payload)
+
+        # If this turn shipped without exact token data (VS Code flushes the
+        # chatSessions metadata ~10-22s after Stop), hand off to a detached
+        # worker that waits for the flush and re-uploads with exact
+        # tokens/model. Non-blocking: the hook returns immediately.
+        summary = envelope.get("transcript_summary", {})
+        calls = summary.get("api_calls", [{}])
+        has_tokens = any(
+            c.get("input_tokens") or c.get("output_tokens") for c in calls
+        )
+        if not has_tokens:
+            python_exe = sys.executable or "python3"
+            spawn_detached(
+                [python_exe, os.path.abspath(__file__), "__reupload", session_id]
+            )
 
 
 if __name__ == "__main__":
