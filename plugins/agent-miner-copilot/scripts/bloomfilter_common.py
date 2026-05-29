@@ -9,7 +9,9 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import contextlib
+from collections.abc import Iterator
 from datetime import datetime, timezone
+from typing import Any
 
 PLUGIN_VERSION = "0.1.3"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
@@ -38,7 +40,7 @@ _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
 }
 
 
-def normalize_hook_payload(payload):
+def normalize_hook_payload(payload: dict[str, Any]) -> dict[str, Any]:
     """Translate camelCase hook payload keys to snake_case in-place.
 
     Non-destructive: a snake_case key already present is never overwritten;
@@ -53,7 +55,7 @@ def normalize_hook_payload(payload):
     return payload
 
 
-def detect_runtime(payload):
+def detect_runtime(payload: dict[str, Any]) -> str:
     """Identify which Copilot runtime fired this hook.
 
     Returns ``"copilot-cli"`` or ``"copilot-vscode"``. The strongest signal
@@ -91,7 +93,7 @@ def detect_runtime(payload):
 # ---------------------------------------------------------------------------
 
 
-def get_config_dir():
+def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform."""
     system = platform.system()
     if system == "Windows":
@@ -103,7 +105,7 @@ def get_config_dir():
     return os.path.join(xdg, "bloomfilter")
 
 
-def secure_makedirs(path):
+def secure_makedirs(path: str) -> None:
     """Create directories with owner-only permissions on Unix."""
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
@@ -115,7 +117,7 @@ def secure_makedirs(path):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_debug_log_dir():
+def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
     Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux).
@@ -126,7 +128,7 @@ def _resolve_debug_log_dir():
     return get_config_dir()
 
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     """Append a timestamped line to <bloomfilter-config>/debug.log.
 
     Silent on failure — the logger must never crash a hook.
@@ -150,7 +152,7 @@ def debug_log(message):
 # ---------------------------------------------------------------------------
 
 
-def read_json_config(path, key, default=""):
+def read_json_config(path: str, key: str, default: str = "") -> str:
     """Safely read a single key from a JSON config file."""
     try:
         with open(path, "r") as f:
@@ -159,7 +161,7 @@ def read_json_config(path, key, default=""):
         return default
 
 
-def bootstrap_config(plugin_root):
+def bootstrap_config(plugin_root: str) -> str:
     """Copy the template config if the user config does not exist yet."""
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
@@ -177,7 +179,7 @@ def bootstrap_config(plugin_root):
     return config_file
 
 
-def resolve_api_key():
+def resolve_api_key() -> str:
     """Resolve the API key: env var > user config."""
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
@@ -187,7 +189,7 @@ def resolve_api_key():
     return read_json_config(user_config, "api_key")
 
 
-def resolve_api_url():
+def resolve_api_url() -> str:
     """Resolve the API URL: env var > user config > default."""
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
@@ -206,7 +208,7 @@ def resolve_api_url():
 # ---------------------------------------------------------------------------
 
 
-def read_payload():
+def read_payload() -> Any:
     """Read JSON payload from stdin."""
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8")
@@ -219,7 +221,7 @@ def read_payload():
 # ---------------------------------------------------------------------------
 
 
-def spawn_detached(args):
+def spawn_detached(args: list[str]) -> bool:
     """Launch *args* as a fully detached background process.
 
     Returns immediately. The child is decoupled from the parent's stdio and
@@ -249,7 +251,7 @@ def spawn_detached(args):
 # ---------------------------------------------------------------------------
 
 
-def get_git_branch(project_dir):
+def get_git_branch(project_dir: str) -> str:
     """Return the current git branch, or '' on failure."""
     try:
         result = subprocess.run(
@@ -272,7 +274,7 @@ if platform.system() != "Windows":
     import fcntl
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
         """Acquire an flock on an open file, release on exit."""
         op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(fp, op)
@@ -284,19 +286,19 @@ if platform.system() != "Windows":
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
         """No-op lock on Windows."""
         yield
 
 
-def get_batch_dir():
+def get_batch_dir() -> str:
     """Return (and create) the batch directory."""
     batch_dir = os.path.join(get_config_dir(), "batches")
     secure_makedirs(batch_dir)
     return batch_dir
 
 
-def get_batch_file(session_id):
+def get_batch_file(session_id: str) -> str:
     """Return path to the JSONL batch file for *session_id*."""
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
@@ -304,7 +306,7 @@ def get_batch_file(session_id):
     return os.path.join(get_batch_dir(), f"{safe_id}.jsonl")
 
 
-def append_to_batch(session_id, entry):
+def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
     """Append a single JSON line to the batch file for *session_id*."""
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
@@ -315,7 +317,7 @@ def append_to_batch(session_id, entry):
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def read_batch(session_id):
+def read_batch(session_id: str) -> list[dict[str, Any]]:
     """Read all entries from the batch file and return the list (no delete)."""
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
@@ -334,14 +336,14 @@ def read_batch(session_id):
     return entries
 
 
-def clear_batch(session_id):
+def clear_batch(session_id: str) -> None:
     """Delete the batch file for *session_id*."""
     batch_file = get_batch_file(session_id)
     if os.path.isfile(batch_file):
         os.remove(batch_file)
 
 
-def rewrite_batch(session_id, entries):
+def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
     """Re-write entries back to the batch file (used on upload failure)."""
     batch_file = get_batch_file(session_id)
     with open(batch_file, "w") as f:
@@ -357,7 +359,7 @@ def rewrite_batch(session_id, entries):
 # ---------------------------------------------------------------------------
 
 
-def upload_batch(api_url, api_key, payload):
+def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> bool:
     """POST raw hook batch to the Bloomfilter API. Returns True on 2xx.
 
     Validates the URL scheme up front: only http/https are allowed.
@@ -451,7 +453,7 @@ def upload_batch(api_url, api_key, payload):
 # ---------------------------------------------------------------------------
 
 
-def utcnow_iso():
+def utcnow_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
 
@@ -461,7 +463,7 @@ def utcnow_iso():
 # ---------------------------------------------------------------------------
 
 
-def _get_vscode_data_dirs():
+def _get_vscode_data_dirs() -> list[str]:
     """Return existing VS Code data directories for the current platform."""
     system = platform.system()
     home = os.path.expanduser("~")
@@ -479,11 +481,12 @@ def _get_vscode_data_dirs():
     return dirs
 
 
-# Cache: session_id → transcript file path (avoid re-searching per hook)
+# Cache: (session_id, chat_sessions_only) → transcript file path
+# (avoid re-searching per hook)
 _transcript_cache = {}
 
 
-def derive_chat_sessions_path(transcript_path):
+def derive_chat_sessions_path(transcript_path: str) -> str:
     """Derive the chatSessions path from a GitHub.copilot-chat/transcripts/ path.
 
     Both formats share the same workspace ID and UUID filename:
@@ -506,20 +509,30 @@ def derive_chat_sessions_path(transcript_path):
     return chat_sessions_path if os.path.isfile(chat_sessions_path) else ""
 
 
-def find_copilot_transcript(session_id):
+def find_copilot_transcript(session_id: str, chat_sessions_only: bool = False) -> str:
     """Find the Copilot transcript file that contains the given session_id.
 
     Searches VS Code storage locations for JSONL transcript files and scans
     for the session_id in the file content.
 
+    When *chat_sessions_only* is True, only the token/model-bearing
+    ``chatSessions`` locations (workspace ``chatSessions/`` and global
+    ``emptyWindowChatSessions/``) are searched; the old
+    ``GitHub.copilot-chat/transcripts`` format — which carries messages but no
+    tokens or model — is skipped. Use this when the caller needs token/model
+    metadata, since parsing an old-format transcript yields 0 tokens and an
+    empty model, which the re-upload worker treats as "not flushed yet".
+
     Args:
         session_id: The hook session_id to search for.
+        chat_sessions_only: Restrict the search to chatSessions locations.
 
     Returns:
         str: Path to the transcript file, or '' if not found.
     """
-    if session_id in _transcript_cache:
-        return _transcript_cache[session_id]
+    cache_key = (session_id, chat_sessions_only)
+    if cache_key in _transcript_cache:
+        return _transcript_cache[cache_key]
 
     if not session_id:
         return ""
@@ -542,7 +555,10 @@ def find_copilot_transcript(session_id):
                 chat_dir = os.path.join(ws_dir, ws, "chatSessions")
                 if os.path.isdir(chat_dir):
                     search_dirs.append(chat_dir)
-                # Fallback: old transcript format
+                # Fallback: old transcript format (no tokens/model) — skipped
+                # when the caller only wants token/model-bearing files.
+                if chat_sessions_only:
+                    continue
                 transcript_dir = os.path.join(
                     ws_dir, ws, "GitHub.copilot-chat", "transcripts"
                 )
@@ -568,7 +584,7 @@ def find_copilot_transcript(session_id):
             with open(fpath, "rb") as f:
                 chunk = f.read(200_000)
             if session_id.encode() in chunk:
-                _transcript_cache[session_id] = fpath
+                _transcript_cache[cache_key] = fpath
                 return fpath
         except Exception:
             continue
@@ -576,7 +592,7 @@ def find_copilot_transcript(session_id):
     return ""
 
 
-def parse_copilot_transcript(transcript_path):
+def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
     """Parse a Copilot transcript JSONL file.
 
     Handles both the new kind-based format (globalStorage) and the old
@@ -664,7 +680,7 @@ def parse_copilot_transcript(transcript_path):
         return empty
 
 
-def _set_nested(obj, key_path, value):
+def _set_nested(obj: Any, key_path: list[str | int], value: Any) -> None:
     """Set *value* at *key_path* inside a nested dict/list structure.
 
     Each segment in *key_path* is either a ``str`` (dict key) or ``int``
@@ -690,7 +706,7 @@ def _set_nested(obj, key_path, value):
         obj[last] = value
 
 
-def _reconstruct_session_state(entries):
+def _reconstruct_session_state(entries: list[dict[str, Any]]) -> list[Any]:
     """Replay CRDT-style JSONL entries to materialise the ``requests`` array.
 
     * kind=0 — session init (seeds state)
@@ -739,7 +755,7 @@ def _reconstruct_session_state(entries):
     return state.get("requests", [])
 
 
-def _extract_request_record(req):
+def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
     """Extract a structured record from a single materialised Copilot request.
 
     Returns a dict with per-request metadata, user message, response
@@ -832,7 +848,7 @@ def _extract_request_record(req):
     return record
 
 
-def _parse_new_format(entries):
+def _parse_new_format(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Parse the new kind-based transcript format.
 
     Replays CRDT entries to reconstruct the full session state, then
@@ -844,7 +860,7 @@ def _parse_new_format(entries):
     return [_extract_request_record(r) for r in requests if isinstance(r, dict)]
 
 
-def _parse_old_format(entries):
+def _parse_old_format(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Parse the old type-based transcript format (workspaceStorage).
 
     Returns ``list[dict]`` of per-request records (with empty IDs/model).
@@ -892,7 +908,7 @@ def _parse_old_format(entries):
 # ---------------------------------------------------------------------------
 
 
-def parse_cli_transcript(events_path):
+def parse_cli_transcript(events_path: str) -> dict[str, Any]:
     """Parse a Copilot CLI ``events.jsonl`` into per-request records.
 
     The CLI's transcript_path on a hook points at
@@ -938,7 +954,7 @@ def parse_cli_transcript(events_path):
     if not entries:
         return empty
 
-    def new_record(user_text, model, ts):
+    def new_record(user_text: str, model: str, ts: int) -> dict[str, Any]:
         return {
             "requestId": "",
             "responseId": "",
@@ -953,7 +969,7 @@ def parse_cli_transcript(events_path):
             "timestamp": ts or 0,
         }
 
-    def is_empty(rec):
+    def is_empty(rec: dict[str, Any]) -> bool:
         return (
             not rec.get("response_content")
             and not rec.get("output_tokens")
@@ -971,82 +987,83 @@ def parse_cli_transcript(events_path):
         data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
         ts = entry.get("timestamp", 0)
 
-        if evt_type == "session.model_change":
-            new_model = data.get("newModel")
-            if new_model:
-                current_model = new_model
+        match evt_type:
+            case "session.model_change":
+                new_model = data.get("newModel")
+                if new_model:
+                    current_model = new_model
 
-        elif evt_type == "user.message":
-            # Drop a still-open turn that produced nothing (e.g. aborted retry).
-            if current is not None:
-                if not is_empty(current):
-                    records.append(current)
-                current = None
-            pending_user = data.get("content", "") or ""
+            case "user.message":
+                # Drop a still-open turn that produced nothing (e.g. aborted retry).
+                if current is not None:
+                    if not is_empty(current):
+                        records.append(current)
+                    current = None
+                pending_user = data.get("content", "") or ""
 
-        elif evt_type == "assistant.turn_start":
-            # Skip if we already have an open turn (turn_start firing twice
-            # around an abort) — keep the existing record, ignore the dupe.
-            if current is None:
-                current = new_record(pending_user, current_model, ts)
-                pending_user = ""
+            case "assistant.turn_start":
+                # Skip if we already have an open turn (turn_start firing twice
+                # around an abort) — keep the existing record, ignore the dupe.
+                if current is None:
+                    current = new_record(pending_user, current_model, ts)
+                    pending_user = ""
 
-        elif evt_type == "assistant.message":
-            if current is None:
-                # Some sessions emit assistant.message without an explicit
-                # turn_start; create the record opportunistically.
-                current = new_record(pending_user, current_model, ts)
-                pending_user = ""
+            case "assistant.message":
+                if current is None:
+                    # Some sessions emit assistant.message without an explicit
+                    # turn_start; create the record opportunistically.
+                    current = new_record(pending_user, current_model, ts)
+                    pending_user = ""
 
-            msg_model = data.get("model")
-            if msg_model:
-                current["resolvedModel"] = msg_model
-                current["modelId"] = msg_model
-                current_model = msg_model
+                msg_model = data.get("model")
+                if msg_model:
+                    current["resolvedModel"] = msg_model
+                    current["modelId"] = msg_model
+                    current_model = msg_model
 
-            tok = data.get("outputTokens", 0) or 0
-            current["output_tokens"] += tok
+                tok = data.get("outputTokens", 0) or 0
+                current["output_tokens"] += tok
 
-            request_id = data.get("requestId")
-            if request_id and not current["requestId"]:
-                current["requestId"] = request_id
+                request_id = data.get("requestId")
+                if request_id and not current["requestId"]:
+                    current["requestId"] = request_id
 
-            message_id = data.get("messageId") or data.get("serviceRequestId")
-            if message_id:
-                current["responseId"] = message_id
+                message_id = data.get("messageId") or data.get("serviceRequestId")
+                if message_id:
+                    current["responseId"] = message_id
 
-            content = data.get("content")
-            if content:
-                # Take the latest non-empty content as the turn response.
-                current["response_content"] = content
+                content = data.get("content")
+                if content:
+                    # Take the latest non-empty content as the turn response.
+                    current["response_content"] = content
 
-        elif evt_type == "assistant.reasoning":
-            # CLI emits a separate reasoning event with the thinking text.
-            content = data.get("content")
-            if content and current is not None:
-                current["reasoning_parts"].append(
-                    {
-                        "type": "thinking",
-                        "content": content,
-                        "thinking_id": data.get("reasoningId", ""),
-                        "timestamp": ts,
-                    }
-                )
-                if current["reasoning_text"]:
-                    current["reasoning_text"] += "\n" + content
-                else:
-                    current["reasoning_text"] = content
+            case "assistant.reasoning":
+                # CLI emits a separate reasoning event with the thinking text.
+                content = data.get("content")
+                if content and current is not None:
+                    current["reasoning_parts"].append(
+                        {
+                            "type": "thinking",
+                            "content": content,
+                            "thinking_id": data.get("reasoningId", ""),
+                            "timestamp": ts,
+                        }
+                    )
+                    if current["reasoning_text"]:
+                        current["reasoning_text"] += "\n" + content
+                    else:
+                        current["reasoning_text"] = content
 
-        elif evt_type == "abort":
-            # User-cancelled or system-aborted turn: drop if empty.
-            if current is not None and is_empty(current):
-                current = None
+            case "abort":
+                # User-cancelled or system-aborted turn: drop if empty.
+                if current is not None and is_empty(current):
+                    current = None
 
-        elif evt_type == "assistant.turn_end":
-            if current is not None:
-                if not is_empty(current):
-                    records.append(current)
-                current = None
+            case "assistant.turn_end":
+                if current is not None:
+                    if not is_empty(current):
+                        records.append(current)
+                    current = None
 
     if current is not None and not is_empty(current):
         records.append(current)

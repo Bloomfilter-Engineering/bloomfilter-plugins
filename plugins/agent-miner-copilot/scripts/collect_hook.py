@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 # Ensure the scripts directory is on the path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -55,17 +56,31 @@ REUPLOAD_POLL_INTERVAL = 1.5
 REUPLOAD_MAX_WAIT = 90.0
 
 
-def _chat_path_for_session(session_id, batch_entries):
-    """Resolve the chatSessions path for a session from its batch entries."""
+def _chat_path_for_session(
+    session_id: str, batch_entries: list[dict[str, Any]]
+) -> str:
+    """Resolve the token/model-bearing chatSessions path for a session.
+
+    Args:
+        session_id: The hook session_id, used as a fallback search key.
+        batch_entries: The session's batched hook envelopes; each entry's
+            ``payload.transcript_path`` is inspected to derive a chatSessions
+            path before falling back to a disk search.
+
+    Returns:
+        str: Path to the chatSessions ``.jsonl`` file, or '' if none found.
+    """
     for entry in batch_entries:
         transcript_path = entry.get("payload", {}).get("transcript_path", "")
         chat_path = derive_chat_sessions_path(transcript_path)
         if chat_path:
             return chat_path
-    return find_copilot_transcript(session_id)
+    return find_copilot_transcript(session_id, chat_sessions_only=True)
 
 
-def _overlay_chat_onto_stops(batch_entries, chat_requests):
+def _overlay_chat_onto_stops(
+    batch_entries: list[dict[str, Any]], chat_requests: list[dict[str, Any]]
+) -> bool:
     """Overlay exact response/tokens/model from chatSessions onto every Stop
     entry, matched in turn order (Nth Stop <-> Nth request record).
 
@@ -110,7 +125,7 @@ def _overlay_chat_onto_stops(batch_entries, chat_requests):
     return updated
 
 
-def run_reupload_worker(session_id):
+def run_reupload_worker(session_id: str) -> None:
     """Detached worker: wait for VS Code to flush the chatSessions token/model
     metadata, then overlay exact data onto every turn and re-upload.
 
@@ -206,7 +221,7 @@ def run_reupload_worker(session_id):
     upload_batch(api_url, api_key, batch_payload)
 
 
-def main():
+def main() -> None:
     # Detached background re-upload worker entrypoint.
     if len(sys.argv) > 1 and sys.argv[1] == "__reupload":
         session_id = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -342,14 +357,14 @@ def main():
 
         # Two runtimes, two transcript layouts:
         #
-        # copilot-vscode  – payload.transcript_path points at the OLD format
+        # copilot-vscode  - payload.transcript_path points at the OLD format
         #   (GitHub.copilot-chat/transcripts/<uuid>.jsonl). It has messages
         #   and reasoning but NO tokens/model. Exact tokens+model live in
         #   chatSessions/<uuid>.jsonl, which VS Code flushes ~10-22 s after
         #   Stop. Two-phase parse + chatSessions overlay; the detached
         #   re-upload worker below handles the last-turn flush gap.
         #
-        # copilot-cli     – payload.transcript_path points at
+        # copilot-cli     - payload.transcript_path points at
         #   ~/.copilot/session-state/<id>/events.jsonl, which is written
         #   synchronously and carries model, outputTokens, response content,
         #   and reasoning all at once. No async overlay needed; the CLI does
@@ -390,7 +405,7 @@ def main():
             # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
             chat_path = (
                 derive_chat_sessions_path(payload_path)
-                or find_copilot_transcript(session_id)
+                or find_copilot_transcript(session_id, chat_sessions_only=True)
                 or ""
             )
             chat_requests = []
