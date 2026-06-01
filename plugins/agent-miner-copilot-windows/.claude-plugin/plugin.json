@@ -1,0 +1,8 @@
+{
+  "name": "agent-miner-copilot-windows",
+  "version": "0.1.0",
+  "description": "Agent mining hooks for Bloomfilter (Copilot on Windows)",
+  "author": {
+    "name": "Bloomfilter Engineering"
+  }
+}
