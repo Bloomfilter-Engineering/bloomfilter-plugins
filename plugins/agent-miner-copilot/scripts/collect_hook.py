@@ -9,6 +9,7 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 # Ensure the scripts directory is on the path for local imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -18,15 +19,20 @@ from bloomfilter_common import (
     append_to_batch,
     bootstrap_config,
     clear_batch,
+    debug_log,
     derive_chat_sessions_path,
+    detect_runtime,
     find_copilot_transcript,
     get_git_branch,
+    normalize_hook_payload,
+    parse_cli_transcript,
     parse_copilot_transcript,
     read_batch,
     read_payload,
     resolve_api_key,
     resolve_api_url,
     rewrite_batch,
+    spawn_detached,
     upload_batch,
     utcnow_iso,
 )
@@ -43,16 +49,264 @@ TRANSCRIPT_EXTRACT_HOOKS = {"Stop"}
 # Hooks where we bootstrap config (SessionStart may not fire)
 BOOTSTRAP_HOOKS = {"SessionStart", "UserPromptSubmit"}
 
+# Background re-upload tuning. VS Code flushes the chatSessions token/model
+# metadata ~10-22s after Stop (measured), so we poll with early-exit up to a
+# generous cap. Because the worker is detached, this wait never blocks the hook.
+REUPLOAD_POLL_INTERVAL = 1.5
+REUPLOAD_MAX_WAIT = 90.0
 
-def main():
+
+def _chat_path_for_session(
+    session_id: str, batch_entries: list[dict[str, Any]]
+) -> str:
+    """Resolve the token/model-bearing chatSessions path for a session.
+
+    Args:
+        session_id: The hook session_id, used as a fallback search key.
+        batch_entries: The session's batched hook envelopes; each entry's
+            ``payload.transcript_path`` is inspected to derive a chatSessions
+            path before falling back to a disk search.
+
+    Returns:
+        str: Path to the chatSessions ``.jsonl`` file, or '' if none found.
+    """
+    for entry in batch_entries:
+        transcript_path = entry.get("payload", {}).get("transcript_path", "")
+        chat_path = derive_chat_sessions_path(transcript_path)
+        if chat_path:
+            return chat_path
+    return find_copilot_transcript(session_id, chat_sessions_only=True)
+
+
+def _overlay_chat_onto_stops(
+    batch_entries: list[dict[str, Any]], chat_requests: list[dict[str, Any]]
+) -> bool:
+    """Overlay exact response/tokens/model from chatSessions onto every Stop
+    entry, matched in turn order (Nth Stop <-> Nth request record).
+
+    Returns True if any entry changed.
+    """
+    updated = False
+    rec_idx = 0
+    for idx, entry in enumerate(batch_entries):
+        if entry.get("hook_event_name") != "Stop":
+            continue
+        if rec_idx >= len(chat_requests):
+            break
+        rec = chat_requests[rec_idx]
+        rec_idx += 1
+
+        changed = False
+        if rec.get("response_content") and not entry.get("agent_response"):
+            entry["agent_response"] = rec["response_content"]
+            changed = True
+        if rec.get("reasoning_text") and not entry.get("reasoning_text"):
+            entry["reasoning_text"] = rec["reasoning_text"]
+            changed = True
+        if rec.get("userMessage") and not entry.get("user_message"):
+            entry["user_message"] = rec["userMessage"]
+            changed = True
+        if rec.get("input_tokens") or rec.get("output_tokens"):
+            entry["transcript_summary"] = {
+                "api_calls": [
+                    {
+                        "input_tokens": rec.get("input_tokens", 0),
+                        "output_tokens": rec.get("output_tokens", 0),
+                        "model": rec.get("resolvedModel") or rec.get("modelId", ""),
+                        "request_id": rec.get("requestId", ""),
+                        "response_id": rec.get("responseId", ""),
+                    }
+                ]
+            }
+            changed = True
+        if changed:
+            batch_entries[idx] = entry
+            updated = True
+    return updated
+
+
+def run_reupload_worker(session_id: str) -> None:
+    """Detached worker: wait for VS Code to flush the chatSessions token/model
+    metadata, then overlay exact data onto every turn and re-upload.
+
+    Runs in its own process (see spawn_detached) so it never blocks the Stop
+    hook. The backend's update_or_create makes the re-upload idempotent, and
+    exact token counts clear any earlier estimate.
+    """
+    debug_log(f"reupload_worker: started session_id={session_id} pid={os.getpid()}")
+
+    api_key = resolve_api_key()
+    if not api_key:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} reason=no-api-key"
+        )
+        return
+
+    batch_entries = read_batch(session_id)
+    n_stops = sum(1 for e in batch_entries if e.get("hook_event_name") == "Stop")
+    if n_stops == 0:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} reason=no-stops "
+            f"entries={len(batch_entries)}"
+        )
+        return
+
+    chat_path = _chat_path_for_session(session_id, batch_entries)
+    if not chat_path:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} "
+            f"reason=no-chat-sessions-path n_stops={n_stops}"
+        )
+        return
+
+    # Poll until the last turn's tokens are flushed (early-exit), or until the
+    # budget is exhausted.
+    chat_requests = []
+    waited = 0.0
+    poll_count = 0
+    while waited <= REUPLOAD_MAX_WAIT:
+        parsed = parse_copilot_transcript(chat_path)
+        chat_requests = parsed.get("requests", [])
+        poll_count += 1
+        if len(chat_requests) >= n_stops:
+            last = chat_requests[n_stops - 1]
+            if last.get("input_tokens") or last.get("output_tokens"):
+                debug_log(
+                    f"reupload_worker: early-exit session_id={session_id} "
+                    f"polls={poll_count} waited={waited:.1f}s "
+                    f"last_turn_input={last.get('input_tokens')} "
+                    f"last_turn_output={last.get('output_tokens')}"
+                )
+                break
+        time.sleep(REUPLOAD_POLL_INTERVAL)
+        waited += REUPLOAD_POLL_INTERVAL
+    else:
+        debug_log(
+            f"reupload_worker: budget-exhausted session_id={session_id} "
+            f"polls={poll_count} waited={waited:.1f}s "
+            f"chat_requests={len(chat_requests)} n_stops={n_stops}"
+        )
+
+    if not chat_requests:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} "
+            f"reason=no-chat-requests-parsed chat_path={chat_path!r}"
+        )
+        return
+
+    # Re-read the batch (turns may have been appended while polling), overlay
+    # exact data onto all Stop turns, persist, and re-upload the full session.
+    batch_entries = read_batch(session_id)
+    if not batch_entries:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} "
+            "reason=batch-empty-after-poll"
+        )
+        return
+    overlay_changed = _overlay_chat_onto_stops(batch_entries, chat_requests)
+    if overlay_changed:
+        rewrite_batch(session_id, batch_entries)
+    debug_log(
+        f"reupload_worker: re-uploading session_id={session_id} "
+        f"entries={len(batch_entries)} overlay_changed={overlay_changed}"
+    )
+
+    api_url = resolve_api_url()
+    batch_payload = {
+        "session_id": session_id,
+        "source": "copilot",
+        "plugin_version": PLUGIN_VERSION,
+        "hooks": batch_entries,
+    }
+    upload_batch(api_url, api_key, batch_payload)
+
+
+def main() -> None:
+    # Detached background re-upload worker entrypoint.
+    if len(sys.argv) > 1 and sys.argv[1] == "__reupload":
+        session_id = sys.argv[2] if len(sys.argv) > 2 else ""
+        if session_id:
+            run_reupload_worker(session_id)
+        else:
+            debug_log("reupload_worker: aborted reason=missing-session-id-argv")
+        return
+
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
+        debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
         return
 
     payload = read_payload()
+    if not isinstance(payload, dict):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=non-object-payload "
+            f"type={type(payload).__name__}"
+        )
+        return
+    # Copilot fires hooks in two payload conventions selected by event-name
+    # casing (PascalCase->snake_case, camelCase->camelCase). Normalise so the
+    # rest of the script reads uniformly — matters most for the CLI-only
+    # camelCase ``subagentStart`` event.
+    normalize_hook_payload(payload)
     session_id = payload.get("session_id", "")
     if not session_id:
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=no-session-id"
+        )
         return
+
+    runtime = detect_runtime(payload)
+    debug_log(
+        f"hook received: hook={hook_event_name} session_id={session_id} "
+        f"runtime={runtime}"
+    )
+
+    # --- Copilot CLI new-session duplicate-hook dedup -------------------
+    # When a CLI session is started with an initial prompt, the CLI fires
+    # `userPromptSubmitted` twice (once for the submission, once again after
+    # the sessionStart hook completes) with identical prompt content, then
+    # runs two model turns -> two `agentStop`s. Without dedup the backend
+    # creates two turns for one user message. We:
+    #   1. Skip the second UserPromptSubmit when it carries the same prompt
+    #      as the immediately-previous UPS (no Stop between them).
+    #   2. Replace the prior Stop when another Stop arrives with no UPS
+    #      between them — the later Stop carries the user-visible response.
+    if runtime == "copilot-cli" and hook_event_name == "UserPromptSubmit":
+        current_prompt = (payload.get("prompt") or "").strip()
+        if current_prompt:
+            for prior in reversed(read_batch(session_id)):
+                ev = prior.get("hook_event_name")
+                if ev == "Stop":
+                    break  # a Stop closed the prior turn; this UPS is new
+                if ev == "UserPromptSubmit":
+                    prior_prompt = (
+                        (prior.get("payload") or {}).get("prompt") or ""
+                    ).strip()
+                    if prior_prompt == current_prompt:
+                        debug_log(
+                            f"hook skipped: duplicate UserPromptSubmit "
+                            f"session_id={session_id} "
+                            f"prompt={current_prompt[:60]!r} "
+                            "(CLI new-session quirk)"
+                        )
+                        return
+                    break
+
+    if runtime == "copilot-cli" and hook_event_name == "Stop":
+        existing = read_batch(session_id)
+        last_idx = -1
+        for i in range(len(existing) - 1, -1, -1):
+            ev = existing[i].get("hook_event_name")
+            if ev in ("UserPromptSubmit", "Stop"):
+                last_idx = i
+                break
+        if last_idx >= 0 and existing[last_idx].get("hook_event_name") == "Stop":
+            existing.pop(last_idx)
+            rewrite_batch(session_id, existing)
+            debug_log(
+                f"replaced prior Stop session_id={session_id} "
+                "(CLI new-session quirk: kept fresher response)"
+            )
 
     project_dir = (
         payload.get("cwd", "")
@@ -66,6 +320,11 @@ def main():
         bootstrap_config(plugin_root)
         api_key = resolve_api_key()
         if not api_key:
+            debug_log(
+                f"hook skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=no-api-key (config.json missing api_key and "
+                "BLOOMFILTER_API_KEY unset)"
+            )
             return
 
     # Clear stale batch on SessionStart (new session = fresh batch)
@@ -77,6 +336,7 @@ def main():
         "hook_event_name": hook_event_name,
         "received_at": utcnow_iso(),
         "plugin_version": PLUGIN_VERSION,
+        "runtime": runtime,
         "payload": payload,
     }
 
@@ -95,75 +355,85 @@ def main():
             1 for e in batch_entries if e.get("hook_event_name") == "UserPromptSubmit"
         )
 
-        # Two transcript locations with different timing and data:
+        # Two runtimes, two transcript layouts:
         #
-        #   transcripts/   (payload.transcript_path)
-        #     Written synchronously — available immediately on Stop.
-        #     Has response content and reasoning, NO tokens or model.
+        # copilot-vscode  - payload.transcript_path points at the OLD format
+        #   (GitHub.copilot-chat/transcripts/<uuid>.jsonl). It has messages
+        #   and reasoning but NO tokens/model. Exact tokens+model live in
+        #   chatSessions/<uuid>.jsonl, which VS Code flushes ~10-22 s after
+        #   Stop. Two-phase parse + chatSessions overlay; the detached
+        #   re-upload worker below handles the last-turn flush gap.
         #
-        #   chatSessions/  (derived or discovered)
-        #     Written ~15 s after Stop (VS Code flushes late).
-        #     Has everything: content, tokens, model, IDs.
-        #     Previous turns' data IS ready — only current turn delayed.
-        #
-        # Strategy: parse old transcript for messages (critical, fast),
-        # then overlay token/model/ID data from chatSessions.  Backfill
-        # previous turns' tokens from chatSessions on each Stop.
+        # copilot-cli     - payload.transcript_path points at
+        #   ~/.copilot/session-state/<id>/events.jsonl, which is written
+        #   synchronously and carries model, outputTokens, response content,
+        #   and reasoning all at once. No async overlay needed; the CLI does
+        #   not expose input tokens so those stay 0 and will be estimated.
 
-        # --- Phase 1: Old transcript for messages (retry until ready) ---
         payload_path = payload.get("transcript_path", "")
-        parsed = None
-        max_wait = 3.0
-        waited = 0.0
-        while waited < max_wait:
-            if payload_path:
-                parsed = parse_copilot_transcript(payload_path)
-                requests = parsed.get("requests", [])
-                if len(requests) >= expected_turns and requests[-1].get(
-                    "response_content"
-                ):
-                    break
-            time.sleep(0.5)
-            waited += 0.5
 
-        requests = parsed.get("requests", []) if parsed else []
-        have_current_turn = len(requests) >= expected_turns and requests[-1].get(
-            "response_content"
-        )
-        current_req = requests[-1] if len(requests) >= expected_turns else None
+        if runtime == "copilot-cli":
+            parsed = parse_cli_transcript(payload_path) if payload_path else None
+            requests = parsed.get("requests", []) if parsed else []
+            current_req = (
+                requests[-1] if len(requests) >= expected_turns else None
+            )
+            have_current_turn = current_req is not None and (
+                current_req.get("response_content")
+                or current_req.get("output_tokens")
+            )
+            # CLI has no separate chatSessions file — the same parsed feed
+            # is the authoritative source for the earlier-turn backfill.
+            chat_requests = requests
+        else:
+            # --- Phase 1: old transcript for messages (single parse) ---
+            # No retry-wait: the background re-upload worker below polls
+            # chatSessions and overlays any missing response_content /
+            # reasoning_text onto every Stop entry idempotently within
+            # ~10-22 s, so blocking the Stop hook here is wasteful.
+            parsed = (
+                parse_copilot_transcript(payload_path) if payload_path else None
+            )
+            requests = parsed.get("requests", []) if parsed else []
+            have_current_turn = len(requests) >= expected_turns and requests[-1].get(
+                "response_content"
+            )
+            current_req = (
+                requests[-1] if len(requests) >= expected_turns else None
+            )
 
-        # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
-        chat_path = (
-            derive_chat_sessions_path(payload_path)
-            or find_copilot_transcript(session_id)
-            or ""
-        )
-        chat_requests = []
-        if chat_path:
-            chat_parsed = parse_copilot_transcript(chat_path)
-            chat_requests = chat_parsed.get("requests", [])
+            # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
+            chat_path = (
+                derive_chat_sessions_path(payload_path)
+                or find_copilot_transcript(session_id, chat_sessions_only=True)
+                or ""
+            )
+            chat_requests = []
+            if chat_path:
+                chat_parsed = parse_copilot_transcript(chat_path)
+                chat_requests = chat_parsed.get("requests", [])
 
-        # Overlay token/model/ID data from chatSessions onto current
-        # turn when available.
-        if current_req:
-            turn_idx = len(requests) - 1
-            if turn_idx < len(chat_requests):
-                chat_req = chat_requests[turn_idx]
-                if chat_req.get("input_tokens") or chat_req.get("output_tokens"):
-                    current_req["input_tokens"] = chat_req["input_tokens"]
-                    current_req["output_tokens"] = chat_req["output_tokens"]
-                if chat_req.get("resolvedModel"):
-                    current_req["resolvedModel"] = chat_req["resolvedModel"]
-                if chat_req.get("requestId"):
-                    current_req["requestId"] = chat_req["requestId"]
-                if chat_req.get("responseId"):
-                    current_req["responseId"] = chat_req["responseId"]
-                # Prefer chatSessions reasoning_parts (has thinking_id
-                # and timestamps from toolCallRounds).
-                if chat_req.get("reasoning_parts"):
-                    current_req["reasoning_parts"] = chat_req["reasoning_parts"]
-                    if chat_req.get("reasoning_text"):
-                        current_req["reasoning_text"] = chat_req["reasoning_text"]
+            # Overlay token/model/ID data from chatSessions onto current
+            # turn when available.
+            if current_req:
+                turn_idx = len(requests) - 1
+                if turn_idx < len(chat_requests):
+                    chat_req = chat_requests[turn_idx]
+                    if chat_req.get("input_tokens") or chat_req.get("output_tokens"):
+                        current_req["input_tokens"] = chat_req["input_tokens"]
+                        current_req["output_tokens"] = chat_req["output_tokens"]
+                    if chat_req.get("resolvedModel"):
+                        current_req["resolvedModel"] = chat_req["resolvedModel"]
+                    if chat_req.get("requestId"):
+                        current_req["requestId"] = chat_req["requestId"]
+                    if chat_req.get("responseId"):
+                        current_req["responseId"] = chat_req["responseId"]
+                    # Prefer chatSessions reasoning_parts (has thinking_id
+                    # and timestamps from toolCallRounds).
+                    if chat_req.get("reasoning_parts"):
+                        current_req["reasoning_parts"] = chat_req["reasoning_parts"]
+                        if chat_req.get("reasoning_text"):
+                            current_req["reasoning_text"] = chat_req["reasoning_text"]
 
         # Build envelope fields from the combined data.
         if current_req:
@@ -276,11 +546,19 @@ def main():
     if hook_event_name in UPLOAD_HOOKS:
         api_key = resolve_api_key()
         if not api_key:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=no-api-key"
+            )
             return
 
         api_url = resolve_api_url()
         entries = read_batch(session_id)
         if not entries:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=empty-batch"
+            )
             return
 
         batch_payload = {
@@ -292,10 +570,43 @@ def main():
 
         upload_batch(api_url, api_key, batch_payload)
 
+        # On VS Code, chatSessions metadata is flushed ~10-22 s after Stop,
+        # so if this turn shipped without exact tokens we hand off to a
+        # detached worker that polls for the flush and re-uploads. The CLI
+        # writes events.jsonl synchronously — no flush to wait out, so the
+        # worker is skipped there.
+        summary = envelope.get("transcript_summary", {})
+        calls = summary.get("api_calls", [{}])
+        has_tokens = any(
+            c.get("input_tokens") or c.get("output_tokens") for c in calls
+        )
+        if not has_tokens and runtime == "copilot-vscode":
+            python_exe = sys.executable or "python3"
+            spawned = spawn_detached(
+                [python_exe, os.path.abspath(__file__), "__reupload", session_id]
+            )
+            debug_log(
+                f"reupload_worker: spawned session_id={session_id} "
+                f"success={spawned}"
+            )
+        else:
+            debug_log(
+                f"reupload_worker: not-spawned session_id={session_id} "
+                f"runtime={runtime} has_tokens={has_tokens}"
+            )
+
 
 if __name__ == "__main__":
     try:
         main()
     except Exception as exc:
+        try:
+            from bloomfilter_common import debug_log
+            debug_log(
+                f"collect_hook: unhandled exception type={type(exc).__name__} "
+                f"message={exc!s}"
+            )
+        except Exception:
+            pass  # Never block Copilot
         print(f"[bloomfilter] collect_hook failed: {exc}", file=sys.stderr)
     sys.exit(0)

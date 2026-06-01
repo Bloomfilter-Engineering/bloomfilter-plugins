@@ -26,7 +26,7 @@ Do this once on each machine before installing a plugin.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (macOS / Linux) or `bloomfilter-agent-miner-claude-code-windows` (Windows).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
-  - VS Code 1.115+ for `bloomfilter-agent-miner-copilot`.
+  - VS Code 1.115+ (Copilot extension) for `bloomfilter-agent-miner-copilot`.
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
 ### macOS Dependencies
