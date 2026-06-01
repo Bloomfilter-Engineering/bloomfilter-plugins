@@ -66,7 +66,9 @@ def debug_log(message):
         log_dir = _resolve_debug_log_dir()
         secure_makedirs(log_dir)
         log_path = os.path.join(log_dir, DEBUG_LOG_NAME)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        )
         line = f"{timestamp} [{DEBUG_LOG_TAG}] {message}\n"
         with open(log_path, "a") as log_file:
             log_file.write(line)
@@ -314,7 +316,9 @@ def upload_batch(api_url, api_key, payload):
             message += f" {reason}"
         print(message, file=sys.stderr)
         if err_body:
-            print(f"[bloomfilter] Upload response body: {err_body[:500]}", file=sys.stderr)
+            print(
+                f"[bloomfilter] Upload response body: {err_body[:500]}", file=sys.stderr
+            )
         return False
     except urllib.error.URLError as exc:
         debug_log(

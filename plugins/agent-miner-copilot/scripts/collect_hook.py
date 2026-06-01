@@ -56,9 +56,7 @@ REUPLOAD_POLL_INTERVAL = 1.5
 REUPLOAD_MAX_WAIT = 90.0
 
 
-def _chat_path_for_session(
-    session_id: str, batch_entries: list[dict[str, Any]]
-) -> str:
+def _chat_path_for_session(session_id: str, batch_entries: list[dict[str, Any]]) -> str:
     """Resolve the token/model-bearing chatSessions path for a session.
 
     Args:
@@ -137,9 +135,7 @@ def run_reupload_worker(session_id: str) -> None:
 
     api_key = resolve_api_key()
     if not api_key:
-        debug_log(
-            f"reupload_worker: aborted session_id={session_id} reason=no-api-key"
-        )
+        debug_log(f"reupload_worker: aborted session_id={session_id} reason=no-api-key")
         return
 
     batch_entries = read_batch(session_id)
@@ -250,9 +246,7 @@ def main() -> None:
     normalize_hook_payload(payload)
     session_id = payload.get("session_id", "")
     if not session_id:
-        debug_log(
-            f"hook skipped: hook={hook_event_name} reason=no-session-id"
-        )
+        debug_log(f"hook skipped: hook={hook_event_name} reason=no-session-id")
         return
 
     runtime = detect_runtime(payload)
@@ -375,12 +369,9 @@ def main() -> None:
         if runtime == "copilot-cli":
             parsed = parse_cli_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
-            current_req = (
-                requests[-1] if len(requests) >= expected_turns else None
-            )
+            current_req = requests[-1] if len(requests) >= expected_turns else None
             have_current_turn = current_req is not None and (
-                current_req.get("response_content")
-                or current_req.get("output_tokens")
+                current_req.get("response_content") or current_req.get("output_tokens")
             )
             # CLI has no separate chatSessions file — the same parsed feed
             # is the authoritative source for the earlier-turn backfill.
@@ -391,16 +382,12 @@ def main() -> None:
             # chatSessions and overlays any missing response_content /
             # reasoning_text onto every Stop entry idempotently within
             # ~10-22 s, so blocking the Stop hook here is wasteful.
-            parsed = (
-                parse_copilot_transcript(payload_path) if payload_path else None
-            )
+            parsed = parse_copilot_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
             have_current_turn = len(requests) >= expected_turns and requests[-1].get(
                 "response_content"
             )
-            current_req = (
-                requests[-1] if len(requests) >= expected_turns else None
-            )
+            current_req = requests[-1] if len(requests) >= expected_turns else None
 
             # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
             chat_path = (
@@ -577,17 +564,14 @@ def main() -> None:
         # worker is skipped there.
         summary = envelope.get("transcript_summary", {})
         calls = summary.get("api_calls", [{}])
-        has_tokens = any(
-            c.get("input_tokens") or c.get("output_tokens") for c in calls
-        )
+        has_tokens = any(c.get("input_tokens") or c.get("output_tokens") for c in calls)
         if not has_tokens and runtime == "copilot-vscode":
             python_exe = sys.executable or "python3"
             spawned = spawn_detached(
                 [python_exe, os.path.abspath(__file__), "__reupload", session_id]
             )
             debug_log(
-                f"reupload_worker: spawned session_id={session_id} "
-                f"success={spawned}"
+                f"reupload_worker: spawned session_id={session_id} success={spawned}"
             )
         else:
             debug_log(
@@ -602,6 +586,7 @@ if __name__ == "__main__":
     except Exception as exc:
         try:
             from bloomfilter_common import debug_log
+
             debug_log(
                 f"collect_hook: unhandled exception type={type(exc).__name__} "
                 f"message={exc!s}"

@@ -485,9 +485,7 @@ def upload_batch(api_url, api_key, payload):
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.getcode()
-        debug_log(
-            f"upload_batch: response status={status} session_id={session_id}"
-        )
+        debug_log(f"upload_batch: response status={status} session_id={session_id}")
         if status != 201:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
         return 200 <= status < 300
