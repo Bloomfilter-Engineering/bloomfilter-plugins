@@ -53,9 +53,7 @@ def main():
         return
     session_id = payload.get("session_id", "")
     if not session_id:
-        debug_log(
-            f"hook skipped: hook={hook_event_name} reason=no-session-id"
-        )
+        debug_log(f"hook skipped: hook={hook_event_name} reason=no-session-id")
         return
 
     project_dir = payload.get("cwd", "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
@@ -133,6 +131,7 @@ if __name__ == "__main__":
     except Exception as exc:
         try:
             from bloomfilter_common import debug_log
+
             debug_log(
                 f"collect_hook: unhandled exception type={type(exc).__name__} "
                 f"message={exc!s}"

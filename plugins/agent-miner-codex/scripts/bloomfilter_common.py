@@ -19,7 +19,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION: str = "0.1.1"
+PLUGIN_VERSION: str = "0.1.2"
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
 DEBUG_LOG_TAG: str = "codex"  # disambiguates plugins sharing the same log dir
@@ -47,7 +47,9 @@ def debug_log(message: str) -> None:
         log_dir = _resolve_debug_log_dir()
         secure_makedirs(log_dir)
         log_path = os.path.join(log_dir, DEBUG_LOG_NAME)
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        timestamp = (
+            datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        )
         line = f"{timestamp} [{DEBUG_LOG_TAG}] {message}\n"
         with open(log_path, "a") as log_file:
             log_file.write(line)
@@ -340,7 +342,9 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> bool:
             f"body={response_body[:500]!r}"
         )
         if status_code != 201:
-            print(f"[bloomfilter] Upload response status: {status_code}", file=sys.stderr)
+            print(
+                f"[bloomfilter] Upload response status: {status_code}", file=sys.stderr
+            )
         return 200 <= status_code < 300
     except urllib.error.HTTPError as http_error:
         try:
@@ -357,7 +361,10 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> bool:
             message += f" {reason}"
         print(message, file=sys.stderr)
         if error_body:
-            print(f"[bloomfilter] Upload response body: {error_body[:500]}", file=sys.stderr)
+            print(
+                f"[bloomfilter] Upload response body: {error_body[:500]}",
+                file=sys.stderr,
+            )
         return False
     except urllib.error.URLError as url_error:
         debug_log(

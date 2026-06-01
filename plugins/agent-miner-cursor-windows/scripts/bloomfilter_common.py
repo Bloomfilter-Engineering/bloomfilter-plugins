@@ -20,7 +20,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
@@ -485,9 +485,7 @@ def upload_batch(api_url, api_key, payload):
         )
         with urllib.request.urlopen(req, timeout=30) as resp:
             status = resp.getcode()
-        debug_log(
-            f"upload_batch: response status={status} session_id={session_id}"
-        )
+        debug_log(f"upload_batch: response status={status} session_id={session_id}")
         if status != 201:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
         return 200 <= status < 300

@@ -4,7 +4,10 @@ Thumbs.db
 
 # Editor
 .idea/
-.vscode/
+.vscode/*
+# but share the ruff format-on-save setup
+!.vscode/settings.json
+!.vscode/extensions.json
 *.swp
 *.swo
 
