@@ -10,7 +10,8 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 | `bloomfilter-agent-miner-claude-code-windows` | Claude Code CLI on Windows | `.claude-plugin/marketplace.json` |
 | `agent-miner-codex` | Codex on macOS and Linux | `.agents/plugins/marketplace.json` |
 | `agent-miner-codex-windows` | Codex on Windows | `.agents/plugins/marketplace.json` |
-| `bloomfilter-agent-miner-copilot` | VS Code Copilot | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-copilot` | VS Code Copilot on macOS and Linux | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-copilot-windows` | VS Code Copilot on Windows | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
 
@@ -26,7 +27,7 @@ Do this once on each machine before installing a plugin.
 - The host application for the plugin you want to use:
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (macOS / Linux) or `bloomfilter-agent-miner-claude-code-windows` (Windows).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
-  - VS Code 1.115+ (Copilot extension) for `bloomfilter-agent-miner-copilot`.
+  - VS Code 1.115+ (Copilot extension) for `bloomfilter-agent-miner-copilot` (macOS / Linux) or `bloomfilter-agent-miner-copilot-windows` (Windows).
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` or `bloomfilter-agent-miner-cursor-windows`.
 
 ### macOS Dependencies
@@ -227,6 +228,13 @@ Note: Codex thinking text is encrypted by Codex and is not readable by this plug
 
 ### VS Code Copilot
 
+Bloomfilter publishes separate VS Code Copilot plugins by operating system:
+
+- Use `bloomfilter-agent-miner-copilot` on macOS and Linux.
+- Use `bloomfilter-agent-miner-copilot-windows` on Windows.
+
+The setup commands below are identical on every OS; only the plugin you install differs.
+
 Open your VS Code `settings.json` and add the Bloomfilter marketplace:
 
 ```json
@@ -241,7 +249,7 @@ Install the plugin:
 
 1. Open the Extensions view with `Cmd+Shift+X` on macOS or `Ctrl+Shift+X` on Windows.
 2. Type `@agentPlugins` in the search field.
-3. Find **bloomfilter-agent-miner-copilot** and select **Install**.
+3. Find **bloomfilter-agent-miner-copilot** (macOS / Linux) or **bloomfilter-agent-miner-copilot-windows** (Windows) and select **Install**.
 
 Open any project in VS Code with GitHub Copilot. The plugin activates automatically.
 

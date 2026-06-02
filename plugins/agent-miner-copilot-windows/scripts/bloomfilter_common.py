@@ -13,10 +13,10 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
-DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir
+DEBUG_LOG_TAG = "copilot-windows"
 
 # GitHub Copilot fires hooks in two payload conventions, selected by event-name
 # casing: PascalCase event names (e.g. ``SubagentStop``) get snake_case fields,
@@ -157,7 +157,7 @@ def debug_log(message: str) -> None:
 def read_json_config(path: str, key: str, default: str = "") -> str:
     """Safely read a single key from a JSON config file."""
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f).get(key, default) or default
     except Exception:
         return default
@@ -213,7 +213,7 @@ def resolve_api_url() -> str:
 def read_payload() -> Any:
     """Read JSON payload from stdin."""
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
 

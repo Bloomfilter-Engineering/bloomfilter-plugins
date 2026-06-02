@@ -11,6 +11,11 @@
       "name": "bloomfilter-agent-miner-copilot",
       "source": "./plugins/agent-miner-copilot",
       "description": "Agent mining hooks for Bloomfilter (Copilot)"
+    },
+    {
+      "name": "bloomfilter-agent-miner-copilot-windows",
+      "source": "./plugins/agent-miner-copilot-windows",
+      "description": "Agent mining hooks for Bloomfilter (Copilot on Windows)"
     }
   ]
 }
