@@ -1,3 +1,4 @@
+import contextlib
 import json
 import os
 import platform
@@ -8,12 +9,11 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
-import contextlib
 from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir

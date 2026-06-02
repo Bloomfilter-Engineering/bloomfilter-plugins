@@ -369,7 +369,9 @@ def main() -> None:
         if runtime == "copilot-cli":
             parsed = parse_cli_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
-            current_req = requests[-1] if len(requests) >= expected_turns else None
+            current_req = (
+                requests[-1] if requests and len(requests) >= expected_turns else None
+            )
             have_current_turn = current_req is not None and (
                 current_req.get("response_content") or current_req.get("output_tokens")
             )
@@ -387,7 +389,9 @@ def main() -> None:
             have_current_turn = len(requests) >= expected_turns and requests[-1].get(
                 "response_content"
             )
-            current_req = requests[-1] if len(requests) >= expected_turns else None
+            current_req = (
+                requests[-1] if requests and len(requests) >= expected_turns else None
+            )
 
             # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
             chat_path = (
