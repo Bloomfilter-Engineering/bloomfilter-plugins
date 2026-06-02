@@ -768,7 +768,7 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
     record = {
         "requestId": req.get("requestId", ""),
         "responseId": req.get("responseId", ""),
-        "modelId": req.get("modelId", "").removeprefix("copilot/"),
+        "modelId": (req.get("modelId") or "").removeprefix("copilot/"),
         "resolvedModel": "",
         "userMessage": "",
         "response_content": "",

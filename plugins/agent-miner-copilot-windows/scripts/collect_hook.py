@@ -509,7 +509,7 @@ def main() -> None:
                     "hook_event_name": "Thinking",
                     "received_at": (
                         datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-                        if ts
+                        if isinstance(ts, (int, float)) and ts
                         else envelope["received_at"]
                     ),
                     "plugin_version": PLUGIN_VERSION,

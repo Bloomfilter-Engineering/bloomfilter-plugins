@@ -68,8 +68,9 @@ $process.StartInfo = $startInfo
 $null = $process.Start()
 $process.StandardInput.Write($stdin)
 $process.StandardInput.Close()
-$stdout = $process.StandardOutput.ReadToEnd()
+$stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEnd()
+$stdout = $stdoutTask.GetAwaiter().GetResult()
 $process.WaitForExit()
 
 if ($stderr) {
