@@ -1,13 +1,13 @@
 {
   "name": "agent-miner-codex",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "Agent mining hooks for Bloomfilter (Codex)",
   "author": {
     "name": "Bloomfilter Engineering"
   },
   "websiteURL": "https://www.bloomfilter.ai/",
   "repository": "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins",
-  "license": "MIT",
+  "license": "Bloomfilter Source-Available License 1.0",
   "keywords": [
     "bloomfilter",
     "codex",
