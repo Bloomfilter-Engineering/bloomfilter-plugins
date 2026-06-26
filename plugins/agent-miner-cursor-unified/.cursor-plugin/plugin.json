@@ -1,0 +1,9 @@
+{
+  "name": "bloomfilter-agent-miner-cursor-unified",
+  "version": "0.1.0",
+  "description": "Agent mining hooks for Bloomfilter (Cursor on Windows, macOS, Linux, and WSL)",
+  "author": {
+    "name": "Bloomfilter Engineering"
+  },
+  "logo": "assets/iconColorLogo.svg"
+}
