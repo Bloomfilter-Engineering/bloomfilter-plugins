@@ -9,10 +9,14 @@ $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 $OutputEncoding = $utf8NoBom
 
 function Resolve-Python {
+    # Prefer the official Python launcher (`py -3`): it reliably resolves a
+    # Python 3 interpreter on Windows and sidesteps both an older `python` on
+    # PATH and the Microsoft Store `python3` alias stub. Fall back to bare
+    # `python`/`python3` for macOS/Linux where `py` is usually absent.
     $candidates = @(
+        @{ Command = "py"; Args = @("-3") },
         @{ Command = "python"; Args = @() },
-        @{ Command = "python3"; Args = @() },
-        @{ Command = "py"; Args = @("-3") }
+        @{ Command = "python3"; Args = @() }
     )
 
     foreach ($candidate in $candidates) {

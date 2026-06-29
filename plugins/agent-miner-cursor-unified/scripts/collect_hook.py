@@ -10,6 +10,7 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    drop_leading_entries,
     get_git_branch,
     read_batch,
     read_payload,
@@ -107,8 +108,14 @@ def main():
     # _apply_token_data path (same as copilot/claude_code) sees the token data
     # Cursor delivers directly on the payload. Key rename: cursor's
     # cache_write_tokens → BE's cache_creation_tokens.
-    if hook_event_name == "afterAgentResponse" and (
-        payload.get("input_tokens") or payload.get("output_tokens")
+    token_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    )
+    if hook_event_name == "afterAgentResponse" and any(
+        field in payload and payload.get(field) is not None for field in token_fields
     ):
         envelope["transcript_summary"] = {
             "api_calls": [
@@ -152,7 +159,10 @@ def main():
 
         success = upload_batch(api_url, api_key, batch_payload)
         if success and hook_event_name == "sessionEnd":
-            clear_batch(session_id)
+            # Remove only the entries we just uploaded; any hook appended
+            # concurrently during the upload is preserved for the next batch
+            # rather than truncated away.
+            drop_leading_entries(session_id, len(entries))
 
 
 if __name__ == "__main__":

@@ -412,6 +412,44 @@ def clear_batch(session_id):
     rewrite_batch(session_id, [])
 
 
+def drop_leading_entries(session_id, count):
+    """Remove the first *count* entries from the batch file (race-safe).
+
+    Used after a successful upload to delete exactly the entries that were
+    uploaded while preserving any entries ``append_to_batch`` added
+    concurrently — those land after the uploaded snapshot, so they survive as
+    the trailing lines here. This is the safe alternative to ``clear_batch``,
+    which would truncate those concurrent appends away.
+
+    The read-modify-write happens under a single exclusive lock (``a+`` so the
+    file is not truncated until the lock is held), so a concurrent append
+    either completes before this runs (and is preserved) or blocks until after.
+    Counts non-blank lines as entries to stay consistent with ``read_batch``.
+    """
+    if count <= 0:
+        return
+    batch_file = get_batch_file(session_id)
+    if not os.path.isfile(batch_file):
+        return
+    with open(batch_file, "a+") as f:
+        with _lock_file(f, exclusive=True):
+            f.seek(0)
+            lines = f.readlines()
+            kept = []
+            dropped = 0
+            for line in lines:
+                if dropped < count:
+                    if line.strip():
+                        dropped += 1
+                    continue
+                kept.append(line)
+            f.seek(0)
+            f.truncate()
+            f.writelines(kept)
+    if platform.system() != "Windows":
+        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
 # ---------------------------------------------------------------------------
 # HTTP upload
 # ---------------------------------------------------------------------------
@@ -442,13 +480,38 @@ def upload_batch(api_url, api_key, payload):
     length on HTTPError), and any HTTPError / URLError / unexpected exception.
     """
     parsed = urllib.parse.urlparse(api_url or "")
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+
+    # Accessing .port raises ValueError for malformed ports (non-numeric or out
+    # of range). Validate it here so a bad config URL is rejected cleanly rather
+    # than throwing later in _sanitize_url_for_log, which runs before the upload
+    # try/except below.
+    try:
+        parsed.port  # noqa: B018 — evaluated for its validation side effect
+        port_ok = True
+    except ValueError:
+        port_ok = False
+
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or not port_ok:
         debug_log(
             "upload_batch: skipped — invalid api_url "
-            f"scheme={parsed.scheme!r} host={parsed.hostname!r}"
+            f"scheme={parsed.scheme!r} netloc={parsed.netloc!r}"
         )
         print(
             "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
+            file=sys.stderr,
+        )
+        return False
+
+    # Never send the API token (X-MCP-Token) over cleartext HTTP. Allow http
+    # only for loopback hosts to keep local development working.
+    if parsed.scheme == "http" and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        debug_log("upload_batch: skipped — refusing cleartext (non-loopback) API URL")
+        print(
+            "[bloomfilter] Upload skipped: Bloomfilter API URL must use HTTPS.",
             file=sys.stderr,
         )
         return False

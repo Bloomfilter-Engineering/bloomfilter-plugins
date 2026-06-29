@@ -286,8 +286,8 @@ macOS:
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
-cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
-  ~/.cursor/plugins/local/agent-miner-cursor
+cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor-unified \
+  ~/.cursor/plugins/local/agent-miner-cursor-unified
 ```
 
 Windows PowerShell:
