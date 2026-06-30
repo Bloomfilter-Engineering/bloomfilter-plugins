@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import contextlib
 import json
 import logging
@@ -13,6 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from typing import IO, Any, Iterator
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -35,7 +38,7 @@ _debug_logger = None  # Lazy-init singleton; populated on first debug_log() call
 # ---------------------------------------------------------------------------
 
 
-def get_config_dir():
+def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform."""
     system = platform.system()
     if system == "Windows":
@@ -52,7 +55,7 @@ def get_config_dir():
 # ---------------------------------------------------------------------------
 
 
-def _resolve_debug_log_dir():
+def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
     Cursor / Claude / Codex inject a plugin data dir env var when present.
@@ -67,7 +70,7 @@ def _resolve_debug_log_dir():
     )
 
 
-def _build_debug_logger():
+def _build_debug_logger() -> logging.Logger:
     """Construct the private debug logger backed by RotatingFileHandler.
 
     Uses a dedicated logger name with propagate=False so it cannot affect
@@ -101,7 +104,7 @@ def _build_debug_logger():
     return logger
 
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     """Append a timestamped line to <plugin-data>/debug.log.
 
     Backed by ``logging.handlers.RotatingFileHandler``: 1 MB per file with one
@@ -117,7 +120,7 @@ def debug_log(message):
         pass
 
 
-def secure_makedirs(path):
+def secure_makedirs(path: str) -> None:
     """Create directories with owner-only permissions on Unix."""
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
@@ -129,7 +132,7 @@ def secure_makedirs(path):
 # ---------------------------------------------------------------------------
 
 
-def read_json_config(path, key, default=""):
+def read_json_config(path: str, key: str, default: str = "") -> str:
     """Safely read a single key from a JSON config file.
 
     Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
@@ -143,7 +146,7 @@ def read_json_config(path, key, default=""):
         return default
 
 
-def bootstrap_config(plugin_root):
+def bootstrap_config(plugin_root: str) -> str:
     """Copy the template config if the user config does not exist yet."""
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
@@ -162,7 +165,7 @@ def bootstrap_config(plugin_root):
     return config_file
 
 
-def resolve_api_key():
+def resolve_api_key() -> str:
     """Resolve the API key: BLOOMFILTER_API_KEY env var > user config.
 
     Project-level config is intentionally NOT consulted for the API key —
@@ -178,7 +181,7 @@ def resolve_api_key():
     return read_json_config(user_config, "api_key")
 
 
-def resolve_api_url():
+def resolve_api_url() -> str:
     """Resolve the API URL: env var > user config > default."""
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
@@ -197,8 +200,13 @@ def resolve_api_url():
 # ---------------------------------------------------------------------------
 
 
-def read_payload():
-    """Read JSON payload from stdin."""
+def read_payload() -> Any:
+    """Read JSON payload from stdin.
+
+    Returns the parsed JSON value — normally a dict, but any JSON type is
+    possible, so callers must validate the shape (the collect hook checks
+    ``isinstance(payload, dict)``). Returns ``{}`` for empty or non-JSON input.
+    """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8")
     raw = sys.stdin.read().lstrip("\ufeff")
@@ -216,8 +224,8 @@ def read_payload():
 # ---------------------------------------------------------------------------
 
 
-def _resolve_git_executable():
-    """Return a git executable path if available."""
+def _resolve_git_executable() -> str:
+    """Return a git executable path if available, or '' if none is found."""
     git = shutil.which("git")
     if git:
         return git
@@ -246,7 +254,7 @@ def _resolve_git_executable():
     return ""
 
 
-def get_git_branch(project_dir):
+def get_git_branch(project_dir: str) -> str:
     """Return the current git branch, or '' on failure."""
     git = _resolve_git_executable()
     if not git:
@@ -272,7 +280,7 @@ def get_git_branch(project_dir):
 if platform.system() != "Windows":
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
         """Acquire an flock on an open file, release on exit."""
         op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(fp, op)
@@ -284,7 +292,7 @@ if platform.system() != "Windows":
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
         """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
 
         msvcrt only supports exclusive locks — the ``exclusive`` arg is
@@ -339,14 +347,14 @@ else:
                     pass
 
 
-def get_batch_dir():
+def get_batch_dir() -> str:
     """Return (and create) the batch directory."""
     batch_dir = os.path.join(get_config_dir(), "batches")
     secure_makedirs(batch_dir)
     return batch_dir
 
 
-def get_batch_file(session_id):
+def get_batch_file(session_id: str) -> str:
     """Return path to the JSONL batch file for *session_id*."""
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
@@ -354,7 +362,7 @@ def get_batch_file(session_id):
     return os.path.join(get_batch_dir(), f"{safe_id}.jsonl")
 
 
-def append_to_batch(session_id, entry):
+def append_to_batch(session_id: str, entry: dict) -> None:
     """Append a single JSON line to the batch file for *session_id*."""
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
@@ -365,7 +373,7 @@ def append_to_batch(session_id, entry):
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def read_batch(session_id):
+def read_batch(session_id: str) -> list[dict]:
     """Read all entries from the batch file and return the list (no delete)."""
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
@@ -384,7 +392,7 @@ def read_batch(session_id):
     return entries
 
 
-def rewrite_batch(session_id, entries):
+def rewrite_batch(session_id: str, entries: list[dict]) -> None:
     """Re-write entries back to the batch file (race-safe).
 
     Opens with ``a+`` so the file is not truncated until *after* the
@@ -402,7 +410,7 @@ def rewrite_batch(session_id, entries):
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def clear_batch(session_id):
+def clear_batch(session_id: str) -> None:
     """Truncate the batch file for *session_id* (race-safe).
 
     Delegates to ``rewrite_batch`` so the truncation is performed while
@@ -412,7 +420,7 @@ def clear_batch(session_id):
     rewrite_batch(session_id, [])
 
 
-def drop_leading_entries(session_id, count):
+def drop_leading_entries(session_id: str, count: int) -> None:
     """Remove the first *count* entries from the batch file (race-safe).
 
     Used after a successful upload to delete exactly the entries that were
@@ -455,7 +463,7 @@ def drop_leading_entries(session_id, count):
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_url_for_log(url):
+def _sanitize_url_for_log(url: str) -> str:
     """Return scheme://host[:port]/path — drops userinfo, query, and fragment.
 
     debug.log is user-local but lives next to config.json; sanitization keeps
@@ -468,7 +476,7 @@ def _sanitize_url_for_log(url):
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
-def upload_batch(api_url, api_key, payload):
+def upload_batch(api_url: str, api_key: str, payload: dict) -> bool:
     """POST raw hook batch to the Bloomfilter API. Returns True on success.
 
     Validates the URL scheme up front: only http/https are allowed. Other
@@ -589,6 +597,6 @@ def upload_batch(api_url, api_key, payload):
 # ---------------------------------------------------------------------------
 
 
-def utcnow_iso():
+def utcnow_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()

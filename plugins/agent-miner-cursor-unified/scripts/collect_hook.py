@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -24,7 +26,13 @@ UPLOAD_HOOKS = {"stop", "sessionEnd"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
 
 
-def _resolve_project_dir(payload):
+def _resolve_project_dir(payload: dict) -> str:
+    """Return the project directory for *payload*.
+
+    Prefers the first non-empty of: payload cwd, the Cursor/Claude project-dir
+    env vars, then the first ``workspace_roots`` entry. Falls back to the
+    process working directory when none is set.
+    """
     candidates = [
         payload.get("cwd", ""),
         os.environ.get("CURSOR_PROJECT_DIR", ""),
@@ -33,17 +41,28 @@ def _resolve_project_dir(payload):
     roots = payload.get("workspace_roots")
     if isinstance(roots, list) and roots:
         candidates.append(roots[0] if isinstance(roots[0], str) else "")
-    for c in candidates:
-        if c:
-            return c
+    for candidate in candidates:
+        if candidate:
+            return candidate
     return os.getcwd()
 
 
-def _resolve_session_id(payload):
+def _resolve_session_id(payload: dict) -> str:
+    """Return the session identifier from *payload*, or '' if absent.
+
+    Cursor sends ``conversation_id``; ``session_id`` is the claude_code
+    fallback so a shared payload shape resolves under either runtime.
+    """
     return payload.get("conversation_id") or payload.get("session_id") or ""
 
 
-def main():
+def main() -> None:
+    """Process one hook invocation: batch the event and upload on turn end.
+
+    Reads the hook event name from ``argv[1]`` and the JSON payload from stdin,
+    appends an envelope to the session's batch file, and POSTs the accumulated
+    batch to the Bloomfilter API on the ``stop`` / ``sessionEnd`` hooks.
+    """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
         debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
