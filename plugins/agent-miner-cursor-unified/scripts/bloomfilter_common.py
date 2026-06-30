@@ -373,6 +373,27 @@ def append_to_batch(session_id: str, entry: dict) -> None:
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
+def _decode_batch_line(line: str) -> tuple[bool, Any]:
+    """Decode one raw JSONL batch line.
+
+    Returns ``(is_record, value)``. ``is_record`` is True only for a non-blank
+    line that parses as JSON — exactly the lines ``read_batch`` returns and
+    ``upload_batch`` sends — and False for a blank or corrupt line. ``value``
+    holds the decoded object when ``is_record`` is True, else ``None``.
+
+    Both ``read_batch`` and ``drop_leading_entries`` route through this so the
+    records uploaded and the records drained can never diverge: corrupt lines
+    are skipped identically on both sides.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False, None
+    try:
+        return True, json.loads(stripped)
+    except json.JSONDecodeError:
+        return False, None
+
+
 def read_batch(session_id: str) -> list[dict]:
     """Read all entries from the batch file and return the list (no delete)."""
     batch_file = get_batch_file(session_id)
@@ -383,12 +404,9 @@ def read_batch(session_id: str) -> list[dict]:
             lines = f.readlines()
     entries = []
     for line in lines:
-        line = line.strip()
-        if line:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        is_record, value = _decode_batch_line(line)
+        if is_record:
+            entries.append(value)
     return entries
 
 
@@ -432,7 +450,11 @@ def drop_leading_entries(session_id: str, count: int) -> None:
     The read-modify-write happens under a single exclusive lock (``a+`` so the
     file is not truncated until the lock is held), so a concurrent append
     either completes before this runs (and is preserved) or blocks until after.
-    Counts non-blank lines as entries to stay consistent with ``read_batch``.
+
+    Counts only the valid JSON records ``read_batch`` would return (via
+    ``_decode_batch_line``), so corrupt or blank lines in the leading region are
+    discarded without consuming the drop count — otherwise a corrupt line could
+    leave an already-uploaded entry behind to be re-sent next batch.
     """
     if count <= 0:
         return
@@ -447,7 +469,8 @@ def drop_leading_entries(session_id: str, count: int) -> None:
             dropped = 0
             for line in lines:
                 if dropped < count:
-                    if line.strip():
+                    is_record, _ = _decode_batch_line(line)
+                    if is_record:
                         dropped += 1
                     continue
                 kept.append(line)
