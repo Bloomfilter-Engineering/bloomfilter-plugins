@@ -16,6 +16,11 @@
       "name": "bloomfilter-agent-miner-cursor-windows",
       "source": "./plugins/agent-miner-cursor-windows",
       "description": "Agent mining hooks for Bloomfilter (Cursor on Windows)"
+    },
+    {
+      "name": "bloomfilter-agent-miner-cursor-unified",
+      "source": "./plugins/agent-miner-cursor-unified",
+      "description": "Agent mining hooks for Bloomfilter (Cursor on Windows, macOS, Linux, and WSL)"
     }
   ]
 }
