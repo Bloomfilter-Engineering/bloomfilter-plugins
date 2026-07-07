@@ -9,6 +9,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from bloomfilter_common import (
     PLUGIN_VERSION,
     append_to_batch,
+    append_to_batch_deduped,
     bootstrap_config,
     clear_batch,
     debug_log,
@@ -24,6 +25,34 @@ from bloomfilter_common import (
 
 UPLOAD_HOOKS = {"stop", "sessionEnd"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
+
+
+def _thought_already_batched(records: list, payload: dict) -> bool:
+    """True if this ``afterAgentThought`` duplicates one already in this turn.
+
+    Cursor fires ``afterAgentThought`` more than once for a single thought: the
+    copies carry identical ``text`` and ``duration_ms`` (sometimes with a
+    suffixed ``generation_id`` such as ``…-0-r5vv``) and arrive microseconds
+    apart, so the same thinking would otherwise be counted once per copy.
+
+    Matches on ``(text, duration_ms)`` — which catches both the same-id and the
+    suffixed-id copies — and scans back only to the current turn's
+    ``beforeSubmitPrompt`` boundary. Genuinely distinct thoughts recur across
+    turns (and legitimately share a ``generation_id`` within one), so the dedup
+    must stay turn-scoped rather than span the whole session.
+    """
+    text = payload.get("text")
+    if not text:
+        return False
+    duration = payload.get("duration_ms")
+    for record in reversed(records):
+        if record.get("hook_event_name") == "beforeSubmitPrompt":
+            break
+        if record.get("hook_event_name") == "afterAgentThought":
+            prior = record.get("payload", {})
+            if prior.get("text") == text and prior.get("duration_ms") == duration:
+                return True
+    return False
 
 
 def _resolve_project_dir(payload: dict) -> str:
@@ -149,7 +178,19 @@ def main() -> None:
             ]
         }
 
-    append_to_batch(session_id, envelope)
+    if hook_event_name == "afterAgentThought":
+        appended = append_to_batch_deduped(
+            session_id,
+            envelope,
+            lambda records: _thought_already_batched(records, payload),
+        )
+        if not appended:
+            debug_log(
+                f"afterAgentThought skipped: reason=duplicate-in-turn "
+                f"session_id={session_id}"
+            )
+    else:
+        append_to_batch(session_id, envelope)
 
     if hook_event_name in UPLOAD_HOOKS:
         api_key = resolve_api_key()

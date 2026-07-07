@@ -20,7 +20,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.1.5"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
@@ -363,6 +363,39 @@ def append_to_batch(session_id, entry):
             f.write(line)
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def append_to_batch_deduped(session_id, entry, is_duplicate):
+    """Append *entry* unless *is_duplicate* judges it already batched.
+
+    ``is_duplicate`` receives the batch's existing records (as ``read_batch``
+    returns them, in order) and returns True to skip the append. The existence
+    check and the append run under a single exclusive lock, so two
+    near-simultaneous hook processes cannot both pass the check and double-write:
+    Cursor fires some hooks (notably ``afterAgentThought``) more than once for a
+    single event, microseconds apart in separate processes, so a non-atomic
+    check-then-append would race. Returns True if appended, False if skipped.
+    """
+    batch_file = get_batch_file(session_id)
+    with open(batch_file, "a+") as f:
+        with _lock_file(f, exclusive=True):
+            f.seek(0)
+            existing = []
+            for line in f.readlines():
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    existing.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            if is_duplicate(existing):
+                return False
+            # 'a+' append mode writes at EOF regardless of the read seek above.
+            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    if platform.system() != "Windows":
+        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    return True
 
 
 def read_batch(session_id):
