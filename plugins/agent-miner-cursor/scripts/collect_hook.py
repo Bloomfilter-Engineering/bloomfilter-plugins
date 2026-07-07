@@ -24,7 +24,7 @@ UPLOAD_HOOKS = {"stop", "sessionEnd"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
 
 
-def _thought_already_batched(records, payload):
+def _thought_already_batched(records: list, payload: dict) -> bool:
     """True if this ``afterAgentThought`` duplicates one already in this turn.
 
     Cursor fires ``afterAgentThought`` more than once for a single thought: the

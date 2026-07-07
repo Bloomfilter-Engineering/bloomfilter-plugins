@@ -15,7 +15,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from typing import IO, Any, Iterator
+from typing import IO, Any, Callable, Iterator
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -373,7 +373,9 @@ def append_to_batch(session_id: str, entry: dict) -> None:
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def append_to_batch_deduped(session_id: str, entry: dict, is_duplicate) -> bool:
+def append_to_batch_deduped(
+    session_id: str, entry: dict, is_duplicate: Callable[[list], bool]
+) -> bool:
     """Append *entry* unless *is_duplicate* judges it already batched.
 
     ``is_duplicate`` receives the batch's existing records (as ``read_batch``
