@@ -393,6 +393,12 @@ def append_to_batch_deduped(session_id, entry, is_duplicate):
                 return False
             # 'a+' append mode writes at EOF regardless of the read seek above.
             f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            # Flush before releasing the lock: f.write only buffers in Python,
+            # and the lock is released at the end of this block while the file
+            # is not closed (flushed) until the outer 'with' exits. Without this
+            # the next process could take the lock, reread, miss the append, and
+            # write the duplicate anyway — defeating the dedup.
+            f.flush()
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
     return True
