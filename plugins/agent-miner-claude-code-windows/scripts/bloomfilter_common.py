@@ -482,8 +482,10 @@ def extract_subagent_conversation(
         return None
 
     expected = (expected_last_message or "").strip()
+    expected_capped = (_cap_text(expected) or "").strip()
     deadline = time.monotonic() + max_wait_s
     result = None
+    matched = False
     while True:
         result = _parse_subagent_transcript(agent_transcript_path)
         if not expected:
@@ -491,22 +493,17 @@ def extract_subagent_conversation(
         last_ar = ""
         if result and result.get("turns"):
             last_ar = (result["turns"][-1].get("agent_response") or "").strip()
-        # Caught up when the transcript's final text matches the known message
-        # (prefix compare tolerates truncation on either side).
-        matched = last_ar and (
-            last_ar[:200] == expected[:200]
-            or expected[:200] in last_ar
-            or last_ar[:200] in expected
-        )
+        # Caught up only on a complete match against the capped expected message.
+        matched = bool(last_ar) and last_ar == expected_capped
         if matched or time.monotonic() >= deadline:
             break
         time.sleep(poll_s)
 
-    # Guarantee the final response text even if the transcript never flushed it.
-    if result and expected and result.get("turns"):
-        last_turn = result["turns"][-1]
-        if not (last_turn.get("agent_response") or "").strip():
-            last_turn["agent_response"] = _cap_text(expected_last_message)
+    # If we never confirmed a complete match, the transcript's final response is
+    # missing OR partially flushed — replace it with the authoritative message so
+    # a partial (non-empty) capture can't survive.
+    if result and expected and not matched and result.get("turns"):
+        result["turns"][-1]["agent_response"] = _cap_text(expected_last_message)
     return result
 
 
