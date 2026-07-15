@@ -17,6 +17,7 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    extract_subagent_conversation,
     extract_transcript_summary,
     get_git_branch,
     read_batch,
@@ -89,6 +90,18 @@ def main():
         summary = extract_transcript_summary(transcript_path)
         if summary:
             envelope["transcript_summary"] = summary
+
+    # On SubagentStop, capture the subagent's own (sidechain) transcript so the
+    # backend can build a full child AgentSession. Read it NOW — these files are
+    # garbage-collected and may be gone by the time the batch uploads.
+    if hook_event_name == "SubagentStop":
+        agent_transcript_path = payload.get("agent_transcript_path", "")
+        conversation = extract_subagent_conversation(
+            agent_transcript_path,
+            expected_last_message=payload.get("last_assistant_message"),
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
 
     # Append to batch file
     append_to_batch(session_id, envelope)
