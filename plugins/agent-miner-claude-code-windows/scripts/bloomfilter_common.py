@@ -446,19 +446,26 @@ def extract_transcript_summary(transcript_path):
 _SUBAGENT_FIELD_CAP = 10_000
 
 
-def _cap_text(value):
-    """Truncate a string value to the subagent field cap; pass through others."""
-    if isinstance(value, str) and len(value) > _SUBAGENT_FIELD_CAP:
+def _cap_text(value: str) -> str:
+    """Truncate a string to the subagent field cap; return it unchanged otherwise.
+
+    Args:
+        value: The string to cap.
+
+    Returns:
+        str: The string, truncated to _SUBAGENT_FIELD_CAP chars if longer.
+    """
+    if len(value) > _SUBAGENT_FIELD_CAP:
         return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
     return value
 
 
 def extract_subagent_conversation(
-    agent_transcript_path,
-    expected_last_message=None,
-    max_wait_s=2.0,
-    poll_s=0.1,
-):
+    agent_transcript_path: str,
+    expected_last_message: str | None = None,
+    max_wait_s: float = 2.0,
+    poll_s: float = 0.1,
+) -> dict | None:
     """Parse a subagent transcript, waiting for it to finish flushing.
 
     Claude Code fires ``SubagentStop`` before it has necessarily flushed the
@@ -507,7 +514,7 @@ def extract_subagent_conversation(
     return result
 
 
-def _parse_subagent_transcript(agent_transcript_path):
+def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
     """Parse a subagent (sidechain) transcript into structured turns.
 
     Unlike :func:`extract_transcript_summary` (which reads only the tail and
@@ -594,7 +601,7 @@ def _parse_subagent_transcript(agent_transcript_path):
             return turn
 
         for entry in entries:
-            etype = entry.get("type")
+            entry_type = entry.get("type")
             msg = entry.get("message", {})
             ts = entry.get("timestamp")
 
@@ -629,24 +636,24 @@ def _parse_subagent_transcript(agent_transcript_path):
             if ts:
                 current["ended_at"] = ts
 
-            is_assistant = etype == "assistant" or msg.get("role") == "assistant"
+            is_assistant = entry_type == "assistant" or msg.get("role") == "assistant"
             if is_assistant:
                 if msg.get("usage"):
-                    rid = msg.get("id", "")
-                    current["_usage_by_id"][rid] = msg["usage"]
+                    message_id = msg.get("id", "")
+                    current["_usage_by_id"][message_id] = msg["usage"]
                     if msg.get("model"):
                         current["model"] = msg["model"]
-                    if rid:
-                        current["response_id"] = rid
+                    if message_id:
+                        current["response_id"] = message_id
                 content = msg.get("content", "")
                 if isinstance(content, list):
                     for block in content:
                         if not isinstance(block, dict):
                             continue
-                        btype = block.get("type")
-                        if btype == "text" and block.get("text"):
+                        block_type = block.get("type")
+                        if block_type == "text" and block.get("text"):
                             current["agent_response"] = _cap_text(block["text"])
-                        elif btype == "tool_use":
+                        elif block_type == "tool_use":
                             current["_tool_calls_by_id"][block.get("id", "")] = {
                                 "tool_name": block.get("name", ""),
                                 "tool_input": block.get("input"),
@@ -685,8 +692,16 @@ def _parse_subagent_transcript(agent_transcript_path):
         return None
 
 
-def _stringify_tool_result(content):
-    """Flatten a tool_result content field (str or list of blocks) to text."""
+def _stringify_tool_result(content: str | list | None) -> str:
+    """Flatten a tool_result content field (str or list of blocks) to text.
+
+    Args:
+        content: The tool_result ``content`` — a string, a list of blocks
+            (dicts with a ``text`` key, or bare strings), or None.
+
+    Returns:
+        str: The flattened text (empty string when there is nothing to render).
+    """
     if isinstance(content, str):
         return content
     if isinstance(content, list):
