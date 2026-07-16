@@ -12,6 +12,7 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    extract_subagent_conversation,
     get_git_branch,
     read_batch,
     read_payload,
@@ -28,12 +29,18 @@ SUPPORTED_HOOKS: set[str] = {
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
+    "SubagentStart",
+    "SubagentStop",
     "Stop",
 }
 UPLOAD_HOOKS: set[str] = {"Stop"}
 GIT_BRANCH_HOOKS: set[str] = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_EXTRACT_HOOKS: set[str] = {"Stop"}
 SESSION_META_HOOKS: set[str] = {"SessionStart"}
+# SubagentStop fires under the PARENT session_id and carries the subagent's own
+# rollout path (agent_transcript_path); we parse that into a child conversation
+# and attach it so the backend builds a linked child AgentSession.
+SUBAGENT_STOP_HOOK: str = "SubagentStop"
 
 
 def _first_string(candidates: list[Any]) -> str:
@@ -230,6 +237,19 @@ def main() -> None:
         and payload.get("last_assistant_message")
     ):
         envelope["agent_response"] = payload["last_assistant_message"]
+
+    # On SubagentStop, parse the subagent's own rollout (agent_transcript_path)
+    # into a normalized child conversation and attach it. Codex fires this hook
+    # under the PARENT session_id, so it lands in the parent batch and uploads
+    # with the parent on Stop; the backend turns it into a linked child
+    # AgentSession. Read NOW — the subagent's rollout may be GC'd later.
+    if hook_event_name == SUBAGENT_STOP_HOOK:
+        conversation = extract_subagent_conversation(
+            payload.get("agent_transcript_path", ""),
+            expected_last_message=payload.get("last_assistant_message"),
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
 
     append_to_batch(session_id, envelope)
 

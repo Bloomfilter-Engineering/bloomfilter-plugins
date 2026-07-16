@@ -8,6 +8,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -19,7 +20,8 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION: str = "0.1.1"
+PLUGIN_VERSION: str = "0.1.2"
+_SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
 DEBUG_LOG_TAG: str = "codex-windows"  # disambiguates plugins sharing the same log dir
@@ -389,3 +391,91 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> bool:
 def utcnow_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _cap_text(value: Any) -> Any:
+    """Truncate an over-long string field; pass non-strings through unchanged.
+
+    Subagent transcripts can carry very large tool outputs / responses. Cap
+    them so a single batch upload stays bounded, mirroring the Claude Code
+    plugin's behavior and the backend's field expectations.
+    """
+    if not isinstance(value, str):
+        return value
+    if len(value) > _SUBAGENT_FIELD_CAP:
+        return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+    return value
+
+
+def _cap_conversation(conversation: dict[str, Any]) -> None:
+    """Cap the free-text fields of a parsed subagent conversation in place.
+
+    Caps ``user_prompt``, ``agent_response``, and each tool call's
+    ``tool_output``. ``tool_input`` is left raw (matches the main-session
+    ToolCall shape and the Claude Code plugin).
+    """
+    for turn in conversation.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("user_prompt") is not None:
+            turn["user_prompt"] = _cap_text(turn["user_prompt"])
+        if turn.get("agent_response") is not None:
+            turn["agent_response"] = _cap_text(turn["agent_response"])
+        for tool_call in turn.get("tool_calls") or []:
+            if isinstance(tool_call, dict) and tool_call.get("tool_output") is not None:
+                tool_call["tool_output"] = _cap_text(tool_call["tool_output"])
+
+
+def extract_subagent_conversation(
+    agent_transcript_path: str,
+    expected_last_message: str | None = None,
+    max_wait_s: float = 2.0,
+    poll_s: float = 0.1,
+) -> dict[str, Any] | None:
+    """Parse a subagent's own Codex rollout into a normalized conversation.
+
+    Returns ``{"turns": [...]}`` (the backend's child-session shape) or None if
+    the transcript path is missing. ``agent_transcript_path`` points at the
+    subagent thread's rollout JSONL.
+
+    Codex fires ``SubagentStop`` before the subagent's final assistant message
+    is guaranteed flushed to its rollout, so — when ``expected_last_message``
+    (the authoritative ``payload.last_assistant_message``) is provided — this
+    re-parses until the last turn's ``agent_response`` matches it, up to
+    ``max_wait_s``. On timeout it backfills the final response from the
+    authoritative message so a partial capture can't survive.
+    """
+    if not agent_transcript_path or not os.path.exists(agent_transcript_path):
+        return None
+
+    # Local import: codex_rollout lives beside this module on sys.path (the
+    # hook entrypoint inserts the scripts dir before importing).
+    from codex_rollout import parse_transcript
+
+    expected = (expected_last_message or "").strip()
+    expected_capped = (_cap_text(expected) or "").strip()
+    deadline = time.monotonic() + max_wait_s
+    result: dict[str, Any] | None = None
+    matched = False
+    while True:
+        try:
+            result = parse_transcript(agent_transcript_path)
+        except Exception:
+            result = None
+        if isinstance(result, dict):
+            _cap_conversation(result)
+        if not expected:
+            break
+        last_response = ""
+        if result and result.get("turns"):
+            last_response = (result["turns"][-1].get("agent_response") or "").strip()
+        matched = bool(last_response) and last_response == expected_capped
+        if matched or time.monotonic() >= deadline:
+            break
+        time.sleep(poll_s)
+
+    # Never confirmed a complete match → the final response is missing or was
+    # partially flushed. Replace it with the authoritative message.
+    if result and expected and not matched and result.get("turns"):
+        result["turns"][-1]["agent_response"] = _cap_text(expected_last_message)
+    return result

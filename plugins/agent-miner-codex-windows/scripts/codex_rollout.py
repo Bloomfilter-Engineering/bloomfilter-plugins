@@ -91,11 +91,83 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
     """
     if not turn_id:
         return _empty_turn()
+    return _build_turn(list(_read_lines(path)), turn_id)
 
+
+def parse_transcript(path: str) -> dict[str, Any]:
+    """Build a normalized subagent transcript from a whole Codex rollout.
+
+    Returns ``{"turns": [...]}`` — one turn per ``turn_context`` turn_id, in
+    first-seen order, each shaped for the Bloomfilter backend's child-session
+    builder (``user_prompt``, ``agent_response``, per-turn token totals,
+    ``tool_calls``). Per-turn token totals are summed from the turn's
+    ``token_count`` events, matching how the main-session path aggregates
+    ``api_calls``. The rollout is read once and reused across all turns.
+    """
+    entries = list(_read_lines(path))
+    turns = [
+        _to_subagent_turn(_build_turn(entries, turn_id))
+        for turn_id in _iter_turn_ids(entries)
+    ]
+    return {"turns": turns}
+
+
+def _iter_turn_ids(entries: list[dict[str, Any]]) -> list[str]:
+    """Return turn_context turn_ids in first-seen order."""
+    seen: list[str] = []
+    for entry in entries:
+        if entry.get("type") != "turn_context":
+            continue
+        turn_id = (entry.get("payload") or {}).get("turn_id")
+        if turn_id and turn_id not in seen:
+            seen.append(turn_id)
+    return seen
+
+
+def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
+    """Map a ``_build_turn`` result to the backend's child-turn shape.
+
+    Token totals sum the turn's ``api_calls`` (each already
+    input-minus-cached) so accounting matches the main-session path. Codex
+    exposes no cache-creation figure, so ``cache_creation_tokens`` is 0.
+    """
+    api_calls = turn.get("api_calls") or []
+    input_tokens = sum(int(a.get("input_tokens", 0) or 0) for a in api_calls)
+    output_tokens = sum(int(a.get("output_tokens", 0) or 0) for a in api_calls)
+    cache_read_tokens = sum(int(a.get("cache_read_tokens", 0) or 0) for a in api_calls)
+    tool_calls = [
+        {
+            "started_at": tool_call.get("timestamp") or "",
+            "tool_name": tool_call.get("tool_name", ""),
+            "tool_call_id": tool_call.get("tool_call_id", ""),
+            "tool_input": tool_call.get("tool_input"),
+            "tool_output": tool_call.get("tool_output"),
+        }
+        for tool_call in (turn.get("tool_calls") or [])
+    ]
+    return {
+        "started_at": turn.get("started_at") or "",
+        "ended_at": turn.get("ended_at") or "",
+        "model": turn.get("model") or "",
+        "user_prompt": turn.get("user_prompt") or None,
+        "agent_response": turn.get("assistant_text") or None,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_tokens": cache_read_tokens,
+        "cache_creation_tokens": 0,
+        "tool_calls": tool_calls,
+    }
+
+
+def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
+    """Extract per-turn data for ``turn_id`` from pre-read rollout entries."""
     # First pass: track turn_id boundaries, collect raw events.
     current_turn_id: str | None = None
     turn_model: str = ""
     assistant_chunks: list[str] = []
+    turn_started_at: datetime | None = None
+    turn_ended_at: datetime | None = None
+    user_prompt_text: str = ""
     # list of (reasoning_timestamp, previous_event_timestamp, api_call_seq_at_emit)
     reasoning_starts: list[tuple[datetime | None, datetime | None, int]] = []
     function_calls: dict[str, dict[str, Any]] = {}
@@ -109,7 +181,7 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
     def in_turn() -> bool:
         return current_turn_id == turn_id
 
-    for entry in _read_lines(path):
+    for entry in entries:
         entry_type = entry.get("type")
         entry_timestamp = _parse_iso(entry.get("timestamp"))
         payload = entry.get("payload", {}) or {}
@@ -118,12 +190,21 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
             current_turn_id = payload.get("turn_id") or current_turn_id
             if in_turn():
                 turn_model = payload.get("model") or turn_model
+                if entry_timestamp is not None and turn_started_at is None:
+                    turn_started_at = entry_timestamp
+                    turn_ended_at = entry_timestamp
             continue
 
         if not in_turn():
             # response_item lines have no turn_id; bucket them into the
             # currently-active turn_context only.
             continue
+
+        # Track the turn's wall-clock span from its in-turn entries.
+        if entry_timestamp is not None:
+            if turn_started_at is None:
+                turn_started_at = entry_timestamp
+            turn_ended_at = entry_timestamp
 
         if entry_type == "event_msg":
             event_subtype = payload.get("type")
@@ -179,6 +260,17 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
                     raw_ttft = payload.get("time_to_first_token_ms")
                     if isinstance(raw_ttft, (int, float)):
                         time_to_first_token_ms = int(raw_ttft)
+                case "user_message":
+                    # The turn's user prompt (subagent transcript needs it).
+                    # First non-empty wins so an inherited/forked turn keeps
+                    # its opening prompt rather than a later replay.
+                    message_text = payload.get("message")
+                    if (
+                        isinstance(message_text, str)
+                        and message_text
+                        and not user_prompt_text
+                    ):
+                        user_prompt_text = message_text
             last_event_timestamp = entry_timestamp
 
         elif entry_type == "response_item":
@@ -300,6 +392,9 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
         "api_calls": api_calls,
         "model": turn_model,
         "time_to_first_token_ms": time_to_first_token_ms,
+        "user_prompt": user_prompt_text or None,
+        "started_at": _to_iso(turn_started_at),
+        "ended_at": _to_iso(turn_ended_at),
     }
 
 
@@ -312,6 +407,9 @@ def _empty_turn() -> dict[str, Any]:
         "api_calls": [],
         "model": "",
         "time_to_first_token_ms": None,
+        "user_prompt": None,
+        "started_at": "",
+        "ended_at": "",
     }
 
 
