@@ -556,8 +556,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 return False
             content = entry.get("message", {}).get("content", "")
             if isinstance(content, list) and all(
-                isinstance(c, dict) and c.get("type") == "tool_result"
-                for c in content
+                isinstance(c, dict) and c.get("type") == "tool_result" for c in content
             ):
                 return False
             return True
@@ -590,9 +589,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             for usage in usage_by_id.values():
                 totals["input_tokens"] += usage.get("input_tokens", 0)
                 totals["output_tokens"] += usage.get("output_tokens", 0)
-                totals["cache_read_tokens"] += usage.get(
-                    "cache_read_input_tokens", 0
-                )
+                totals["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
                 totals["cache_creation_tokens"] += usage.get(
                     "cache_creation_input_tokens", 0
                 )
