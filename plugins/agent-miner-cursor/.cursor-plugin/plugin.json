@@ -1,6 +1,6 @@
 {
   "name": "bloomfilter-agent-miner-cursor",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "description": "Agent mining hooks for Bloomfilter (Cursor on macOS and Linux)",
   "author": {
     "name": "Bloomfilter Engineering"
