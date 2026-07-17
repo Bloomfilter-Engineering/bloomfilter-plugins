@@ -5,12 +5,13 @@ import shutil
 import stat
 import subprocess
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.3"
+PLUGIN_VERSION = "0.1.4"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -428,3 +429,274 @@ def extract_transcript_summary(transcript_path):
 
     except Exception:
         return None
+
+
+# Cap a single tool_output/text payload so a subagent that read large files
+# doesn't bloat the batch upload. Generous enough to keep summaries intact.
+_SUBAGENT_FIELD_CAP = 10_000
+
+
+def _cap_text(value: str) -> str:
+    """Truncate a string to the subagent field cap; return it unchanged otherwise.
+
+    Args:
+        value: The string to cap.
+
+    Returns:
+        str: The string, truncated to _SUBAGENT_FIELD_CAP chars if longer.
+    """
+    if len(value) > _SUBAGENT_FIELD_CAP:
+        return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+    return value
+
+
+def extract_subagent_conversation(
+    agent_transcript_path: str,
+    expected_last_message: str | None = None,
+    max_wait_s: float = 2.0,
+    poll_s: float = 0.1,
+) -> dict | None:
+    """Parse a subagent transcript, waiting for it to finish flushing.
+
+    Claude Code fires ``SubagentStop`` before it has necessarily flushed the
+    subagent's FINAL assistant message to the transcript file — a race that
+    otherwise captures a partial turn (thinking only, tiny token counts, empty
+    response). ``expected_last_message`` is the SubagentStop payload's
+    ``last_assistant_message`` (authoritative + complete); we poll the transcript
+    (bounded by ``max_wait_s``) until its last assistant text matches, then
+    backfill the final response from it if the file still hasn't caught up.
+
+    Args:
+        agent_transcript_path: Path to the subagent (sidechain) transcript.
+        expected_last_message: The subagent's final message per the hook payload.
+        max_wait_s: Max seconds to wait for the transcript to flush.
+        poll_s: Poll interval while waiting.
+
+    Returns:
+        ``{"turns": [...]}`` (see _parse_subagent_transcript) or None.
+    """
+    if not agent_transcript_path or not os.path.exists(agent_transcript_path):
+        return None
+
+    expected = (expected_last_message or "").strip()
+    expected_capped = (_cap_text(expected) or "").strip()
+    deadline = time.monotonic() + max_wait_s
+    result = None
+    matched = False
+    while True:
+        result = _parse_subagent_transcript(agent_transcript_path)
+        if not expected:
+            break
+        last_ar = ""
+        if result and result.get("turns"):
+            last_ar = (result["turns"][-1].get("agent_response") or "").strip()
+        # Caught up only on a complete match against the capped expected message.
+        matched = bool(last_ar) and last_ar == expected_capped
+        if matched or time.monotonic() >= deadline:
+            break
+        time.sleep(poll_s)
+
+    # If we never confirmed a complete match, the transcript's final response is
+    # missing OR partially flushed — replace it with the authoritative message so
+    # a partial (non-empty) capture can't survive.
+    if result and expected and not matched and result.get("turns"):
+        result["turns"][-1]["agent_response"] = _cap_text(expected_last_message)
+    return result
+
+
+def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
+    """Parse a subagent (sidechain) transcript into structured turns.
+
+    Unlike :func:`extract_transcript_summary` (which reads only the tail and
+    returns token totals for the last turn), this reads the WHOLE subagent
+    transcript and returns per-turn user_prompt/agent_response, tool calls, and
+    summed token usage so the backend can build a full child AgentSession.
+
+    A subagent transcript is the same JSONL format as a normal session and its
+    first user entry is the real task prompt. Normally there is a single real
+    user prompt (one turn with many tool calls), but this splits on every real
+    user prompt to stay faithful if a subagent had multiple.
+
+    Returns ``{"turns": [ {user_prompt, agent_response, tool_calls, model,
+    response_id, input_tokens, output_tokens, cache_read_tokens,
+    cache_creation_tokens, started_at, ended_at} ]}`` or None on failure/empty.
+    """
+    if not agent_transcript_path or not os.path.exists(agent_transcript_path):
+        return None
+
+    try:
+        with open(agent_transcript_path, "rb") as tf:
+            raw = tf.read()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+
+        entries = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entries.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+
+        def _is_real_user_prompt(entry):
+            if entry.get("type") != "user":
+                return False
+            if entry.get("toolUseResult"):
+                return False
+            content = entry.get("message", {}).get("content", "")
+            if isinstance(content, list) and all(
+                isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+            ):
+                return False
+            return True
+
+        def _user_text(entry):
+            content = entry.get("message", {}).get("content", "")
+            if isinstance(content, str):
+                return content
+            if isinstance(content, list):
+                parts = [
+                    c.get("text", "")
+                    for c in content
+                    if isinstance(c, dict) and c.get("type") == "text"
+                ]
+                return "\n".join(p for p in parts if p)
+            return ""
+
+        turns = []
+        current = None
+
+        def _finalize(turn):
+            # Dedup assistant usage by response_id (streaming emits duplicates).
+            usage_by_id = turn.pop("_usage_by_id", {})
+            totals = {
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "cache_read_tokens": 0,
+                "cache_creation_tokens": 0,
+            }
+            for usage in usage_by_id.values():
+                totals["input_tokens"] += usage.get("input_tokens", 0)
+                totals["output_tokens"] += usage.get("output_tokens", 0)
+                totals["cache_read_tokens"] += usage.get("cache_read_input_tokens", 0)
+                totals["cache_creation_tokens"] += usage.get(
+                    "cache_creation_input_tokens", 0
+                )
+            turn.update(totals)
+            turn["tool_calls"] = list(turn.pop("_tool_calls_by_id", {}).values())
+            return turn
+
+        for entry in entries:
+            entry_type = entry.get("type")
+            msg = entry.get("message", {})
+            ts = entry.get("timestamp")
+
+            if _is_real_user_prompt(entry):
+                if current is not None:
+                    turns.append(_finalize(current))
+                current = {
+                    "user_prompt": _cap_text(_user_text(entry)),
+                    "agent_response": None,
+                    "model": "",
+                    "response_id": "",
+                    "started_at": ts,
+                    "ended_at": ts,
+                    "_usage_by_id": {},
+                    "_tool_calls_by_id": {},
+                }
+                continue
+
+            if current is None:
+                # Tool activity before any real prompt — start an implicit turn.
+                current = {
+                    "user_prompt": None,
+                    "agent_response": None,
+                    "model": "",
+                    "response_id": "",
+                    "started_at": ts,
+                    "ended_at": ts,
+                    "_usage_by_id": {},
+                    "_tool_calls_by_id": {},
+                }
+
+            if ts:
+                current["ended_at"] = ts
+
+            is_assistant = entry_type == "assistant" or msg.get("role") == "assistant"
+            if is_assistant:
+                if msg.get("usage"):
+                    message_id = msg.get("id", "")
+                    current["_usage_by_id"][message_id] = msg["usage"]
+                    if msg.get("model"):
+                        current["model"] = msg["model"]
+                    if message_id:
+                        current["response_id"] = message_id
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for block in content:
+                        if not isinstance(block, dict):
+                            continue
+                        block_type = block.get("type")
+                        if block_type == "text" and block.get("text"):
+                            current["agent_response"] = _cap_text(block["text"])
+                        elif block_type == "tool_use":
+                            current["_tool_calls_by_id"][block.get("id", "")] = {
+                                "tool_name": block.get("name", ""),
+                                "tool_input": block.get("input"),
+                                "tool_output": None,
+                                "tool_call_id": block.get("id", ""),
+                                "started_at": ts,
+                            }
+                elif isinstance(content, str) and content:
+                    current["agent_response"] = _cap_text(content)
+            else:
+                # user tool_result entries — attach output to the matching call.
+                content = msg.get("content", "")
+                if isinstance(content, list):
+                    for block in content:
+                        if (
+                            isinstance(block, dict)
+                            and block.get("type") == "tool_result"
+                        ):
+                            call = current["_tool_calls_by_id"].get(
+                                block.get("tool_use_id", "")
+                            )
+                            if call is not None:
+                                call["tool_output"] = _cap_text(
+                                    _stringify_tool_result(block.get("content"))
+                                )
+
+        if current is not None:
+            turns.append(_finalize(current))
+
+        if not turns:
+            return None
+
+        return {"turns": turns}
+
+    except Exception:
+        return None
+
+
+def _stringify_tool_result(content: str | list | None) -> str:
+    """Flatten a tool_result content field (str or list of blocks) to text.
+
+    Args:
+        content: The tool_result ``content`` — a string, a list of blocks
+            (dicts with a ``text`` key, or bare strings), or None.
+
+    Returns:
+        str: The flattened text (empty string when there is nothing to render).
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for block in content:
+            if isinstance(block, dict):
+                parts.append(block.get("text", "") or "")
+            elif isinstance(block, str):
+                parts.append(block)
+        return "\n".join(p for p in parts if p)
+    return ""
