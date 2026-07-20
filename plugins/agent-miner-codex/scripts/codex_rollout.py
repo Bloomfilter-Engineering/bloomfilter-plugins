@@ -165,6 +165,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     current_turn_id: str | None = None
     turn_model: str = ""
     assistant_chunks: list[str] = []
+    assistant_messages: list[dict[str, Any]] = []
     turn_started_at: datetime | None = None
     turn_ended_at: datetime | None = None
     user_prompt_text: str = ""
@@ -277,14 +278,25 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
             response_subtype = payload.get("type")
             if response_subtype == "message":
                 content_blocks = payload.get("content") or []
-                for content_block in content_blocks:
-                    if (
-                        isinstance(content_block, dict)
-                        and content_block.get("type") == "output_text"
-                    ):
-                        text_value = content_block.get("text")
-                        if text_value:
-                            assistant_chunks.append(text_value)
+                message_texts = [
+                    content_block["text"]
+                    for content_block in content_blocks
+                    if isinstance(content_block, dict)
+                    and content_block.get("type") == "output_text"
+                    and content_block.get("text")
+                ]
+                if message_texts:
+                    assistant_chunks.extend(message_texts)
+                    # Record the whole message as one narration segment with its
+                    # timestamp so the caller can interleave intermediate
+                    # narration around tool/subagent calls instead of merging it
+                    # all into the final response.
+                    assistant_messages.append(
+                        {
+                            "timestamp": _to_iso(entry_timestamp),
+                            "text": "\n".join(message_texts),
+                        }
+                    )
             elif response_subtype == "reasoning":
                 reasoning_starts.append(
                     (entry_timestamp, last_event_timestamp, pending_api_call_seq)
@@ -393,6 +405,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
         "model": turn_model,
         "time_to_first_token_ms": time_to_first_token_ms,
         "user_prompt": user_prompt_text or None,
+        "assistant_messages": assistant_messages,
         "started_at": _to_iso(turn_started_at),
         "ended_at": _to_iso(turn_ended_at),
     }
@@ -408,6 +421,7 @@ def _empty_turn() -> dict[str, Any]:
         "model": "",
         "time_to_first_token_ms": None,
         "user_prompt": None,
+        "assistant_messages": [],
         "started_at": "",
         "ended_at": "",
     }
