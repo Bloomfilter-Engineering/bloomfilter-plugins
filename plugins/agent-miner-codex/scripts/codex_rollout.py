@@ -132,9 +132,15 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
     exposes no cache-creation figure, so ``cache_creation_tokens`` is 0.
     """
     api_calls = turn.get("api_calls") or []
-    input_tokens = sum(int(a.get("input_tokens", 0) or 0) for a in api_calls)
-    output_tokens = sum(int(a.get("output_tokens", 0) or 0) for a in api_calls)
-    cache_read_tokens = sum(int(a.get("cache_read_tokens", 0) or 0) for a in api_calls)
+    input_tokens = sum(
+        int(api_call.get("input_tokens", 0) or 0) for api_call in api_calls
+    )
+    output_tokens = sum(
+        int(api_call.get("output_tokens", 0) or 0) for api_call in api_calls
+    )
+    cache_read_tokens = sum(
+        int(api_call.get("cache_read_tokens", 0) or 0) for api_call in api_calls
+    )
     tool_calls = [
         {
             "started_at": tool_call.get("timestamp") or "",
@@ -215,118 +221,122 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                 turn_started_at = entry_timestamp
             turn_ended_at = entry_timestamp
 
-        if entry_type == "event_msg":
-            event_subtype = payload.get("type")
-            # Note: event_msg.agent_message duplicates response_item.message
-            # (UI streaming event vs canonical model output). Use only
-            # response_item.message below to avoid doubling the text.
-            match event_subtype:
-                case "exec_command_end":
+        match entry_type:
+            case "event_msg":
+                event_subtype = payload.get("type")
+                # Note: event_msg.agent_message duplicates response_item.message
+                # (UI streaming event vs canonical model output). Use only
+                # response_item.message below to avoid doubling the text.
+                match event_subtype:
+                    case "exec_command_end":
+                        call_id = payload.get("call_id")
+                        if call_id:
+                            duration = payload.get("duration") or {}
+                            seconds = duration.get("secs", 0) or 0
+                            nanoseconds = duration.get("nanos", 0) or 0
+                            duration_ms = int(seconds * 1000 + nanoseconds / 1_000_000)
+                            execution_metadata[call_id] = {
+                                "exit_code": payload.get("exit_code"),
+                                "duration_ms": duration_ms,
+                            }
+                    case "token_count":
+                        token_info = payload.get("info")
+                        if not token_info:
+                            continue
+                        last_token_usage = token_info.get("last_token_usage") or {}
+                        total_input_tokens = (
+                            last_token_usage.get("input_tokens", 0) or 0
+                        )
+                        cached_input_tokens = (
+                            last_token_usage.get("cached_input_tokens", 0) or 0
+                        )
+                        api_calls.append(
+                            {
+                                "input_tokens": max(
+                                    total_input_tokens - cached_input_tokens, 0
+                                ),
+                                "output_tokens": (
+                                    last_token_usage.get("output_tokens", 0) or 0
+                                ),
+                                "cache_read_tokens": cached_input_tokens,
+                                "cache_creation_tokens": 0,
+                                "model": turn_model,
+                                "reasoning_output_tokens": (
+                                    last_token_usage.get("reasoning_output_tokens", 0)
+                                    or 0
+                                ),
+                            }
+                        )
+                        # token_count closes the current API-call window.
+                        pending_api_call_seq += 1
+                    case "task_complete":
+                        raw_ttft = payload.get("time_to_first_token_ms")
+                        if isinstance(raw_ttft, (int, float)):
+                            time_to_first_token_ms = int(raw_ttft)
+                    case "user_message":
+                        # The turn's user prompt (subagent transcript needs it).
+                        # First non-empty wins so an inherited/forked turn keeps
+                        # its opening prompt rather than a later replay.
+                        message_text = payload.get("message")
+                        if (
+                            isinstance(message_text, str)
+                            and message_text
+                            and not user_prompt_text
+                        ):
+                            user_prompt_text = message_text
+                last_event_timestamp = entry_timestamp
+
+            case "response_item":
+                response_subtype = payload.get("type")
+                if response_subtype == "message":
+                    content_blocks = payload.get("content") or []
+                    message_texts = [
+                        content_block["text"]
+                        for content_block in content_blocks
+                        if isinstance(content_block, dict)
+                        and content_block.get("type") == "output_text"
+                        and content_block.get("text")
+                    ]
+                    if message_texts:
+                        assistant_chunks.extend(message_texts)
+                        # Record the whole message as one narration segment with its
+                        # timestamp so the caller can interleave intermediate
+                        # narration around tool/subagent calls instead of merging it
+                        # all into the final response.
+                        assistant_messages.append(
+                            {
+                                "timestamp": _to_iso(entry_timestamp),
+                                "text": "\n".join(message_texts),
+                            }
+                        )
+                elif response_subtype == "reasoning":
+                    reasoning_starts.append(
+                        (entry_timestamp, last_event_timestamp, pending_api_call_seq)
+                    )
+                elif response_subtype in ("function_call", "custom_tool_call"):
+                    call_id = payload.get("call_id")
+                    if not call_id:
+                        continue
+                    raw_input = (
+                        payload.get("arguments")
+                        if "arguments" in payload
+                        else payload.get("input")
+                    )
+                    function_calls[call_id] = {
+                        "timestamp": entry_timestamp,
+                        "tool_name": payload.get("name") or response_subtype,
+                        "tool_input": _decode_arguments(raw_input),
+                    }
+                elif response_subtype in (
+                    "function_call_output",
+                    "custom_tool_call_output",
+                ):
                     call_id = payload.get("call_id")
                     if call_id:
-                        duration = payload.get("duration") or {}
-                        seconds = duration.get("secs", 0) or 0
-                        nanoseconds = duration.get("nanos", 0) or 0
-                        duration_ms = int(seconds * 1000 + nanoseconds / 1_000_000)
-                        execution_metadata[call_id] = {
-                            "exit_code": payload.get("exit_code"),
-                            "duration_ms": duration_ms,
-                        }
-                case "token_count":
-                    token_info = payload.get("info")
-                    if not token_info:
-                        continue
-                    last_token_usage = token_info.get("last_token_usage") or {}
-                    total_input_tokens = last_token_usage.get("input_tokens", 0) or 0
-                    cached_input_tokens = (
-                        last_token_usage.get("cached_input_tokens", 0) or 0
-                    )
-                    api_calls.append(
-                        {
-                            "input_tokens": max(
-                                total_input_tokens - cached_input_tokens, 0
-                            ),
-                            "output_tokens": (
-                                last_token_usage.get("output_tokens", 0) or 0
-                            ),
-                            "cache_read_tokens": cached_input_tokens,
-                            "cache_creation_tokens": 0,
-                            "model": turn_model,
-                            "reasoning_output_tokens": (
-                                last_token_usage.get("reasoning_output_tokens", 0) or 0
-                            ),
-                        }
-                    )
-                    # token_count closes the current API-call window.
-                    pending_api_call_seq += 1
-                case "task_complete":
-                    raw_ttft = payload.get("time_to_first_token_ms")
-                    if isinstance(raw_ttft, (int, float)):
-                        time_to_first_token_ms = int(raw_ttft)
-                case "user_message":
-                    # The turn's user prompt (subagent transcript needs it).
-                    # First non-empty wins so an inherited/forked turn keeps
-                    # its opening prompt rather than a later replay.
-                    message_text = payload.get("message")
-                    if (
-                        isinstance(message_text, str)
-                        and message_text
-                        and not user_prompt_text
-                    ):
-                        user_prompt_text = message_text
-            last_event_timestamp = entry_timestamp
-
-        elif entry_type == "response_item":
-            response_subtype = payload.get("type")
-            if response_subtype == "message":
-                content_blocks = payload.get("content") or []
-                message_texts = [
-                    content_block["text"]
-                    for content_block in content_blocks
-                    if isinstance(content_block, dict)
-                    and content_block.get("type") == "output_text"
-                    and content_block.get("text")
-                ]
-                if message_texts:
-                    assistant_chunks.extend(message_texts)
-                    # Record the whole message as one narration segment with its
-                    # timestamp so the caller can interleave intermediate
-                    # narration around tool/subagent calls instead of merging it
-                    # all into the final response.
-                    assistant_messages.append(
-                        {
-                            "timestamp": _to_iso(entry_timestamp),
-                            "text": "\n".join(message_texts),
-                        }
-                    )
-            elif response_subtype == "reasoning":
-                reasoning_starts.append(
-                    (entry_timestamp, last_event_timestamp, pending_api_call_seq)
-                )
-            elif response_subtype in ("function_call", "custom_tool_call"):
-                call_id = payload.get("call_id")
-                if not call_id:
-                    continue
-                raw_input = (
-                    payload.get("arguments")
-                    if "arguments" in payload
-                    else payload.get("input")
-                )
-                function_calls[call_id] = {
-                    "timestamp": entry_timestamp,
-                    "tool_name": payload.get("name") or response_subtype,
-                    "tool_input": _decode_arguments(raw_input),
-                }
-            elif response_subtype in (
-                "function_call_output",
-                "custom_tool_call_output",
-            ):
-                call_id = payload.get("call_id")
-                if call_id:
-                    function_outputs[call_id] = (
-                        payload.get("output") or payload.get("result") or ""
-                    )
-            last_event_timestamp = entry_timestamp
+                        function_outputs[call_id] = (
+                            payload.get("output") or payload.get("result") or ""
+                        )
+                last_event_timestamp = entry_timestamp
 
     # Build paired tool_calls
     tool_calls: list[dict[str, Any]] = []

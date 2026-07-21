@@ -14,8 +14,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import IO, Any, Callable, Iterator
+
+from cursor_transcript import first_user_query, is_complete, parse_transcript
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -745,10 +748,6 @@ def find_subagent_transcript(parent_transcript_path: str, task: str) -> str | No
     if not os.path.isdir(subagents_dir):
         return None
 
-    # Local import: cursor_transcript lives beside this module on sys.path (the
-    # hook entrypoint inserts the scripts dir before importing).
-    from cursor_transcript import first_user_query
-
     wanted = task.strip()
     candidates = sorted(
         os.path.join(subagents_dir, name)
@@ -873,8 +872,6 @@ def _merge_tool_outputs(
     ``postToolUse``) keep ``tool_output = None``; surplus batch calls with no
     transcript match are dropped.
     """
-    from collections import defaultdict, deque
-
     queues: dict[str, deque] = defaultdict(deque)
     for batch_call in batch_tool_calls:
         queues[batch_call.get("tool_name", "")].append(batch_call)
@@ -927,8 +924,6 @@ def extract_subagent_conversation(
     path = find_subagent_transcript(parent_transcript_path, task)
     if not path:
         return None
-
-    from cursor_transcript import is_complete, parse_transcript
 
     deadline = time.monotonic() + max_wait_s
     while not is_complete(path) and time.monotonic() < deadline:
