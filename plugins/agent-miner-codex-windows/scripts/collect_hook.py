@@ -12,6 +12,7 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    extract_subagent_conversation,
     get_git_branch,
     read_batch,
     read_payload,
@@ -28,12 +29,24 @@ SUPPORTED_HOOKS: set[str] = {
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
+    "SubagentStart",
+    "SubagentStop",
     "Stop",
 }
-UPLOAD_HOOKS: set[str] = {"Stop"}
+# Upload on Stop (turn end) AND SubagentStop: a subagent can outlive the parent
+# turn (Codex doesn't always `wait` on it), so its SubagentStop may fire after
+# the parent's final Stop. Uploading on SubagentStop ships the captured
+# subagent_transcript regardless. Safe because the BE rebuilds an unfinalized
+# turn's events on the later Stop upload (see _handle_turn_start) — the
+# SubagentStop upload only materializes the turn's start + subagent anchor.
+UPLOAD_HOOKS: set[str] = {"Stop", "SubagentStop"}
 GIT_BRANCH_HOOKS: set[str] = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_EXTRACT_HOOKS: set[str] = {"Stop"}
 SESSION_META_HOOKS: set[str] = {"SessionStart"}
+# SubagentStop fires under the PARENT session_id and carries the subagent's own
+# rollout path (agent_transcript_path); we parse that into a child conversation
+# and attach it so the backend builds a linked child AgentSession.
+SUBAGENT_STOP_HOOK: str = "SubagentStop"
 
 
 def _first_string(candidates: list[Any]) -> str:
@@ -138,11 +151,37 @@ def main() -> None:
         except Exception:
             parsed_turn = None
         if parsed_turn:
-            assistant_text = parsed_turn.get("assistant_text") or ""
-            if assistant_text:
-                envelope["agent_response"] = assistant_text
+            # Split assistant narration into segments: the LAST segment is the
+            # turn's final response (agent_response, rendered at turn end); the
+            # earlier segments are intermediate narration ("I'll spin up a
+            # subagent…") emitted below as timestamped AgentMessage events so the
+            # BE interleaves them around the tool/subagent calls that follow.
+            assistant_messages = parsed_turn.get("assistant_messages") or []
+            if assistant_messages:
+                envelope["agent_response"] = assistant_messages[-1].get("text") or ""
             elif payload.get("last_assistant_message"):
                 envelope["agent_response"] = payload["last_assistant_message"]
+
+            for narration in assistant_messages[:-1]:
+                narration_text = narration.get("text") or ""
+                if not narration_text:
+                    continue
+                append_to_batch(
+                    session_id,
+                    {
+                        "hook_event_name": "AgentMessage",
+                        "received_at": (
+                            narration.get("timestamp") or envelope["received_at"]
+                        ),
+                        "plugin_version": PLUGIN_VERSION,
+                        "payload": {
+                            "session_id": session_id,
+                            "turn_id": turn_id,
+                            "text": narration_text,
+                            "permission_mode": payload.get("permission_mode", ""),
+                        },
+                    },
+                )
 
             api_calls = parsed_turn.get("api_calls") or []
             time_to_first_token_ms = parsed_turn.get("time_to_first_token_ms")
@@ -230,6 +269,19 @@ def main() -> None:
         and payload.get("last_assistant_message")
     ):
         envelope["agent_response"] = payload["last_assistant_message"]
+
+    # On SubagentStop, parse the subagent's own rollout (agent_transcript_path)
+    # into a normalized child conversation and attach it. Codex fires this hook
+    # under the PARENT session_id, so it lands in the parent batch and uploads
+    # with the parent on Stop; the backend turns it into a linked child
+    # AgentSession. Read NOW — the subagent's rollout may be GC'd later.
+    if hook_event_name == SUBAGENT_STOP_HOOK:
+        conversation = extract_subagent_conversation(
+            payload.get("agent_transcript_path", ""),
+            expected_last_message=payload.get("last_assistant_message"),
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
 
     append_to_batch(session_id, envelope)
 

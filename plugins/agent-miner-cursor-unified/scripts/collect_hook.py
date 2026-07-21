@@ -14,6 +14,7 @@ from bloomfilter_common import (
     clear_batch,
     debug_log,
     drop_leading_entries,
+    extract_subagent_conversation,
     get_git_branch,
     read_batch,
     read_payload,
@@ -23,7 +24,12 @@ from bloomfilter_common import (
     utcnow_iso,
 )
 
-UPLOAD_HOOKS = {"stop", "sessionEnd"}
+# Upload on turn end (stop / sessionEnd) AND subagentStop: a Cursor subagent
+# runs as its own conversation and its subagentStop can arrive after the parent
+# turn's stop already uploaded, so we ship the captured subagent_transcript on
+# subagentStop too. The cumulative batch + backend idempotency make the
+# re-upload safe and link the child to the parent.
+UPLOAD_HOOKS = {"stop", "sessionEnd", "subagentStop"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
 
 
@@ -104,6 +110,7 @@ def main() -> None:
             f"type={type(payload).__name__}"
         )
         return
+
     session_id = _resolve_session_id(payload)
     if not session_id:
         debug_log(
@@ -177,6 +184,26 @@ def main() -> None:
                 }
             ]
         }
+
+    # On subagentStop, parse the subagent's own transcript into a normalized
+    # child conversation and attach it. Cursor fires this hook under the PARENT
+    # conversation_id (so it lands in the parent batch) but leaves
+    # agent_transcript_path null — the transcript lives at
+    # <parent_conv_dir>/subagents/<child_conv>.jsonl, discovered by matching the
+    # task. The backend turns subagent_transcript into a linked child
+    # AgentSession keyed on payload.subagent_id. Read NOW — before the file is
+    # GC'd. The subagent_id carries an embedded newline (tool_call_id + gen id);
+    # leave it as-is, it is stable across start/stop so backend keying holds.
+    if hook_event_name == "subagentStop":
+        parent_transcript = payload.get("transcript_path") or os.environ.get(
+            "CURSOR_TRANSCRIPT_PATH", ""
+        )
+        conversation = extract_subagent_conversation(
+            parent_transcript,
+            payload.get("task", ""),
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
 
     if hook_event_name == "afterAgentThought":
         appended = append_to_batch_deduped(
