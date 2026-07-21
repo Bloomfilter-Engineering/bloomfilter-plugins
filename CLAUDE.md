@@ -141,12 +141,16 @@ Local install is a **directory copy, not a symlink**, so re-copy the whole plugi
 
 macOS/Linux:
 ```bash
+# Remove the installed copy first — cp -R into an existing dir nests instead of refreshing.
+rm -rf ~/.cursor/plugins/local/agent-miner-cursor-unified
 cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor-unified \
       ~/.cursor/plugins/local/agent-miner-cursor-unified
 ```
 
 Windows (PowerShell):
 ```powershell
+# Remove the installed copy first — Copy-Item -Recurse into an existing dir nests instead of refreshing.
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified" -ErrorAction SilentlyContinue
 Copy-Item -Recurse -Force "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor-unified" `
   "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified"
 ```

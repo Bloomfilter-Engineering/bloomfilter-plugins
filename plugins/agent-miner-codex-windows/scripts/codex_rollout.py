@@ -201,6 +201,14 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
             # currently-active turn_context only.
             continue
 
+        # event_msg lines may carry their own turn_id (e.g. exec_command_end).
+        # Drop those explicitly belonging to a different turn BEFORE they can
+        # influence this turn's wall-clock span below.
+        if entry_type == "event_msg":
+            event_turn_id = payload.get("turn_id")
+            if event_turn_id and event_turn_id != turn_id:
+                continue
+
         # Track the turn's wall-clock span from its in-turn entries.
         if entry_timestamp is not None:
             if turn_started_at is None:
@@ -209,12 +217,6 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
 
         if entry_type == "event_msg":
             event_subtype = payload.get("type")
-            # event_msg lines may carry their own turn_id (e.g. exec_command_end)
-            event_turn_id = payload.get("turn_id")
-            if event_turn_id and event_turn_id != turn_id:
-                # Drop event_msg lines that explicitly belong to a different turn.
-                continue
-
             # Note: event_msg.agent_message duplicates response_item.message
             # (UI streaming event vs canonical model output). Use only
             # response_item.message below to avoid doubling the text.
