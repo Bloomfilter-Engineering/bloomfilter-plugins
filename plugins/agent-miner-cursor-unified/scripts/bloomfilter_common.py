@@ -938,6 +938,11 @@ def extract_subagent_conversation(
         result = parse_transcript(path)
     except Exception:
         return None
+    if isinstance(result, dict) and not result.get("turns"):
+        # Empty/corrupt transcript parsed to zero turns — treat as absent so the
+        # caller's `if conversation:` guard skips it instead of uploading an
+        # empty subagent_transcript.
+        return None
     if isinstance(result, dict):
         # Enrich the transcript (tool inputs only, no thinking) with the outputs
         # and thinking captured in the subagent's own stray hook batch, keyed by
