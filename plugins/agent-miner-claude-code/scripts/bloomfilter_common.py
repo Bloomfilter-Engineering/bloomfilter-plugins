@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.1.4"
+PLUGIN_VERSION = "0.2.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -49,11 +49,11 @@ def secure_makedirs(path):
 def _resolve_debug_log_dir():
     """Return the directory for debug.log.
 
-    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux).
-    Claude Code injects CLAUDE_PLUGIN_DATA pointing at ~/.claude/plugins/data/...,
-    but we deliberately ignore it so debug.log lives next to the user's
-    config.json and batches/ — one well-known place to look for diagnostics
-    across all plugins.
+    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux,
+    %APPDATA%\\bloomfilter on Windows). Claude Code injects CLAUDE_PLUGIN_DATA
+    pointing at a plugin-scoped cache dir, but we deliberately ignore it so
+    debug.log lives next to the user's config.json and batches/ — one
+    well-known place to look for diagnostics across all plugins.
     """
     return get_config_dir()
 
@@ -61,7 +61,6 @@ def _resolve_debug_log_dir():
 def debug_log(message):
     """Append a timestamped line to <bloomfilter-config>/debug.log.
 
-    macOS/Linux only — Windows is out of scope for this plugin.
     Silent on failure — the logger must never crash a hook.
     """
     try:
@@ -74,7 +73,8 @@ def debug_log(message):
         line = f"{timestamp} [{DEBUG_LOG_TAG}] {message}\n"
         with open(log_path, "a") as log_file:
             log_file.write(line)
-        os.chmod(log_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        if platform.system() != "Windows":
+            os.chmod(log_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
     except Exception:
         pass
 
@@ -85,9 +85,14 @@ def debug_log(message):
 
 
 def read_json_config(path, key, default=""):
-    """Safely read a single key from a JSON config file."""
+    """Safely read a single key from a JSON config file.
+
+    Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
+    UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
+    snippet uses exactly that, so user-created configs land here BOM-prefixed.
+    """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f).get(key, default) or default
     except Exception:
         return default
@@ -139,9 +144,14 @@ def resolve_api_url():
 
 
 def read_payload():
-    """Read JSON payload from stdin."""
+    """Read JSON payload from stdin.
+
+    Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
+    pipes to a native executable can prefix stdout with a UTF-8 BOM on
+    Windows PowerShell 5.1, which would otherwise break json.loads.
+    """
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
 
