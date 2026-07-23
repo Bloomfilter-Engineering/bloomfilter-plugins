@@ -14,8 +14,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections import defaultdict, deque
 from datetime import datetime, timezone
-from typing import Callable
+from typing import IO, Any, Callable, Iterator
+
+from cursor_transcript import first_user_query, is_complete, parse_transcript
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -23,7 +26,8 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.6"
+PLUGIN_VERSION = "0.2.0"
+_SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
@@ -38,7 +42,7 @@ _debug_logger = None  # Lazy-init singleton; populated on first debug_log() call
 # ---------------------------------------------------------------------------
 
 
-def get_config_dir():
+def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform."""
     system = platform.system()
     if system == "Windows":
@@ -50,24 +54,17 @@ def get_config_dir():
     return os.path.join(xdg, "bloomfilter")
 
 
-def secure_makedirs(path):
-    """Create directories with owner-only permissions on Unix."""
-    os.makedirs(path, exist_ok=True)
-    if platform.system() != "Windows":
-        os.chmod(path, stat.S_IRWXU)  # 0o700
-
-
 # ---------------------------------------------------------------------------
 # Debug logging
 # ---------------------------------------------------------------------------
 
 
-def _resolve_debug_log_dir():
+def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
     Cursor / Claude / Codex inject a plugin data dir env var when present.
     Fall back to the bloomfilter config dir so the log lives next to the
-    user's batches and config.json (~/.config/bloomfilter on macOS/Linux).
+    user's batches and config.json (%APPDATA%\\bloomfilter on Windows).
     """
     return (
         os.environ.get("PLUGIN_DATA")
@@ -77,7 +74,7 @@ def _resolve_debug_log_dir():
     )
 
 
-def _build_debug_logger():
+def _build_debug_logger() -> logging.Logger:
     """Construct the private debug logger backed by RotatingFileHandler.
 
     Uses a dedicated logger name with propagate=False so it cannot affect
@@ -91,6 +88,8 @@ def _build_debug_logger():
     logger.setLevel(logging.DEBUG)
     logger.propagate = False
 
+    # Idempotent: avoid stacking handlers if this is somehow called twice
+    # in the same process.
     if not logger.handlers:
         handler = logging.handlers.RotatingFileHandler(
             log_path,
@@ -109,7 +108,7 @@ def _build_debug_logger():
     return logger
 
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     """Append a timestamped line to <plugin-data>/debug.log.
 
     Backed by ``logging.handlers.RotatingFileHandler``: 1 MB per file with one
@@ -125,21 +124,33 @@ def debug_log(message):
         pass
 
 
+def secure_makedirs(path: str) -> None:
+    """Create directories with owner-only permissions on Unix."""
+    os.makedirs(path, exist_ok=True)
+    if platform.system() != "Windows":
+        os.chmod(path, stat.S_IRWXU)  # 0o700
+
+
 # ---------------------------------------------------------------------------
 # Config helpers
 # ---------------------------------------------------------------------------
 
 
-def read_json_config(path, key, default=""):
-    """Safely read a single key from a JSON config file."""
+def read_json_config(path: str, key: str, default: str = "") -> str:
+    """Safely read a single key from a JSON config file.
+
+    Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
+    UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's setup snippet
+    uses exactly that, so user-created configs land here BOM-prefixed.
+    """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f).get(key, default) or default
     except Exception:
         return default
 
 
-def bootstrap_config(plugin_root):
+def bootstrap_config(plugin_root: str) -> str:
     """Copy the template config if the user config does not exist yet."""
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
@@ -158,8 +169,14 @@ def bootstrap_config(plugin_root):
     return config_file
 
 
-def resolve_api_key():
-    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config."""
+def resolve_api_key() -> str:
+    """Resolve the API key: BLOOMFILTER_API_KEY env var > user config.
+
+    Project-level config is intentionally NOT consulted for the API key —
+    project configs live in the repo and can be accidentally committed.
+    The user config (~/.config/bloomfilter/config.json) and the env var
+    are the only supported places to store the API key.
+    """
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return key
@@ -168,7 +185,7 @@ def resolve_api_key():
     return read_json_config(user_config, "api_key")
 
 
-def resolve_api_url():
+def resolve_api_url() -> str:
     """Resolve the API URL: env var > user config > default."""
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
@@ -187,8 +204,13 @@ def resolve_api_url():
 # ---------------------------------------------------------------------------
 
 
-def read_payload():
-    """Read JSON payload from stdin."""
+def read_payload() -> Any:
+    """Read JSON payload from stdin.
+
+    Returns the parsed JSON value — normally a dict, but any JSON type is
+    possible, so callers must validate the shape (the collect hook checks
+    ``isinstance(payload, dict)``). Returns ``{}`` for empty or non-JSON input.
+    """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8")
     raw = sys.stdin.read().lstrip("\ufeff")
@@ -206,8 +228,8 @@ def read_payload():
 # ---------------------------------------------------------------------------
 
 
-def _resolve_git_executable():
-    """Return a git executable path if available."""
+def _resolve_git_executable() -> str:
+    """Return a git executable path if available, or '' if none is found."""
     git = shutil.which("git")
     if git:
         return git
@@ -215,26 +237,28 @@ def _resolve_git_executable():
     if platform.system() != "Windows":
         return ""
 
-    candidates = [
-        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles", ""), "Git", "bin", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "cmd", "git.exe"),
-        os.path.join(os.environ.get("ProgramFiles(x86)", ""), "Git", "bin", "git.exe"),
-        os.path.join(
-            os.environ.get("LocalAppData", ""), "Programs", "Git", "cmd", "git.exe"
-        ),
-        os.path.join(
-            os.environ.get("LocalAppData", ""), "Programs", "Git", "bin", "git.exe"
-        ),
-    ]
+    candidates = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(os.path.join(base, "Git", "cmd", "git.exe"))
+            candidates.append(os.path.join(base, "Git", "bin", "git.exe"))
+    local_app_data = os.environ.get("LocalAppData")
+    if local_app_data:
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "cmd", "git.exe")
+        )
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "bin", "git.exe")
+        )
     for candidate in candidates:
-        if candidate and os.path.isfile(candidate):
+        if os.path.isabs(candidate) and os.path.isfile(candidate):
             return candidate
 
     return ""
 
 
-def get_git_branch(project_dir):
+def get_git_branch(project_dir: str) -> str:
     """Return the current git branch, or '' on failure."""
     git = _resolve_git_executable()
     if not git:
@@ -260,7 +284,7 @@ def get_git_branch(project_dir):
 if platform.system() != "Windows":
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
         """Acquire an flock on an open file, release on exit."""
         op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(fp, op)
@@ -272,7 +296,7 @@ if platform.system() != "Windows":
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
+    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
         """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
 
         msvcrt only supports exclusive locks — the ``exclusive`` arg is
@@ -296,7 +320,12 @@ else:
         try:
             fp.seek(0)
             msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
-        except OSError:
+        except OSError as exc:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                "proceeding unsynchronized.",
+                file=sys.stderr,
+            )
             if pos is not None:
                 try:
                     fp.seek(pos)
@@ -322,14 +351,14 @@ else:
                     pass
 
 
-def get_batch_dir():
+def get_batch_dir() -> str:
     """Return (and create) the batch directory."""
     batch_dir = os.path.join(get_config_dir(), "batches")
     secure_makedirs(batch_dir)
     return batch_dir
 
 
-def get_batch_file(session_id):
+def get_batch_file(session_id: str) -> str:
     """Return path to the JSONL batch file for *session_id*."""
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
@@ -337,7 +366,7 @@ def get_batch_file(session_id):
     return os.path.join(get_batch_dir(), f"{safe_id}.jsonl")
 
 
-def append_to_batch(session_id, entry):
+def append_to_batch(session_id: str, entry: dict) -> None:
     """Append a single JSON line to the batch file for *session_id*."""
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
@@ -367,13 +396,9 @@ def append_to_batch_deduped(
             f.seek(0)
             existing = []
             for line in f.readlines():
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    existing.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+                is_record, value = _decode_batch_line(line)
+                if is_record:
+                    existing.append(value)
             if is_duplicate(existing):
                 return False
             # 'a+' append mode writes at EOF regardless of the read seek above.
@@ -389,7 +414,28 @@ def append_to_batch_deduped(
     return True
 
 
-def read_batch(session_id):
+def _decode_batch_line(line: str) -> tuple[bool, Any]:
+    """Decode one raw JSONL batch line.
+
+    Returns ``(is_record, value)``. ``is_record`` is True only for a non-blank
+    line that parses as JSON — exactly the lines ``read_batch`` returns and
+    ``upload_batch`` sends — and False for a blank or corrupt line. ``value``
+    holds the decoded object when ``is_record`` is True, else ``None``.
+
+    Both ``read_batch`` and ``drop_leading_entries`` route through this so the
+    records uploaded and the records drained can never diverge: corrupt lines
+    are skipped identically on both sides.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False, None
+    try:
+        return True, json.loads(stripped)
+    except json.JSONDecodeError:
+        return False, None
+
+
+def read_batch(session_id: str) -> list[dict]:
     """Read all entries from the batch file and return the list (no delete)."""
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
@@ -399,16 +445,13 @@ def read_batch(session_id):
             lines = f.readlines()
     entries = []
     for line in lines:
-        line = line.strip()
-        if line:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        is_record, value = _decode_batch_line(line)
+        if is_record:
+            entries.append(value)
     return entries
 
 
-def rewrite_batch(session_id, entries):
+def rewrite_batch(session_id: str, entries: list[dict]) -> None:
     """Re-write entries back to the batch file (race-safe).
 
     Opens with ``a+`` so the file is not truncated until *after* the
@@ -426,7 +469,7 @@ def rewrite_batch(session_id, entries):
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def clear_batch(session_id):
+def clear_batch(session_id: str) -> None:
     """Truncate the batch file for *session_id* (race-safe).
 
     Delegates to ``rewrite_batch`` so the truncation is performed while
@@ -436,12 +479,55 @@ def clear_batch(session_id):
     rewrite_batch(session_id, [])
 
 
+def drop_leading_entries(session_id: str, count: int) -> None:
+    """Remove the first *count* entries from the batch file (race-safe).
+
+    Used after a successful upload to delete exactly the entries that were
+    uploaded while preserving any entries ``append_to_batch`` added
+    concurrently — those land after the uploaded snapshot, so they survive as
+    the trailing lines here. This is the safe alternative to ``clear_batch``,
+    which would truncate those concurrent appends away.
+
+    The read-modify-write happens under a single exclusive lock (``a+`` so the
+    file is not truncated until the lock is held), so a concurrent append
+    either completes before this runs (and is preserved) or blocks until after.
+
+    Counts only the valid JSON records ``read_batch`` would return (via
+    ``_decode_batch_line``), so corrupt or blank lines in the leading region are
+    discarded without consuming the drop count — otherwise a corrupt line could
+    leave an already-uploaded entry behind to be re-sent next batch.
+    """
+    if count <= 0:
+        return
+    batch_file = get_batch_file(session_id)
+    if not os.path.isfile(batch_file):
+        return
+    with open(batch_file, "a+") as f:
+        with _lock_file(f, exclusive=True):
+            f.seek(0)
+            lines = f.readlines()
+            kept = []
+            dropped = 0
+            for line in lines:
+                if dropped < count:
+                    is_record, _ = _decode_batch_line(line)
+                    if is_record:
+                        dropped += 1
+                    continue
+                kept.append(line)
+            f.seek(0)
+            f.truncate()
+            f.writelines(kept)
+    if platform.system() != "Windows":
+        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
 # ---------------------------------------------------------------------------
 # HTTP upload
 # ---------------------------------------------------------------------------
 
 
-def _sanitize_url_for_log(url):
+def _sanitize_url_for_log(url: str) -> str:
     """Return scheme://host[:port]/path — drops userinfo, query, and fragment.
 
     debug.log is user-local but lives next to config.json; sanitization keeps
@@ -454,7 +540,7 @@ def _sanitize_url_for_log(url):
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
-def upload_batch(api_url, api_key, payload):
+def upload_batch(api_url: str, api_key: str, payload: dict) -> bool:
     """POST raw hook batch to the Bloomfilter API. Returns True on success.
 
     Validates the URL scheme up front: only http/https are allowed. Other
@@ -466,13 +552,38 @@ def upload_batch(api_url, api_key, payload):
     length on HTTPError), and any HTTPError / URLError / unexpected exception.
     """
     parsed = urllib.parse.urlparse(api_url or "")
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+
+    # Accessing .port raises ValueError for malformed ports (non-numeric or out
+    # of range). Validate it here so a bad config URL is rejected cleanly rather
+    # than throwing later in _sanitize_url_for_log, which runs before the upload
+    # try/except below.
+    try:
+        parsed.port  # noqa: B018 — evaluated for its validation side effect
+        port_ok = True
+    except ValueError:
+        port_ok = False
+
+    if parsed.scheme not in ("http", "https") or not parsed.netloc or not port_ok:
         debug_log(
             "upload_batch: skipped — invalid api_url "
-            f"scheme={parsed.scheme!r} host={parsed.hostname!r}"
+            f"scheme={parsed.scheme!r} netloc={parsed.netloc!r}"
         )
         print(
             "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
+            file=sys.stderr,
+        )
+        return False
+
+    # Never send the API token (X-MCP-Token) over cleartext HTTP. Allow http
+    # only for loopback hosts to keep local development working.
+    if parsed.scheme == "http" and parsed.hostname not in {
+        "localhost",
+        "127.0.0.1",
+        "::1",
+    }:
+        debug_log("upload_batch: skipped — refusing cleartext (non-loopback) API URL")
+        print(
+            "[bloomfilter] Upload skipped: Bloomfilter API URL must use HTTPS.",
             file=sys.stderr,
         )
         return False
@@ -550,6 +661,302 @@ def upload_batch(api_url, api_key, payload):
 # ---------------------------------------------------------------------------
 
 
-def utcnow_iso():
+def utcnow_iso() -> str:
     """Return the current UTC time as an ISO 8601 string."""
     return datetime.now(timezone.utc).isoformat()
+
+
+# ---------------------------------------------------------------------------
+# Subagent transcript capture
+# ---------------------------------------------------------------------------
+
+
+def _cap_text(value: Any) -> Any:
+    """Truncate an over-long string field; pass non-strings through unchanged.
+
+    Subagent transcripts can carry very large tool inputs / responses. Cap them
+    so a single batch upload stays bounded, mirroring the Codex/Claude Code
+    plugins and the backend's field expectations.
+    """
+    if not isinstance(value, str):
+        return value
+    if len(value) > _SUBAGENT_FIELD_CAP:
+        return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+    return value
+
+
+def _cap_conversation(conversation: dict[str, Any]) -> None:
+    """Cap the free-text fields of a parsed subagent conversation in place.
+
+    Caps ``user_prompt``, ``agent_response``, and each tool call's
+    ``tool_output``. Tool outputs merged from the stray batch are often dicts,
+    so oversized non-string outputs are serialized and truncated to keep the
+    upload bounded. ``tool_input`` is left raw (matches the main-session
+    ToolCall shape).
+    """
+    for turn in conversation.get("turns") or []:
+        if not isinstance(turn, dict):
+            continue
+        if turn.get("user_prompt") is not None:
+            turn["user_prompt"] = _cap_text(turn["user_prompt"])
+        if turn.get("agent_response") is not None:
+            turn["agent_response"] = _cap_text(turn["agent_response"])
+        for tool_call in turn.get("tool_calls") or []:
+            if not isinstance(tool_call, dict):
+                continue
+            output = tool_call.get("tool_output")
+            if isinstance(output, str):
+                tool_call["tool_output"] = _cap_text(output)
+            elif output is not None:
+                # Non-string (dict/list) output: cap by serialized size so a
+                # large tool result can't blow up the batch. Only rewritten when
+                # it actually exceeds the cap, so small dicts stay dicts.
+                try:
+                    serialized = json.dumps(output)
+                except (TypeError, ValueError):
+                    serialized = str(output)
+                if len(serialized) > _SUBAGENT_FIELD_CAP:
+                    tool_call["tool_output"] = (
+                        serialized[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+                    )
+
+
+def find_subagent_transcript(parent_transcript_path: str, task: str) -> str | None:
+    """Locate a Cursor subagent's own transcript file for a ``subagentStop``.
+
+    Cursor writes each subagent conversation to
+    ``<parent_conv_dir>/subagents/<child_conv_id>.jsonl`` but the hook exposes
+    neither that path (``agent_transcript_path`` is null) nor the child
+    conversation id. It DOES give the parent transcript path and the subagent's
+    ``task``, so we scan the sibling ``subagents/`` dir and return the file
+    whose opening user query matches the task.
+
+    Args:
+        parent_transcript_path: ``payload.transcript_path`` (the parent
+            conversation's transcript), used to locate the ``subagents/`` dir.
+        task: ``payload.task`` — the subagent's prompt, matched against each
+            candidate's first user query.
+
+    Returns:
+        Absolute path to the matching transcript, or None if the dir/file is
+        missing or nothing matches.
+    """
+    if not parent_transcript_path or not task:
+        return None
+    parent_dir = os.path.dirname(parent_transcript_path)
+    subagents_dir = os.path.join(parent_dir, "subagents")
+    if not os.path.isdir(subagents_dir):
+        return None
+
+    wanted = task.strip()
+    candidates = sorted(
+        os.path.join(subagents_dir, name)
+        for name in os.listdir(subagents_dir)
+        if name.endswith(".jsonl")
+    )
+    for candidate in candidates:
+        try:
+            if first_user_query(candidate).strip() == wanted:
+                return candidate
+        except OSError:
+            continue
+    # Exactly one subagent this turn and no text match (e.g. the task was
+    # reformatted): fall back to the sole candidate rather than losing it.
+    if len(candidates) == 1:
+        return candidates[0]
+    return None
+
+
+def _read_child_batch(
+    child_conv_id: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return a subagent's tool calls and thinking from its stray batch.
+
+    A Cursor subagent runs as its own conversation whose live hooks
+    (``postToolUse``, ``afterAgentThought``, …) land in
+    ``batches/<child_conv_id>.jsonl`` but never upload — no session/turn/response
+    hooks fire for a child conversation, so the batch just orphans. It is the
+    ONLY place the subagent's tool OUTPUTS and (unredacted) THINKING exist; the
+    transcript records tool inputs only and no thinking.
+
+    Returns ``(tool_calls, thinkings)`` where:
+      * ``tool_calls`` = ordered ``postToolUse`` as ``[{tool_name, tool_input,
+        tool_output, tool_call_id}]``.
+      * ``thinkings`` = ordered ``afterAgentThought`` as ``[{content,
+        preceding_tools}]`` where ``preceding_tools`` is the number of
+        ``postToolUse`` seen before the thought — used to interleave it back into
+        the transcript's tool sequence.
+    Both empty on any error or if the batch is absent.
+    """
+    try:
+        entries = read_batch(child_conv_id)
+    except Exception:
+        return [], []
+    tool_calls: list[dict[str, Any]] = []
+    thinkings: list[dict[str, Any]] = []
+    for entry in entries:
+        hook = entry.get("hook_event_name")
+        payload = entry.get("payload") or {}
+        if hook == "postToolUse":
+            tool_calls.append(
+                {
+                    "tool_name": payload.get("tool_name", ""),
+                    "tool_input": payload.get("tool_input"),
+                    "tool_output": payload.get("tool_output"),
+                    "tool_call_id": payload.get("tool_use_id", ""),
+                }
+            )
+        elif hook == "afterAgentThought":
+            text = payload.get("text")
+            if text:
+                thinkings.append({"content": text, "preceding_tools": len(tool_calls)})
+    return tool_calls, thinkings
+
+
+def _attach_thinking(
+    conversation: dict[str, Any],
+    thinkings: list[dict[str, Any]],
+    batch_tool_names: set[str],
+) -> None:
+    """Interleave the subagent's thinking into a turn's tool sequence, in place.
+
+    Cursor's transcript carries no thinking (not even a redacted marker), so the
+    only ordering signal is each thought's ``preceding_tools`` count (how many
+    ``postToolUse`` preceded it). We place a thought right before the
+    ``(preceding_tools + 1)``-th transcript tool that actually fires
+    ``postToolUse`` (``batch_tool_names``) — so it lands next to the real work it
+    reasoned about, while transcript-only tools (Glob/UpdateCurrentStep) stay put.
+
+    Attaches ``turn["thinking"] = [{content, position}]`` where ``position`` is
+    the tool_calls index the thought should render before (``len(tool_calls)`` =
+    end of turn). Applied to the first turn that has tool calls (Cursor subagents
+    are effectively single-turn).
+    """
+    if not thinkings:
+        return
+    turns = conversation.get("turns") or []
+    target = next(
+        (t for t in turns if t.get("tool_calls")), turns[0] if turns else None
+    )
+    if target is None:
+        return
+    tool_calls = target.get("tool_calls") or []
+
+    def _position_for(preceding: int) -> int:
+        seen = 0
+        for index, tool_call in enumerate(tool_calls):
+            if tool_call.get("tool_name", "") in batch_tool_names:
+                if seen == preceding:
+                    return index
+                seen += 1
+        return len(tool_calls)
+
+    target["thinking"] = [
+        {
+            "content": _cap_text(t["content"]),
+            "position": _position_for(t["preceding_tools"]),
+        }
+        for t in thinkings
+    ]
+
+
+def _merge_tool_outputs(
+    conversation: dict[str, Any], batch_tool_calls: list[dict[str, Any]]
+) -> None:
+    """Enrich a transcript conversation's tool calls with outputs, in place.
+
+    The transcript is the ordered skeleton (every tool call, inputs only); the
+    stray batch supplies the outputs. Matches per ``tool_name`` first-in-first-out
+    so interleaved tool types line up without fragile input comparison.
+    Transcript-only tools (e.g. Glob, UpdateCurrentStep, which fire no
+    ``postToolUse``) keep ``tool_output = None``; surplus batch calls with no
+    transcript match are dropped.
+    """
+    queues: dict[str, deque] = defaultdict(deque)
+    for batch_call in batch_tool_calls:
+        queues[batch_call.get("tool_name", "")].append(batch_call)
+
+    for turn in conversation.get("turns") or []:
+        for tool_call in turn.get("tool_calls") or []:
+            queue = queues.get(tool_call.get("tool_name", ""))
+            if not queue:
+                continue
+            batch_call = queue.popleft()
+            if tool_call.get("tool_output") is None:
+                tool_call["tool_output"] = batch_call.get("tool_output")
+            if not tool_call.get("tool_call_id"):
+                tool_call["tool_call_id"] = batch_call.get("tool_call_id", "")
+
+
+def extract_subagent_conversation(
+    parent_transcript_path: str,
+    task: str,
+    max_wait_s: float = 2.0,
+    poll_s: float = 0.1,
+    cleanup_child_batch: bool = True,
+) -> dict[str, Any] | None:
+    """Parse a Cursor subagent's transcript into a normalized conversation.
+
+    Returns ``{"turns": [...]}`` (the backend's child-session shape) or None if
+    no matching transcript is found. Cursor may fire ``subagentStop`` a moment
+    before the child transcript's final assistant message is flushed, so this
+    polls (bounded by ``max_wait_s``) until the file carries a ``turn_ended``
+    marker before parsing.
+
+    The transcript records tool INPUTS only and no thinking, so tool OUTPUTS and
+    THINKING are merged in from the subagent's own stray hook batch
+    (``_read_child_batch`` + ``_merge_tool_outputs`` + ``_attach_thinking``).
+    Cursor exposes no subagent token usage anywhere, so token totals stay 0.
+
+    Args:
+        parent_transcript_path: ``payload.transcript_path``.
+        task: ``payload.task`` — used to locate the child transcript.
+        max_wait_s: Max seconds to wait for the transcript to flush.
+        poll_s: Poll interval while waiting.
+        cleanup_child_batch: Delete the subagent's stray hook batch after
+            merging (default). The merged result is frozen into the parent
+            batch envelope, so the orphan batch is no longer needed; removing it
+            stops the batches dir from accumulating dead child files.
+
+    Returns:
+        The capped conversation dict, or None.
+    """
+    path = find_subagent_transcript(parent_transcript_path, task)
+    if not path:
+        return None
+
+    deadline = time.monotonic() + max_wait_s
+    while not is_complete(path) and time.monotonic() < deadline:
+        time.sleep(poll_s)
+
+    try:
+        result = parse_transcript(path)
+    except Exception:
+        return None
+    if isinstance(result, dict) and not result.get("turns"):
+        # Empty/corrupt transcript parsed to zero turns — treat as absent so the
+        # caller's `if conversation:` guard skips it instead of uploading an
+        # empty subagent_transcript.
+        return None
+    if isinstance(result, dict):
+        # Enrich the transcript (tool inputs only, no thinking) with the outputs
+        # and thinking captured in the subagent's own stray hook batch, keyed by
+        # the child conversation id (the transcript's filename stem).
+        child_conv_id = os.path.splitext(os.path.basename(path))[0]
+        tool_calls, thinkings = _read_child_batch(child_conv_id)
+        _merge_tool_outputs(result, tool_calls)
+        _attach_thinking(
+            result, thinkings, {tc.get("tool_name", "") for tc in tool_calls}
+        )
+        _cap_conversation(result)
+        if cleanup_child_batch:
+            _delete_child_batch(child_conv_id)
+    return result
+
+
+def _delete_child_batch(child_conv_id: str) -> None:
+    """Best-effort remove a subagent's orphaned stray hook batch file."""
+    try:
+        os.remove(get_batch_file(child_conv_id))
+    except (OSError, ValueError):
+        pass

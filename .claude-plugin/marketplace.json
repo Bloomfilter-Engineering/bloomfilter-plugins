@@ -15,7 +15,7 @@
     {
       "name": "bloomfilter-agent-miner-claude-code-windows",
       "source": "./plugins/agent-miner-claude-code-windows",
-      "description": "Agent mining hooks for Bloomfilter (Claude Code on Windows)"
+      "description": "Deprecated — use bloomfilter-agent-miner-claude-code (cross-platform). Retained for existing installs."
     }
   ]
 }
