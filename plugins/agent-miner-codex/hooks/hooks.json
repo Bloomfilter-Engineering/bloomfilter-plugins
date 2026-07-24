@@ -5,7 +5,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" SessionStart",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SessionStart; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" SessionStart",
             "timeout": 10
           }
         ]
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" UserPromptSubmit",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" UserPromptSubmit; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" UserPromptSubmit",
             "timeout": 10
           }
         ]
@@ -27,7 +27,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" PreToolUse",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PreToolUse; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" PreToolUse",
             "timeout": 10
           }
         ]
@@ -38,7 +38,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" PermissionRequest",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PermissionRequest; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" PermissionRequest",
             "timeout": 10
           }
         ]
@@ -49,7 +49,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" PostToolUse",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PostToolUse; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" PostToolUse",
             "timeout": 10
           }
         ]
@@ -60,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py SubagentStart",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SubagentStart; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" SubagentStart",
             "timeout": 10
           }
         ]
@@ -71,7 +71,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "$(command -v python3 || command -v python) ${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py SubagentStop",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SubagentStop; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" SubagentStop",
             "timeout": 15
           }
         ]
@@ -82,7 +82,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "\"$(command -v python3 || command -v python)\" \"${CLAUDE_PLUGIN_ROOT}/scripts/collect_hook.py\" Stop",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" Stop; exit #> ; & \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" Stop",
             "timeout": 30
           }
         ]

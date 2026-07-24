@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import json
 import os
 import sys
@@ -11,6 +13,8 @@ from bloomfilter_common import (
     bootstrap_config,
     clear_batch,
     debug_log,
+    drop_leading_entries,
+    extract_subagent_conversation,
     get_git_branch,
     read_batch,
     read_payload,
@@ -20,7 +24,12 @@ from bloomfilter_common import (
     utcnow_iso,
 )
 
-UPLOAD_HOOKS = {"stop", "sessionEnd"}
+# Upload on turn end (stop / sessionEnd) AND subagentStop: a Cursor subagent
+# runs as its own conversation and its subagentStop can arrive after the parent
+# turn's stop already uploaded, so we ship the captured subagent_transcript on
+# subagentStop too. The cumulative batch + backend idempotency make the
+# re-upload safe and link the child to the parent.
+UPLOAD_HOOKS = {"stop", "sessionEnd", "subagentStop"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
 
 
@@ -52,7 +61,13 @@ def _thought_already_batched(records: list, payload: dict) -> bool:
     return False
 
 
-def _resolve_project_dir(payload):
+def _resolve_project_dir(payload: dict) -> str:
+    """Return the project directory for *payload*.
+
+    Prefers the first non-empty of: payload cwd, the Cursor/Claude project-dir
+    env vars, then the first ``workspace_roots`` entry. Falls back to the
+    process working directory when none is set.
+    """
     candidates = [
         payload.get("cwd", ""),
         os.environ.get("CURSOR_PROJECT_DIR", ""),
@@ -61,17 +76,28 @@ def _resolve_project_dir(payload):
     roots = payload.get("workspace_roots")
     if isinstance(roots, list) and roots:
         candidates.append(roots[0] if isinstance(roots[0], str) else "")
-    for c in candidates:
-        if c:
-            return c
+    for candidate in candidates:
+        if candidate:
+            return candidate
     return os.getcwd()
 
 
-def _resolve_session_id(payload):
+def _resolve_session_id(payload: dict) -> str:
+    """Return the session identifier from *payload*, or '' if absent.
+
+    Cursor sends ``conversation_id``; ``session_id`` is the claude_code
+    fallback so a shared payload shape resolves under either runtime.
+    """
     return payload.get("conversation_id") or payload.get("session_id") or ""
 
 
-def main():
+def main() -> None:
+    """Process one hook invocation: batch the event and upload on turn end.
+
+    Reads the hook event name from ``argv[1]`` and the JSON payload from stdin,
+    appends an envelope to the session's batch file, and POSTs the accumulated
+    batch to the Bloomfilter API on the ``stop`` / ``sessionEnd`` hooks.
+    """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
         debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
@@ -84,6 +110,7 @@ def main():
             f"type={type(payload).__name__}"
         )
         return
+
     session_id = _resolve_session_id(payload)
     if not session_id:
         debug_log(
@@ -136,8 +163,14 @@ def main():
     # _apply_token_data path (same as copilot/claude_code) sees the token data
     # Cursor delivers directly on the payload. Key rename: cursor's
     # cache_write_tokens → BE's cache_creation_tokens.
-    if hook_event_name == "afterAgentResponse" and (
-        payload.get("input_tokens") or payload.get("output_tokens")
+    token_fields = (
+        "input_tokens",
+        "output_tokens",
+        "cache_read_tokens",
+        "cache_write_tokens",
+    )
+    if hook_event_name == "afterAgentResponse" and any(
+        field in payload and payload.get(field) is not None for field in token_fields
     ):
         envelope["transcript_summary"] = {
             "api_calls": [
@@ -151,6 +184,26 @@ def main():
                 }
             ]
         }
+
+    # On subagentStop, parse the subagent's own transcript into a normalized
+    # child conversation and attach it. Cursor fires this hook under the PARENT
+    # conversation_id (so it lands in the parent batch) but leaves
+    # agent_transcript_path null — the transcript lives at
+    # <parent_conv_dir>/subagents/<child_conv>.jsonl, discovered by matching the
+    # task. The backend turns subagent_transcript into a linked child
+    # AgentSession keyed on payload.subagent_id. Read NOW — before the file is
+    # GC'd. The subagent_id carries an embedded newline (tool_call_id + gen id);
+    # leave it as-is, it is stable across start/stop so backend keying holds.
+    if hook_event_name == "subagentStop":
+        parent_transcript = payload.get("transcript_path") or os.environ.get(
+            "CURSOR_TRANSCRIPT_PATH", ""
+        )
+        conversation = extract_subagent_conversation(
+            parent_transcript,
+            payload.get("task", ""),
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
 
     if hook_event_name == "afterAgentThought":
         appended = append_to_batch_deduped(
@@ -193,7 +246,10 @@ def main():
 
         success = upload_batch(api_url, api_key, batch_payload)
         if success and hook_event_name == "sessionEnd":
-            clear_batch(session_id)
+            # Remove only the entries we just uploaded; any hook appended
+            # concurrently during the upload is preserved for the next batch
+            # rather than truncated away.
+            drop_leading_entries(session_id, len(entries))
 
 
 if __name__ == "__main__":
