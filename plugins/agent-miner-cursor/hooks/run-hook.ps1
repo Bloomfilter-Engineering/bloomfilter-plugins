@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8NoBom
+# Best-effort: decode the inherited hook payload (stdin) as UTF-8. Wrapped in
+# try/catch because setting InputEncoding can throw when stdin is a redirected
+# pipe with no real console attached.
+try { [Console]::InputEncoding = $utf8NoBom } catch {}
 $OutputEncoding = $utf8NoBom
 
 function Resolve-Python {
@@ -70,6 +74,11 @@ $startInfo.UseShellExecute = $false
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
+# Force UTF-8 (no BOM) on the child's redirected streams so non-ASCII payload
+# and the JSON response round-trip correctly regardless of the Windows code page.
+$startInfo.StandardInputEncoding = $utf8NoBom
+$startInfo.StandardOutputEncoding = $utf8NoBom
+$startInfo.StandardErrorEncoding = $utf8NoBom
 $process.StartInfo = $startInfo
 
 $null = $process.Start()

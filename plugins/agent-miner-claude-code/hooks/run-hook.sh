@@ -22,5 +22,12 @@ if [ "$OS" = "Windows_NT" ]; then
     -File "$root/hooks/run-hook.ps1" "$event"
 fi
 
-exec "$(command -v python3 || command -v python)" \
-  "$root/scripts/collect_hook.py" "$event"
+python="$(command -v python3 || command -v python)"
+if [ -z "$python" ]; then
+  # No Python on PATH: return a valid empty hook response instead of failing
+  # the host hook, matching run-hook.ps1's graceful behavior.
+  printf '%s\n' '{}'
+  exit 0
+fi
+
+exec "$python" "$root/scripts/collect_hook.py" "$event"
