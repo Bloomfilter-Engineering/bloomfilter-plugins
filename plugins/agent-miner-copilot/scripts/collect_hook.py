@@ -131,8 +131,6 @@ def run_reupload_worker(session_id: str) -> None:
     hook. The backend's update_or_create makes the re-upload idempotent, and
     exact token counts clear any earlier estimate.
     """
-    debug_log(f"reupload_worker: started session_id={session_id} pid={os.getpid()}")
-
     api_key = resolve_api_key()
     if not api_key:
         debug_log(f"reupload_worker: aborted session_id={session_id} reason=no-api-key")
@@ -167,12 +165,6 @@ def run_reupload_worker(session_id: str) -> None:
         if len(chat_requests) >= n_stops:
             last = chat_requests[n_stops - 1]
             if last.get("input_tokens") or last.get("output_tokens"):
-                debug_log(
-                    f"reupload_worker: early-exit session_id={session_id} "
-                    f"polls={poll_count} waited={waited:.1f}s "
-                    f"last_turn_input={last.get('input_tokens')} "
-                    f"last_turn_output={last.get('output_tokens')}"
-                )
                 break
         time.sleep(REUPLOAD_POLL_INTERVAL)
         waited += REUPLOAD_POLL_INTERVAL
@@ -202,10 +194,6 @@ def run_reupload_worker(session_id: str) -> None:
     overlay_changed = _overlay_chat_onto_stops(batch_entries, chat_requests)
     if overlay_changed:
         rewrite_batch(session_id, batch_entries)
-    debug_log(
-        f"reupload_worker: re-uploading session_id={session_id} "
-        f"entries={len(batch_entries)} overlay_changed={overlay_changed}"
-    )
 
     api_url = resolve_api_url()
     batch_payload = {
@@ -250,10 +238,6 @@ def main() -> None:
         return
 
     runtime = detect_runtime(payload)
-    debug_log(
-        f"hook received: hook={hook_event_name} session_id={session_id} "
-        f"runtime={runtime}"
-    )
 
     # --- Copilot CLI new-session duplicate-hook dedup -------------------
     # When a CLI session is started with an initial prompt, the CLI fires
@@ -574,14 +558,11 @@ def main() -> None:
             spawned = spawn_detached(
                 [python_exe, os.path.abspath(__file__), "__reupload", session_id]
             )
-            debug_log(
-                f"reupload_worker: spawned session_id={session_id} success={spawned}"
-            )
-        else:
-            debug_log(
-                f"reupload_worker: not-spawned session_id={session_id} "
-                f"runtime={runtime} has_tokens={has_tokens}"
-            )
+            if not spawned:
+                debug_log(
+                    f"reupload_worker: spawn failed session_id={session_id} "
+                    "(exact token counts will not be backfilled)"
+                )
 
 
 if __name__ == "__main__":
