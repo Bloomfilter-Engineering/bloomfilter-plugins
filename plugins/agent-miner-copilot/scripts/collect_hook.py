@@ -195,6 +195,33 @@ def _build_subagent_transcript(
     )
 
 
+def _attach_to_subagent_stop(
+    batch_entries: list[dict[str, Any]],
+    agent_id: str,
+    agent_type: str,
+    conversation: dict[str, Any],
+) -> bool:
+    """Write a child conversation onto its SubagentStop entry, in place.
+
+    The backend keys child sessions off the stop hook, so the transcript has to
+    live there even though it can only be assembled once the spawning tool call
+    returns. Mutates *batch_entries*; the caller persists with rewrite_batch.
+
+    Returns True if a matching SubagentStop was found and updated.
+    """
+    for entry in reversed(batch_entries):
+        if entry.get("hook_event_name") != "SubagentStop":
+            continue
+        if (entry.get("payload") or {}).get("agent_id") != agent_id:
+            continue
+        entry["subagent_transcript"] = conversation
+        entry["agent_id"] = agent_id
+        if agent_type:
+            entry["agent_type"] = agent_type
+        return True
+    return False
+
+
 def _overlay_chat_onto_subagents(
     batch_entries: list[dict[str, Any]], subagents: dict[str, Any]
 ) -> bool:
@@ -510,18 +537,25 @@ def main() -> None:
     if hook_event_name in GIT_BRANCH_HOOKS and project_dir:
         envelope["git_branch"] = get_git_branch(project_dir)
 
-    # Capture the child conversation for a completed subagent. This rides the
-    # runSubagent PostToolUse rather than SubagentStop because the subagent's
-    # answer arrives as that call's tool_response, which SubagentStop precedes.
+    # Capture the child conversation for a completed subagent.
+    #
+    # The data only becomes complete at the runSubagent PostToolUse — the
+    # subagent's answer is that call's tool_response, and SubagentStop precedes
+    # it. But the backend reads subagent_transcript off the SubagentStop
+    # envelope (_process_subagents iterates stop hooks), so we build it here and
+    # write it back onto the SubagentStop entry already in the batch rather than
+    # attaching it to this one. Attaching it here would create an empty child
+    # session: the BE would find no transcript and fall through to its
+    # last_assistant_message summary fallback, which Copilot never sends.
     if hook_event_name == "PostToolUse" and payload.get("tool_name") == "runSubagent":
+        entries = read_batch(session_id)
         conversation, agent_id, agent_type = _build_subagent_transcript(
-            payload, read_batch(session_id)
+            payload, entries
         )
-        if conversation:
-            envelope["subagent_transcript"] = conversation
-            envelope["agent_id"] = agent_id
-            if agent_type:
-                envelope["agent_type"] = agent_type
+        if conversation and _attach_to_subagent_stop(
+            entries, agent_id, agent_type, conversation
+        ):
+            rewrite_batch(session_id, entries)
 
     # Extract agent response, reasoning, and token data from the Copilot
     # transcript.  The transcript is written asynchronously so we retry
@@ -763,7 +797,16 @@ def main() -> None:
             for e in entries
             for turn in (e.get("subagent_transcript") or {}).get("turns") or []
         )
-        if (not has_tokens or needs_subagent_data) and runtime == "copilot-vscode":
+        # The worker matches chatSessions requests to Stop entries, so it has
+        # nothing to do until the turn has actually stopped. Without this an
+        # upload triggered by SubagentStop — which precedes the parent's Stop —
+        # spawns a process that immediately aborts with reason=no-stops.
+        has_stop = any(e.get("hook_event_name") == "Stop" for e in entries)
+        if (
+            has_stop
+            and (not has_tokens or needs_subagent_data)
+            and runtime == "copilot-vscode"
+        ):
             python_exe = sys.executable or "python3"
             spawned = spawn_detached(
                 [python_exe, os.path.abspath(__file__), "__reupload", session_id]

@@ -11,11 +11,6 @@
       "name": "bloomfilter-agent-miner-copilot",
       "source": "./plugins/agent-miner-copilot",
       "description": "Agent mining hooks for Bloomfilter (Copilot on Windows, macOS, Linux, and WSL)"
-    },
-    {
-      "name": "bloomfilter-agent-miner-copilot-windows",
-      "source": "./plugins/agent-miner-copilot-windows",
-      "description": "Deprecated — use bloomfilter-agent-miner-copilot (cross-platform). Retained for existing installs."
     }
   ]
 }

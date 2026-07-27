@@ -10,7 +10,7 @@ twice.
 | --- | --- | --- |
 | Claude Code | `bloomfilter-agent-miner-claude-code` | `-claude-code-windows` |
 | Codex | `agent-miner-codex` | `agent-miner-codex-windows` |
-| Copilot (VS Code + CLI) | `bloomfilter-agent-miner-copilot` | `-copilot-windows` |
+| Copilot (VS Code + CLI) | `bloomfilter-agent-miner-copilot` | — |
 | Cursor | `bloomfilter-agent-miner-cursor` | `-cursor-windows` (and `-cursor-unified`, an alias) |
 
 > **Install** is documented in `README.md` (Setup + Install Plugins, per runtime). This file
@@ -56,8 +56,7 @@ In VS Code, uninstall through the editor:
 2. Remove the marketplace entry from VS Code `settings.json` so it can't reinstall:
    `"chat.plugins.marketplaces": ["Bloomfilter-Engineering/bloomfilter-plugins"]` → delete it.
 
-Same steps on macOS and Windows. Uninstall the deprecated `agent-miner-copilot-windows` here too if
-it is still present — leaving it alongside `agent-miner-copilot` double-captures every event.
+Same steps on macOS and Windows.
 
 The Copilot CLI has its own commands (same on both OSes):
 

@@ -18,7 +18,6 @@ only so existing installs keep working — new users should not install them.
 | `bloomfilter-agent-miner-cursor-unified` | Cursor on Windows, macOS, Linux, WSL | ♻️ Alias of `-cursor` | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | ⚠️ Deprecated | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot and Copilot CLI on Windows, macOS, Linux, WSL | ✅ Recommended | `.github/plugin/marketplace.json` |
-| `bloomfilter-agent-miner-copilot-windows` | VS Code Copilot on Windows | ⚠️ Deprecated | `.github/plugin/marketplace.json` |
 
 ## Setup
 
@@ -227,9 +226,8 @@ Note: Codex thinking text is encrypted by Codex and is not readable by this plug
 Bloomfilter publishes these Copilot plugins:
 
 - `bloomfilter-agent-miner-copilot` — **Recommended.** One install covers Windows, macOS, Linux, and WSL, in both VS Code and the GitHub Copilot CLI. It adapts to whichever shell Copilot runs the hook in (PowerShell on Windows, POSIX shell on macOS / Linux / WSL).
-- `bloomfilter-agent-miner-copilot-windows` — deprecated, Windows only. Retained for existing installs.
 
-Install only one. Do not mix these — installing both captures every event twice.
+Install `bloomfilter-agent-miner-copilot`.
 
 The setup steps below are identical on every OS.
 
