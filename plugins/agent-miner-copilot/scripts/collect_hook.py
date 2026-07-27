@@ -5,6 +5,7 @@ Collects raw hook payloads, batches them in a JSONL file, and uploads
 the batch to the Bloomfilter API on Stop events.
 """
 
+import json
 import os
 import sys
 import time
@@ -16,6 +17,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    _cap_text,
     append_to_batch,
     bootstrap_config,
     clear_batch,
@@ -37,8 +39,12 @@ from bloomfilter_common import (
     utcnow_iso,
 )
 
-# Hooks that trigger an upload to the BE
-UPLOAD_HOOKS = {"Stop"}
+# Hooks that trigger an upload to the BE. SubagentStop is included because a
+# subagent can finish after the parent turn's final Stop, which would otherwise
+# strand its entry in the batch until the next turn. The batch is cumulative and
+# the backend is idempotent, so the extra upload is safe (same rationale as the
+# codex and cursor plugins).
+UPLOAD_HOOKS = {"Stop", "SubagentStop"}
 
 # Hooks where we fetch the current git branch
 GIT_BRANCH_HOOKS = {"SessionStart", "UserPromptSubmit"}
@@ -74,6 +80,145 @@ def _chat_path_for_session(session_id: str, batch_entries: list[dict[str, Any]])
         if chat_path:
             return chat_path
     return find_copilot_transcript(session_id, chat_sessions_only=True)
+
+
+def _agent_id_from_tool_use_id(tool_use_id: str) -> str:
+    """Return the subagent's agent_id for a runSubagent tool_use_id.
+
+    VS Code suffixes the tool call id with ``__vscode-<n>`` while the
+    SubagentStart/SubagentStop hooks carry the bare id as ``agent_id``, so the
+    prefix is the join key between the two. Confirmed against a real capture
+    from three independent places: the hook payload's ``agent_id``, the
+    chatSessions response part's ``toolCallId``, and that part's enclosing
+    ``toolCallRounds[].toolCalls[].id`` (the suffixed form).
+    """
+    return tool_use_id.split("__", 1)[0]
+
+
+def _open_subagent(batch_entries: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Return the runSubagent PreToolUse payload of an in-flight subagent.
+
+    A subagent is in flight when the most recent subagent lifecycle event is a
+    SubagentStart with no matching SubagentStop. Returns the payload of the
+    ``runSubagent`` PreToolUse that spawned it, or None when no subagent is
+    running (or its tool call can't be found).
+    """
+    agent_id = ""
+    for entry in reversed(batch_entries):
+        event = entry.get("hook_event_name")
+        if event == "SubagentStop":
+            return None  # most recent lifecycle event closed a subagent
+        if event == "SubagentStart":
+            agent_id = (entry.get("payload") or {}).get("agent_id", "")
+            break
+    if not agent_id:
+        return None
+
+    for entry in reversed(batch_entries):
+        payload = entry.get("payload") or {}
+        if (
+            entry.get("hook_event_name") == "PreToolUse"
+            and payload.get("tool_name") == "runSubagent"
+            and _agent_id_from_tool_use_id(payload.get("tool_use_id", "")) == agent_id
+        ):
+            return payload
+    return None
+
+
+def _build_subagent_transcript(
+    payload: dict[str, Any], batch_entries: list[dict[str, Any]]
+) -> tuple[dict[str, Any] | None, str, str]:
+    """Build the child conversation for a completed runSubagent tool call.
+
+    Called on the runSubagent PostToolUse — the first point where every piece
+    exists. The prompt comes from this call's ``tool_input``, the response from
+    its ``tool_response``, and the timing from the matching SubagentStart /
+    SubagentStop already in the batch.
+
+    ``model`` is left empty here: VS Code records the subagent's model (and
+    cost) only in chatSessions, which flushes seconds later, so it is filled in
+    by the re-upload worker via ``_overlay_chat_onto_subagents``.
+
+    Returns ``(conversation, agent_id, agent_type)``; conversation is None when
+    there is no matching subagent or no response to record.
+    """
+    agent_id = _agent_id_from_tool_use_id(payload.get("tool_use_id", ""))
+    if not agent_id:
+        return None, "", ""
+
+    started_at = ended_at = agent_type = ""
+    for entry in batch_entries:
+        entry_payload = entry.get("payload") or {}
+        if entry_payload.get("agent_id") != agent_id:
+            continue
+        event = entry.get("hook_event_name")
+        if event == "SubagentStart":
+            started_at = entry_payload.get("timestamp", "")
+            agent_type = entry_payload.get("agent_type", "")
+        elif event == "SubagentStop":
+            ended_at = entry_payload.get("timestamp", "")
+            agent_type = agent_type or entry_payload.get("agent_type", "")
+
+    tool_input = payload.get("tool_input")
+    prompt = tool_input.get("prompt", "") if isinstance(tool_input, dict) else ""
+    response = payload.get("tool_response") or ""
+    if not isinstance(response, str):
+        response = json.dumps(response)
+
+    # No lifecycle events means this wasn't really a subagent run; no response
+    # means there is nothing worth shipping. Returning None keeps an empty
+    # {"turns": []} from passing the caller's truthiness check — the bug fixed
+    # for Cursor in eecc793.
+    if not started_at or not response.strip():
+        return None, agent_id, agent_type
+
+    return (
+        {
+            "turns": [
+                {
+                    "user_prompt": _cap_text(prompt),
+                    "agent_response": _cap_text(response),
+                    "model": "",
+                    "response_id": "",
+                    "started_at": started_at,
+                    "ended_at": ended_at,
+                    "input_tokens": 0,
+                    "output_tokens": 0,
+                    "cache_read_tokens": 0,
+                    "cache_creation_tokens": 0,
+                    "tool_calls": [],
+                }
+            ]
+        },
+        agent_id,
+        agent_type,
+    )
+
+
+def _overlay_chat_onto_subagents(
+    batch_entries: list[dict[str, Any]], subagents: dict[str, Any]
+) -> bool:
+    """Fill each subagent turn's model and cost from the chatSessions records.
+
+    The hook stream has neither; ``toolSpecificData.kind == "subagent"`` in
+    chatSessions has both, keyed by the same agent_id. Returns True if any
+    entry changed.
+    """
+    updated = False
+    for entry in batch_entries:
+        agent_id = entry.get("agent_id")
+        record = subagents.get(agent_id) if agent_id else None
+        if not record:
+            continue
+        turns = (entry.get("subagent_transcript") or {}).get("turns") or []
+        for turn in turns:
+            if record.get("model") and not turn.get("model"):
+                turn["model"] = record["model"]
+                updated = True
+            if record.get("credits") is not None and turn.get("credits") is None:
+                turn["credits"] = record["credits"]
+                updated = True
+    return updated
 
 
 def _overlay_chat_onto_stops(
@@ -156,6 +301,7 @@ def run_reupload_worker(session_id: str) -> None:
     # model. Waiting for the file to appear is the whole job.
     chat_path = ""
     chat_requests = []
+    chat_subagents = {}
     waited = 0.0
     poll_count = 0
     while waited <= REUPLOAD_MAX_WAIT:
@@ -164,6 +310,7 @@ def run_reupload_worker(session_id: str) -> None:
         if chat_path:
             parsed = parse_copilot_transcript(chat_path)
             chat_requests = parsed.get("requests", [])
+            chat_subagents = parsed.get("subagents", {})
             poll_count += 1
             if len(chat_requests) >= n_stops:
                 last = chat_requests[n_stops - 1]
@@ -204,6 +351,9 @@ def run_reupload_worker(session_id: str) -> None:
         )
         return
     overlay_changed = _overlay_chat_onto_stops(batch_entries, chat_requests)
+    # chatSessions is the only source of a subagent's model and cost, so the
+    # same flush that carries the parent's tokens also completes its children.
+    overlay_changed |= _overlay_chat_onto_subagents(batch_entries, chat_subagents)
     if overlay_changed:
         rewrite_batch(session_id, batch_entries)
 
@@ -250,6 +400,32 @@ def main() -> None:
         return
 
     runtime = detect_runtime(payload)
+
+    # --- Subagent prompt suppression ------------------------------------
+    # When a subagent runs, Copilot fires a UserPromptSubmit carrying the
+    # SUBAGENT's prompt under the PARENT session_id, between SubagentStart and
+    # SubagentStop, with nothing marking it as the child's. Recording it would
+    # materialize a phantom user turn in the parent session.
+    #
+    # Two signals are required so a genuine prompt is never dropped: a subagent
+    # must be in flight, AND the text must match the prompt that subagent was
+    # spawned with.
+    if hook_event_name == "UserPromptSubmit":
+        spawning_call = _open_subagent(read_batch(session_id))
+        if spawning_call:
+            tool_input = spawning_call.get("tool_input")
+            spawn_prompt = (
+                tool_input.get("prompt", "") if isinstance(tool_input, dict) else ""
+            )
+            current_prompt = (payload.get("prompt") or "").strip()
+            if current_prompt and current_prompt == spawn_prompt.strip():
+                debug_log(
+                    f"hook skipped: subagent UserPromptSubmit "
+                    f"session_id={session_id} "
+                    f"agent_id={_agent_id_from_tool_use_id(spawning_call.get('tool_use_id', ''))} "
+                    "(subagent prompt, not the user's)"
+                )
+                return
 
     # --- Copilot CLI new-session duplicate-hook dedup -------------------
     # When a CLI session is started with an initial prompt, the CLI fires
@@ -333,6 +509,19 @@ def main() -> None:
     # Fetch git branch only on specific hooks (avoid subprocess overhead)
     if hook_event_name in GIT_BRANCH_HOOKS and project_dir:
         envelope["git_branch"] = get_git_branch(project_dir)
+
+    # Capture the child conversation for a completed subagent. This rides the
+    # runSubagent PostToolUse rather than SubagentStop because the subagent's
+    # answer arrives as that call's tool_response, which SubagentStop precedes.
+    if hook_event_name == "PostToolUse" and payload.get("tool_name") == "runSubagent":
+        conversation, agent_id, agent_type = _build_subagent_transcript(
+            payload, read_batch(session_id)
+        )
+        if conversation:
+            envelope["subagent_transcript"] = conversation
+            envelope["agent_id"] = agent_id
+            if agent_type:
+                envelope["agent_type"] = agent_type
 
     # Extract agent response, reasoning, and token data from the Copilot
     # transcript.  The transcript is written asynchronously so we retry
@@ -562,10 +751,19 @@ def main() -> None:
         # detached worker that polls for the flush and re-uploads. The CLI
         # writes events.jsonl synchronously — no flush to wait out, so the
         # worker is skipped there.
+        #
+        # A subagent turn awaiting its model/cost also needs the flush, and a
+        # turn can carry exact tokens while its children are still bare — so
+        # check for that independently rather than only on missing tokens.
         summary = envelope.get("transcript_summary", {})
         calls = summary.get("api_calls", [{}])
         has_tokens = any(c.get("input_tokens") or c.get("output_tokens") for c in calls)
-        if not has_tokens and runtime == "copilot-vscode":
+        needs_subagent_data = any(
+            not turn.get("model")
+            for e in entries
+            for turn in (e.get("subagent_transcript") or {}).get("turns") or []
+        )
+        if (not has_tokens or needs_subagent_data) and runtime == "copilot-vscode":
             python_exe = sys.executable or "python3"
             spawned = spawn_detached(
                 [python_exe, os.path.abspath(__file__), "__reupload", session_id]

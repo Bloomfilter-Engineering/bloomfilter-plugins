@@ -19,7 +19,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.3.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir
@@ -34,6 +34,13 @@ DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir
 # Registering both casings for the same event is NOT safe: VS Code maps e.g.
 # ``Stop`` and ``agentStop`` to the same internal event and would fire the hook
 # twice, double-capturing every turn.
+#
+# Subagent fields differ by runtime and are NOT interchangeable. VS Code sends
+# ``agent_id`` / ``agent_type`` (already snake_case, same names Claude Code
+# uses), where ``agent_id`` is the runSubagent ``tool_use_id`` minus its
+# ``__vscode-<n>`` suffix. The Copilot CLI SDK instead declares ``agentName`` /
+# ``agentDisplayName`` / ``agentDescription`` / ``stopReason`` — mapped below so
+# a CLI subagent arrives intact, though none has been captured yet.
 _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
     "sessionId": "session_id",
     "hookEventName": "hook_event_name",
@@ -48,7 +55,24 @@ _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
     "agentId": "agent_id",
     "permissionMode": "permission_mode",
     "notificationType": "notification_type",
+    # Copilot CLI subagent fields (SubagentStart/SubagentStop). VS Code sends
+    # agent_id/agent_type instead — see the note above _CAMEL_TO_SNAKE_PAYLOAD_KEYS.
+    "agentName": "agent_name",
+    "agentDisplayName": "agent_display_name",
+    "agentDescription": "agent_description",
+    "stopReason": "stop_reason",
+    "toolCallId": "tool_call_id",
 }
+
+# Cap on free-text subagent fields, matching the other agent-miner plugins.
+_SUBAGENT_FIELD_CAP = 10_000
+
+
+def _cap_text(value: str) -> str:
+    """Truncate a string to the subagent field cap; return it unchanged otherwise."""
+    if len(value) > _SUBAGENT_FIELD_CAP:
+        return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+    return value
 
 
 def normalize_hook_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -724,6 +748,10 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
       - input_tokens / output_tokens: int (latest turn, for backward compat)
       - result_count: int
       - model: str (latest turn, for backward compat)
+      - subagents: dict[str, dict] — agent_id -> {model, credits, prompt,
+            result, description} for every runSubagent call in the session.
+            The only source of a subagent's model and cost; the hook stream
+            carries neither.
     """
     empty = {
         "requests": [],
@@ -733,6 +761,7 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
         "output_tokens": 0,
         "result_count": 0,
         "model": "",
+        "subagents": {},
     }
 
     if not transcript_path or not os.path.exists(transcript_path):
@@ -780,6 +809,13 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
             "output_tokens": 0,
             "result_count": len(records),
             "model": "",
+            # Flattened across every turn: agent_id -> subagent record. Keys are
+            # globally unique tool-call ids, so turns can't collide.
+            "subagents": {
+                agent_id: data
+                for rec in records
+                for agent_id, data in (rec.get("subagents") or {}).items()
+            },
         }
         for rec in reversed(records):
             if rec.get("response_content"):
@@ -889,6 +925,9 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "timestamp": req.get("timestamp", 0),
+        # agent_id -> {model, credits, prompt, result, description} for any
+        # runSubagent call made during this turn.
+        "subagents": {},
     }
 
     # User message
@@ -915,6 +954,32 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
 
     if content_parts:
         record["response_content"] = "\n".join(content_parts)
+
+    # --- Subagent invocations ---
+    # A runSubagent call is serialized as a response part whose
+    # ``toolSpecificData.kind`` is "subagent". It is the ONLY place VS Code
+    # records the child's model and cost — the hook stream carries neither.
+    # The part's ``toolCallId`` is the bare agent_id (the hook's ``agent_id``,
+    # i.e. the PostToolUse ``tool_use_id`` without its ``__vscode-<n>`` suffix),
+    # so it keys straight onto the envelope built at the runSubagent
+    # PostToolUse.
+    if isinstance(response_parts, list):
+        for part in response_parts:
+            if not isinstance(part, dict):
+                continue
+            data = part.get("toolSpecificData")
+            if not isinstance(data, dict) or data.get("kind") != "subagent":
+                continue
+            agent_id = part.get("toolCallId", "")
+            if not agent_id:
+                continue
+            record["subagents"][agent_id] = {
+                "model": data.get("modelName", ""),
+                "credits": data.get("credits"),
+                "prompt": data.get("prompt", ""),
+                "result": data.get("result", ""),
+                "description": data.get("description", ""),
+            }
 
     # --- Token counts, model, and ordered reasoning from result metadata ---
     result_obj = req.get("result")
