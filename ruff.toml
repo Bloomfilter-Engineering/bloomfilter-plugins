@@ -1,0 +1,9 @@
+# Pin the lint rule set explicitly so CI is deterministic regardless of the
+# installed ruff version. Unpinned `ruff check` follows the installed ruff's
+# default rules, which have expanded in newer releases and flag intentional
+# patterns in the hook scripts across every plugin — e.g. broad `except
+# Exception` / try-except-pass guards (BLE001, S110/S112) that are deliberate
+# because a hook must never crash the host application. These are ruff's
+# long-standing default rules (pyflakes + a subset of pycodestyle).
+[lint]
+select = ["E4", "E7", "E9", "F"]
