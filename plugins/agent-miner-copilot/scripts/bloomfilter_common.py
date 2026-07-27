@@ -13,16 +13,27 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-PLUGIN_VERSION = "0.1.5"
+# Platform-specific stdlib modules used by ``_lock_file`` below.
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import fcntl
+
+PLUGIN_VERSION = "0.2.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir
 
 # GitHub Copilot fires hooks in two payload conventions, selected by event-name
 # casing: PascalCase event names (e.g. ``SubagentStop``) get snake_case fields,
-# while camelCase event names (e.g. ``subagentStart`` — the only event that is
-# camelCase-only on the CLI) get camelCase fields. We normalise camelCase keys
-# to their snake_case equivalents so the rest of the plugin reads uniformly.
+# while camelCase event names get camelCase fields. ``hooks/hooks.json``
+# registers PascalCase only — the CLI recognises those names and switches to
+# snake_case payloads to match VS Code — so this table is defensive: it keeps
+# older CLI builds (and any future camelCase-only event) reading uniformly.
+#
+# Registering both casings for the same event is NOT safe: VS Code maps e.g.
+# ``Stop`` and ``agentStop`` to the same internal event and would fire the hook
+# twice, double-capturing every turn.
 _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
     "sessionId": "session_id",
     "hookEventName": "hook_event_name",
@@ -79,6 +90,13 @@ def detect_runtime(payload: dict[str, Any]) -> str:
             or "/chatSessions/" in transcript_path
         ):
             return "copilot-vscode"
+    # The CLI injects COPILOT_PLUGIN_ROOT/COPILOT_PLUGIN_DATA on every hook;
+    # VS Code injects only CLAUDE_PLUGIN_ROOT. Check this before the VS Code
+    # env vars so a CLI session running inside a VS Code integrated terminal
+    # isn't misdetected as copilot-vscode — that would silently disable the
+    # CLI dedup in collect_hook.py and double-count turns.
+    if os.environ.get("COPILOT_PLUGIN_ROOT"):
+        return "copilot-cli"
     if os.environ.get("VSCODE_PID") or os.environ.get("TERM_PROGRAM") == "vscode":
         return "copilot-vscode"
     if os.environ.get("COPILOT_HOME") or os.path.isdir(
@@ -120,7 +138,8 @@ def secure_makedirs(path: str) -> None:
 def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
-    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux).
+    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux,
+    %APPDATA%\\bloomfilter on Windows).
     All agent-miner plugins write to the same well-known location so a single
     debug.log shows the full picture across Claude Code / Cursor / Codex /
     Copilot. The DEBUG_LOG_TAG prefix on each line disambiguates the source.
@@ -155,9 +174,14 @@ def debug_log(message: str) -> None:
 
 
 def read_json_config(path: str, key: str, default: str = "") -> str:
-    """Safely read a single key from a JSON config file."""
+    """Safely read a single key from a JSON config file.
+
+    Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
+    UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
+    snippet uses exactly that, so user-created configs land here BOM-prefixed.
+    """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f).get(key, default) or default
     except Exception:
         return default
@@ -211,9 +235,14 @@ def resolve_api_url() -> str:
 
 
 def read_payload() -> Any:
-    """Read JSON payload from stdin."""
+    """Read JSON payload from stdin.
+
+    Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
+    pipes to a native executable can prefix stdout with a UTF-8 BOM on
+    Windows PowerShell 5.1, which would otherwise break json.loads.
+    """
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
 
@@ -253,11 +282,45 @@ def spawn_detached(args: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_git_executable() -> str:
+    """Return a git executable path if available, or '' if none is found."""
+    git = shutil.which("git")
+    if git:
+        return git
+
+    if platform.system() != "Windows":
+        return ""
+
+    candidates = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(os.path.join(base, "Git", "cmd", "git.exe"))
+            candidates.append(os.path.join(base, "Git", "bin", "git.exe"))
+    local_app_data = os.environ.get("LocalAppData")
+    if local_app_data:
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "cmd", "git.exe")
+        )
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "bin", "git.exe")
+        )
+    for candidate in candidates:
+        if os.path.isabs(candidate) and os.path.isfile(candidate):
+            return candidate
+
+    return ""
+
+
 def get_git_branch(project_dir: str) -> str:
     """Return the current git branch, or '' on failure."""
+    git = _resolve_git_executable()
+    if not git:
+        return ""
+
     try:
         result = subprocess.run(
-            ["git", "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            [git, "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -273,7 +336,6 @@ def get_git_branch(project_dir: str) -> str:
 
 
 if platform.system() != "Windows":
-    import fcntl
 
     @contextlib.contextmanager
     def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
@@ -289,8 +351,58 @@ else:
 
     @contextlib.contextmanager
     def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
-        """No-op lock on Windows."""
-        yield
+        """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
+
+        msvcrt only supports exclusive locks — the ``exclusive`` arg is
+        accepted for API parity with the POSIX implementation but ignored.
+        Locks 1 byte at offset 0 as a coordination token. ``LK_LOCK``
+        retries every second up to 10 times before raising; if it does
+        raise we proceed unlocked (better than crashing the hook).
+
+        File position is saved and restored so the lock's seek to offset 0
+        does not disturb append-mode writes.
+        """
+        try:
+            fp.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            pos = fp.tell()
+        except (OSError, ValueError):
+            pos = None
+
+        try:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError as exc:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                "proceeding unsynchronized.",
+                file=sys.stderr,
+            )
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
+            yield
+            return
+
+        try:
+            if pos is not None:
+                fp.seek(pos)
+            yield
+        finally:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
 
 
 def get_batch_dir() -> str:

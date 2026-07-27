@@ -17,8 +17,8 @@ only so existing installs keep working — new users should not install them.
 | `bloomfilter-agent-miner-cursor` | Cursor on Windows, macOS, Linux, WSL | ✅ Recommended | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-unified` | Cursor on Windows, macOS, Linux, WSL | ♻️ Alias of `-cursor` | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | ⚠️ Deprecated | `.cursor-plugin/marketplace.json` |
-| `bloomfilter-agent-miner-copilot` | VS Code Copilot on macOS and Linux | | `.github/plugin/marketplace.json` |
-| `bloomfilter-agent-miner-copilot-windows` | VS Code Copilot on Windows | | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-copilot` | VS Code Copilot and Copilot CLI on Windows, macOS, Linux, WSL | ✅ Recommended | `.github/plugin/marketplace.json` |
+| `bloomfilter-agent-miner-copilot-windows` | VS Code Copilot on Windows | ⚠️ Deprecated | `.github/plugin/marketplace.json` |
 
 ## Setup
 
@@ -33,9 +33,11 @@ Do this once on each machine before installing a plugin.
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (Windows, macOS, Linux, WSL).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (Windows, macOS, Linux, WSL).
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` (Windows, macOS, Linux, WSL).
-  - VS Code 1.115+ (Copilot extension) for `bloomfilter-agent-miner-copilot` (macOS / Linux) or `bloomfilter-agent-miner-copilot-windows` (Windows).
+  - VS Code 1.115+ (Copilot extension), or the GitHub Copilot CLI, for `bloomfilter-agent-miner-copilot` (Windows, macOS, Linux, WSL).
 - On **Windows**, the Claude Code and Codex plugins run their hooks through **Git Bash** when it
   is installed (falling back to PowerShell otherwise), so installing Git is recommended there.
+  This does not apply to the Copilot plugin: VS Code and the Copilot CLI always run hooks through
+  PowerShell on Windows, so Git Bash is never involved there.
 
 ### macOS Dependencies
 
@@ -222,12 +224,14 @@ Note: Codex thinking text is encrypted by Codex and is not readable by this plug
 
 ### VS Code Copilot
 
-Bloomfilter publishes separate VS Code Copilot plugins by operating system:
+Bloomfilter publishes these Copilot plugins:
 
-- Use `bloomfilter-agent-miner-copilot` on macOS and Linux.
-- Use `bloomfilter-agent-miner-copilot-windows` on Windows.
+- `bloomfilter-agent-miner-copilot` — **Recommended.** One install covers Windows, macOS, Linux, and WSL, in both VS Code and the GitHub Copilot CLI. It adapts to whichever shell Copilot runs the hook in (PowerShell on Windows, POSIX shell on macOS / Linux / WSL).
+- `bloomfilter-agent-miner-copilot-windows` — deprecated, Windows only. Retained for existing installs.
 
-The setup commands below are identical on every OS; only the plugin you install differs.
+Install only one. Do not mix these — installing both captures every event twice.
+
+The setup steps below are identical on every OS.
 
 Open your VS Code `settings.json` and add the Bloomfilter marketplace:
 
@@ -243,9 +247,16 @@ Install the plugin:
 
 1. Open the Extensions view with `Cmd+Shift+X` on macOS or `Ctrl+Shift+X` on Windows.
 2. Type `@agentPlugins` in the search field.
-3. Find **bloomfilter-agent-miner-copilot** (macOS / Linux) or **bloomfilter-agent-miner-copilot-windows** (Windows) and select **Install**.
+3. Find **bloomfilter-agent-miner-copilot** and select **Install**.
 
 Open any project in VS Code with GitHub Copilot. The plugin activates automatically.
+
+The same plugin also works in the GitHub Copilot CLI:
+
+```bash
+copilot plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
+copilot plugin install bloomfilter-agent-miner-copilot@bloomfilter-plugins
+```
 
 ### Cursor
 
@@ -300,11 +311,22 @@ Start a session in your agent application, send a prompt, let the agent respond,
 
 Local batch files are written before upload:
 
-- macOS: `~/.config/bloomfilter/batches/`
+- macOS and Linux: `~/.config/bloomfilter/batches/`
 - Windows: `%APPDATA%\bloomfilter\batches\`
+
+Every plugin also appends to a shared `debug.log` next to that `batches/` directory, tagged with
+the plugin that wrote each line.
 
 If data does not appear in Bloomfilter, check that:
 
 - Python is available from the agent application's environment. Run `python3 --version` or `python --version` to confirm.
 - Your user config contains a valid `api_key`.
 - The plugin is installed and the agent application was restarted or reloaded after installation.
+- Only one plugin per runtime is installed. A deprecated `-windows` plugin left alongside the
+  cross-platform one captures every event twice.
+
+Per-runtime hook diagnostics:
+
+- **VS Code Copilot** — open the Output panel and select the **GitHub Copilot Chat Hooks** channel.
+  It logs the exact command run for each hook, its input and output, and any timeout or error.
+- **Copilot CLI** — run `copilot --log-level debug` and look for the hook execution lines.
