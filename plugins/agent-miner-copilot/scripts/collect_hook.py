@@ -145,35 +145,47 @@ def run_reupload_worker(session_id: str) -> None:
         )
         return
 
-    chat_path = _chat_path_for_session(session_id, batch_entries)
-    if not chat_path:
-        debug_log(
-            f"reupload_worker: aborted session_id={session_id} "
-            f"reason=no-chat-sessions-path n_stops={n_stops}"
-        )
-        return
-
     # Poll until the last turn's tokens are flushed (early-exit), or until the
     # budget is exhausted.
+    #
+    # The chatSessions file is resolved INSIDE the loop, not before it: on the
+    # first Stop of a new session VS Code has not created it yet (measured ~7 s
+    # after the Stop hook fires), so resolving once up front and bailing on ""
+    # made the worker abort before the very flush it exists to wait for — the
+    # first turn of every session then shipped with estimated tokens and no
+    # model. Waiting for the file to appear is the whole job.
+    chat_path = ""
     chat_requests = []
     waited = 0.0
     poll_count = 0
     while waited <= REUPLOAD_MAX_WAIT:
-        parsed = parse_copilot_transcript(chat_path)
-        chat_requests = parsed.get("requests", [])
-        poll_count += 1
-        if len(chat_requests) >= n_stops:
-            last = chat_requests[n_stops - 1]
-            if last.get("input_tokens") or last.get("output_tokens"):
-                break
+        if not chat_path:
+            chat_path = _chat_path_for_session(session_id, batch_entries)
+        if chat_path:
+            parsed = parse_copilot_transcript(chat_path)
+            chat_requests = parsed.get("requests", [])
+            poll_count += 1
+            if len(chat_requests) >= n_stops:
+                last = chat_requests[n_stops - 1]
+                if last.get("input_tokens") or last.get("output_tokens"):
+                    break
         time.sleep(REUPLOAD_POLL_INTERVAL)
         waited += REUPLOAD_POLL_INTERVAL
     else:
         debug_log(
             f"reupload_worker: budget-exhausted session_id={session_id} "
             f"polls={poll_count} waited={waited:.1f}s "
-            f"chat_requests={len(chat_requests)} n_stops={n_stops}"
+            f"chat_requests={len(chat_requests)} n_stops={n_stops} "
+            f"chat_path={chat_path!r}"
         )
+
+    if not chat_path:
+        debug_log(
+            f"reupload_worker: aborted session_id={session_id} "
+            f"reason=no-chat-sessions-path n_stops={n_stops} "
+            f"waited={waited:.1f}s"
+        )
+        return
 
     if not chat_requests:
         debug_log(
