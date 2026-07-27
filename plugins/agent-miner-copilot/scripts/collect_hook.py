@@ -326,6 +326,21 @@ def run_reupload_worker(session_id: str) -> None:
     # made the worker abort before the very flush it exists to wait for — the
     # first turn of every session then shipped with estimated tokens and no
     # model. Waiting for the file to appear is the whole job.
+    #
+    # The exit condition has to cover every reason the worker was spawned. It is
+    # also started when the parent already has tokens but a subagent turn is
+    # still missing its model (see the spawn site), and in that case a
+    # parent-tokens-only check is satisfied on the first poll — the loop would
+    # exit before the subagent record it was waiting for had flushed.
+    bare_agent_ids = {
+        entry.get("agent_id")
+        for entry in batch_entries
+        if entry.get("agent_id")
+        and any(
+            not turn.get("model")
+            for turn in (entry.get("subagent_transcript") or {}).get("turns") or []
+        )
+    }
     chat_path = ""
     chat_requests = []
     chat_subagents = {}
@@ -341,7 +356,13 @@ def run_reupload_worker(session_id: str) -> None:
             poll_count += 1
             if len(chat_requests) >= n_stops:
                 last = chat_requests[n_stops - 1]
-                if last.get("input_tokens") or last.get("output_tokens"):
+                subagents_ready = all(
+                    (chat_subagents.get(agent_id) or {}).get("model")
+                    for agent_id in bare_agent_ids
+                )
+                if (
+                    last.get("input_tokens") or last.get("output_tokens")
+                ) and subagents_ready:
                     break
         time.sleep(REUPLOAD_POLL_INTERVAL)
         waited += REUPLOAD_POLL_INTERVAL

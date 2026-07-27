@@ -67,6 +67,12 @@ _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
 # Cap on free-text subagent fields, matching the other agent-miner plugins.
 _SUBAGENT_FIELD_CAP = 10_000
 
+# Transcript read budget. Files up to MAX_TRANSCRIPT_BYTES are read whole so the
+# delta format's base snapshot (line 0) survives; larger ones degrade to the
+# last TAIL_WINDOW_BYTES so a runaway file can never be slurped on a hook.
+MAX_TRANSCRIPT_BYTES = 10_000_000
+TAIL_WINDOW_BYTES = 200_000
+
 
 def _cap_text(value: str) -> str:
     """Truncate a string to the subagent field cap; return it unchanged otherwise."""
@@ -768,8 +774,18 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
         return empty
 
     try:
+        # Read the whole file when it is within budget. The new format is a
+        # delta log whose FIRST line is the base snapshot, so a tail-only read
+        # discards it and everything reconstructed from it: measured on real
+        # sessions, a 375 KB transcript parsed to 1 request with an empty model
+        # (and no subagent records) instead of its full history. Line counts are
+        # tiny — 20-60 lines even at 375 KB — so the cost is in bytes, not
+        # parsing. Beyond the cap fall back to the bounded tail, which at least
+        # keeps recent turns rather than reading an unbounded file on a hook.
         file_size = os.path.getsize(transcript_path)
-        read_start = max(0, file_size - 200_000)
+        read_start = (
+            0 if file_size <= MAX_TRANSCRIPT_BYTES else file_size - TAIL_WINDOW_BYTES
+        )
         with open(transcript_path, "rb") as tf:
             if read_start > 0:
                 tf.seek(read_start)
