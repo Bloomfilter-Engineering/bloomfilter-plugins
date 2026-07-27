@@ -8,7 +8,7 @@ coding-assistant runtimes. Each runtime has a macOS/Linux plugin and a `-windows
 | Claude Code | `bloomfilter-agent-miner-claude-code` | `bloomfilter-agent-miner-claude-code-windows` |
 | Codex | `agent-miner-codex` | `agent-miner-codex-windows` |
 | Copilot (VS Code) | `bloomfilter-agent-miner-copilot` | `bloomfilter-agent-miner-copilot-windows` |
-| Cursor | `bloomfilter-agent-miner-cursor-unified` (recommended; legacy: `-cursor`, `-cursor-windows`) | use `-cursor-unified` |
+| Cursor | `bloomfilter-agent-miner-cursor` (cross-platform; legacy: `-cursor-windows`, deprecated alias: `-cursor-unified`) | use `bloomfilter-agent-miner-cursor` |
 
 > **Install** is documented in `README.md` (Setup + Install Plugins, per runtime). This file
 > covers **uninstalling** plugins during local testing — which the README does not.
@@ -64,17 +64,18 @@ Same steps on macOS and Windows.
 
 macOS/Linux:
 ```bash
-rm -rf ~/.cursor/plugins/local/agent-miner-cursor-unified
+rm -rf ~/.cursor/plugins/local/agent-miner-cursor
 ```
 
 Windows (PowerShell):
 ```powershell
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor"
 ```
 
-Replace the trailing dir name for the legacy plugins (`agent-miner-cursor`,
-`agent-miner-cursor-windows`) if those were installed. Install only ONE Cursor plugin at a time —
-multiple cause duplicate event capture.
+Replace the trailing dir name with `agent-miner-cursor-windows` (legacy) or
+`agent-miner-cursor-unified` (deprecated alias — the marketplace entry still resolves, but it now
+serves the `agent-miner-cursor` directory) if one of those was installed. Install only ONE Cursor
+plugin at a time — multiple cause duplicate event capture.
 
 ## Refreshing after local edits
 
@@ -142,17 +143,17 @@ Local install is a **directory copy, not a symlink**, so re-copy the whole plugi
 macOS/Linux:
 ```bash
 # Remove the installed copy first — cp -R into an existing dir nests instead of refreshing.
-rm -rf ~/.cursor/plugins/local/agent-miner-cursor-unified
-cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor-unified \
-      ~/.cursor/plugins/local/agent-miner-cursor-unified
+rm -rf ~/.cursor/plugins/local/agent-miner-cursor
+cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
+      ~/.cursor/plugins/local/agent-miner-cursor
 ```
 
 Windows (PowerShell):
 ```powershell
 # Remove the installed copy first — Copy-Item -Recurse into an existing dir nests instead of refreshing.
-Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified" -ErrorAction SilentlyContinue
-Copy-Item -Recurse -Force "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor-unified" `
-  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified"
+Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor" -ErrorAction SilentlyContinue
+Copy-Item -Recurse -Force "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor" `
+  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor"
 ```
 
 Then run **Developer: Reload Window** in Cursor. Do not symlink — Cursor's loader did not pick up

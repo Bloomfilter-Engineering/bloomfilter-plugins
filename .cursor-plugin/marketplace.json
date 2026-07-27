@@ -19,8 +19,8 @@
     },
     {
       "name": "bloomfilter-agent-miner-cursor-unified",
-      "source": "./plugins/agent-miner-cursor-unified",
-      "description": "Agent mining hooks for Bloomfilter (Cursor on Windows, macOS, Linux, and WSL)"
+      "source": "./plugins/agent-miner-cursor",
+      "description": "Deprecated alias of bloomfilter-agent-miner-cursor, which is now cross-platform. Install bloomfilter-agent-miner-cursor instead."
     }
   ]
 }

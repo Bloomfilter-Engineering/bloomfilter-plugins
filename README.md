@@ -12,9 +12,9 @@ Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. Th
 | `agent-miner-codex-windows` | Codex on Windows | `.agents/plugins/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot on macOS and Linux | `.github/plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot-windows` | VS Code Copilot on Windows | `.github/plugin/marketplace.json` |
-| `bloomfilter-agent-miner-cursor` | Cursor on macOS and Linux | `.cursor-plugin/marketplace.json` |
-| `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | `.cursor-plugin/marketplace.json` |
-| `bloomfilter-agent-miner-cursor-unified` | Cursor on Windows, macOS, Linux, and WSL | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor` | Cursor on Windows, macOS, Linux, and WSL | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows (legacy) | `.cursor-plugin/marketplace.json` |
+| `bloomfilter-agent-miner-cursor-unified` | Deprecated alias of `bloomfilter-agent-miner-cursor` | `.cursor-plugin/marketplace.json` |
 
 ## Setup
 
@@ -29,7 +29,7 @@ Do this once on each machine before installing a plugin.
   - Claude Code CLI for `bloomfilter-agent-miner-claude-code` (macOS / Linux) or `bloomfilter-agent-miner-claude-code-windows` (Windows).
   - Codex CLI or Codex desktop app for `agent-miner-codex` (macOS / Linux) or `agent-miner-codex-windows` (Windows).
   - VS Code 1.115+ (Copilot extension) for `bloomfilter-agent-miner-copilot` (macOS / Linux) or `bloomfilter-agent-miner-copilot-windows` (Windows).
-  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` (macOS / Linux) or `bloomfilter-agent-miner-cursor-unified` (Windows, macOS, Linux, and WSL).
+  - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` (Windows, macOS, Linux, and WSL).
 
 ### macOS Dependencies
 
@@ -260,11 +260,11 @@ Cursor distributes third-party plugins through **Team Marketplaces**, a feature 
 
 Bloomfilter publishes these Cursor plugins:
 
-- `bloomfilter-agent-miner-cursor-unified` — works on Windows, macOS, Linux, **and Windows hosts driving a WSL/SSH/dev-container remote**. Recommended for everyone, and required if you ever attach Cursor to a WSL remote. It adapts to whichever shell Cursor runs the hook in (PowerShell on Windows, POSIX shell on macOS / Linux / WSL), so a single install covers both your local and remote sessions.
-- `bloomfilter-agent-miner-cursor` — macOS and Linux only. Retained for existing installs.
+- `bloomfilter-agent-miner-cursor` — the default. Works on Windows, macOS, Linux, **and Windows hosts driving a WSL/SSH/dev-container remote**. It adapts to whichever shell Cursor runs the hook in (PowerShell on Windows, POSIX shell on macOS / Linux / WSL), so a single install covers both your local and remote sessions.
+- `bloomfilter-agent-miner-cursor-unified` — deprecated alias that now resolves to the same plugin directory as `bloomfilter-agent-miner-cursor`. Kept so existing marketplace references keep working; new installs should use `bloomfilter-agent-miner-cursor`.
 - `bloomfilter-agent-miner-cursor-windows` — Windows only. Retained for existing installs.
 
-Install only one. Do not mix these — installing more than one captures the same events multiple times, and a per-OS plugin (`-cursor` or `-cursor-windows`) errors when Cursor runs its hooks in the other environment (for example, the Windows plugin errors when its session is driven over a WSL remote, where hooks run in a POSIX shell).
+Install only one. Do not mix these — installing more than one captures the same events multiple times, and `-cursor-windows` errors when Cursor runs its hooks in the other environment (for example, it errors when its session is driven over a WSL remote, where hooks run in a POSIX shell).
 
 Admin setup:
 
@@ -273,7 +273,7 @@ Admin setup:
 3. Paste `https://github.com/Bloomfilter-Engineering/bloomfilter-plugins`.
 4. Confirm that Cursor finds `bloomfilter-agent-miner-cursor`, `bloomfilter-agent-miner-cursor-windows`, and `bloomfilter-agent-miner-cursor-unified`.
 5. Save the marketplace.
-6. Optional but recommended: mark `bloomfilter-agent-miner-cursor-unified` as **required** so it installs automatically for selected Team Access groups.
+6. Optional but recommended: mark `bloomfilter-agent-miner-cursor` as **required** so it installs automatically for selected Team Access groups.
 
 User setup:
 
@@ -286,8 +286,8 @@ macOS:
 
 ```bash
 mkdir -p ~/.cursor/plugins/local
-cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor-unified \
-  ~/.cursor/plugins/local/agent-miner-cursor-unified
+cp -R /path/to/bloomfilter-plugins/plugins/agent-miner-cursor \
+  ~/.cursor/plugins/local/agent-miner-cursor
 ```
 
 Windows PowerShell:
@@ -295,8 +295,8 @@ Windows PowerShell:
 ```powershell
 New-Item -ItemType Directory -Force "$env:USERPROFILE\.cursor\plugins\local"
 Copy-Item -Recurse -Force `
-  "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor-unified" `
-  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor-unified"
+  "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cursor" `
+  "$env:USERPROFILE\.cursor\plugins\local\agent-miner-cursor"
 ```
 
 Reload Cursor after installing or copying the plugin by running **Developer: Reload Window** from the Command Palette.
