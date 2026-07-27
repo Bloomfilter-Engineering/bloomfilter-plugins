@@ -3,105 +3,105 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" sessionStart",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" sessionStart; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionStart",
         "type": "command",
         "timeout": 10
       }
     ],
     "sessionEnd": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" sessionEnd",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" sessionEnd; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionEnd",
         "type": "command",
         "timeout": 30
       }
     ],
     "stop": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" stop",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" stop; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" stop",
         "type": "command",
         "timeout": 30
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" beforeSubmitPrompt",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" beforeSubmitPrompt; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeSubmitPrompt",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUse": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" postToolUse",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" postToolUse; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUse",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUseFailure": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" postToolUseFailure",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" postToolUseFailure; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUseFailure",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStart": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" subagentStart",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" subagentStart; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStart",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStop": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" subagentStop",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" subagentStop; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStop",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterShellExecution": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterShellExecution",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterShellExecution; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterShellExecution",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterMCPExecution": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterMCPExecution",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterMCPExecution; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterMCPExecution",
         "type": "command",
         "timeout": 10
       }
     ],
     "beforeReadFile": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" beforeReadFile",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" beforeReadFile; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeReadFile",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterFileEdit": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterFileEdit",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterFileEdit; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterFileEdit",
         "type": "command",
         "timeout": 10
       }
     ],
     "preCompact": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" preCompact",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" preCompact; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" preCompact",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentResponse": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterAgentResponse",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterAgentResponse; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentResponse",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentThought": [
       {
-        "command": "\"$(command -v python3 || command -v python)\" \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterAgentThought",
+        "command": "Set-Variable `# <#` > /dev/null 2>&1; $(command -v python3 || command -v python) \"${CURSOR_PLUGIN_ROOT}/scripts/collect_hook.py\" afterAgentThought; exit #> ; (Get-Variable '#').Value | powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentThought",
         "type": "command",
         "timeout": 10
       }
