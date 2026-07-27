@@ -20,7 +20,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION: str = "0.2.0"
+PLUGIN_VERSION: str = "0.2.1"
 _SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
@@ -150,9 +150,14 @@ def resolve_api_url() -> str:
 
 
 def read_payload() -> dict[str, Any]:
-    """Read a JSON hook payload from stdin."""
+    """Read a JSON hook payload from stdin.
+
+    Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell pipes to
+    a native executable can prefix stdin with a UTF-8 BOM on Windows PowerShell
+    5.1, which would otherwise break json.loads.
+    """
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw_payload = sys.stdin.read()
     return json.loads(raw_payload) if raw_payload.strip() else {}
 

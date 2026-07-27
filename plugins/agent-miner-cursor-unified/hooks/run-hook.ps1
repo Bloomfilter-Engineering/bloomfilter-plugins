@@ -6,7 +6,21 @@ param(
 $ErrorActionPreference = "Stop"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8NoBom
+# Best-effort: decode the inherited hook payload (stdin) as UTF-8, otherwise
+# Console.In decodes it with the console code page and mangles non-ASCII into
+# replacement chars. Wrapped in try/catch because setting InputEncoding can
+# throw when stdin is a redirected pipe with no real console attached.
+try { [Console]::InputEncoding = $utf8NoBom } catch {}
 $OutputEncoding = $utf8NoBom
+
+# Fail soft. With $ErrorActionPreference = "Stop" any unexpected terminating
+# error exits non-zero and the host reports a failed hook; capture is
+# best-effort, so answer with an empty JSON response and exit 0 instead.
+trap {
+    [Console]::Error.WriteLine("[bloomfilter] hook error: $_")
+    Write-Output "{}"
+    exit 0
+}
 
 function Resolve-Python {
     # Prefer bare `python`/`python3` since that's what's actually on PATH in
@@ -57,7 +71,9 @@ if (-not $pluginRoot) {
 }
 
 $script = Join-Path $pluginRoot "scripts\collect_hook.py"
-$stdin = [Console]::In.ReadToEnd()
+# Windows PowerShell 5.1 can prepend a UTF-8 BOM when piping to a native
+# process; drop it so the payload handed to Python stays valid JSON.
+$stdin = [Console]::In.ReadToEnd().TrimStart([char]0xFEFF)
 $pythonExecutable = $python["Executable"]
 $pythonArguments = $python["Arguments"]
 
@@ -73,7 +89,12 @@ $startInfo.RedirectStandardError = $true
 $process.StartInfo = $startInfo
 
 $null = $process.Start()
-$process.StandardInput.Write($stdin)
+# Write raw UTF-8 bytes rather than going through the StreamWriter, whose
+# encoding is host-dependent on 5.1 and can prepend a BOM the child would
+# choke on.
+$stdinBytes = [System.Text.Encoding]::UTF8.GetBytes($stdin)
+$process.StandardInput.BaseStream.Write($stdinBytes, 0, $stdinBytes.Length)
+$process.StandardInput.BaseStream.Flush()
 $process.StandardInput.Close()
 $stdout = $process.StandardOutput.ReadToEnd()
 $stderr = $process.StandardError.ReadToEnd()
