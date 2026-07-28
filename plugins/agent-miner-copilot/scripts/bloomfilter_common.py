@@ -790,9 +790,7 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
                 tf.seek(read_start)
             # Cap the read itself: a file that grows after getsize() must not
             # let us slurp past the budget the read_start branch chose.
-            raw = tf.read(
-                TAIL_WINDOW_BYTES if read_start > 0 else MAX_TRANSCRIPT_BYTES
-            )
+            raw = tf.read(TAIL_WINDOW_BYTES if read_start > 0 else MAX_TRANSCRIPT_BYTES)
         lines = raw.decode("utf-8", errors="replace").splitlines()
 
         entries = []

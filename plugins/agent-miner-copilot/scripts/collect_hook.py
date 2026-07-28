@@ -813,8 +813,7 @@ def main() -> None:
         transcript_summary = envelope.get("transcript_summary", {})
         api_calls = transcript_summary.get("api_calls", [{}])
         parent_has_tokens = any(
-            call.get("input_tokens") or call.get("output_tokens")
-            for call in api_calls
+            call.get("input_tokens") or call.get("output_tokens") for call in api_calls
         )
         needs_subagent_data = any(
             not turn.get("model")
