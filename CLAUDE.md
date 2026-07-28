@@ -1,14 +1,17 @@
 # bloomfilter-plugins
 
 Monorepo of Bloomfilter "agent-miner" plugins that capture agent activity from four
-coding-assistant runtimes. Each runtime has a macOS/Linux plugin and a `-windows` variant.
+coding-assistant runtimes. Each runtime has **one cross-platform plugin** covering Windows, macOS,
+Linux, and WSL. The `-windows` variants are deprecated and kept only so existing installs keep
+working — never install one alongside its cross-platform replacement, or every event is captured
+twice.
 
-| Runtime | macOS/Linux plugin | Windows plugin |
+| Runtime | Cross-platform plugin (use this) | Deprecated |
 | --- | --- | --- |
-| Claude Code | `bloomfilter-agent-miner-claude-code` | `bloomfilter-agent-miner-claude-code-windows` |
+| Claude Code | `bloomfilter-agent-miner-claude-code` | `-claude-code-windows` |
 | Codex | `agent-miner-codex` | `agent-miner-codex-windows` |
-| Copilot (VS Code) | `bloomfilter-agent-miner-copilot` | `bloomfilter-agent-miner-copilot-windows` |
-| Cursor | `bloomfilter-agent-miner-cursor-unified` (recommended; legacy: `-cursor`, `-cursor-windows`) | use `-cursor-unified` |
+| Copilot (VS Code + CLI) | `bloomfilter-agent-miner-copilot` | — |
+| Cursor | `bloomfilter-agent-miner-cursor` | `-cursor-windows` (and `-cursor-unified`, an alias) |
 
 > **Install** is documented in `README.md` (Setup + Install Plugins, per runtime). This file
 > covers **uninstalling** plugins during local testing — which the README does not.
@@ -44,9 +47,9 @@ codex plugin marketplace remove bloomfilter-plugins
 Alternatively disable in `~/.codex/config.toml` (macOS/Linux) / `%USERPROFILE%\.codex\config.toml`
 (Windows): set `[plugins."agent-miner-codex@bloomfilter-plugins"] enabled = false`. Restart Codex.
 
-### Copilot (VS Code)
+### Copilot (VS Code + CLI)
 
-No CLI — uninstall through the editor:
+In VS Code, uninstall through the editor:
 
 1. Extensions view (`Cmd+Shift+X` / `Ctrl+Shift+X`), search `@agentPlugins`, right-click the
    plugin → **Uninstall**.
@@ -54,6 +57,13 @@ No CLI — uninstall through the editor:
    `"chat.plugins.marketplaces": ["Bloomfilter-Engineering/bloomfilter-plugins"]` → delete it.
 
 Same steps on macOS and Windows.
+
+The Copilot CLI has its own commands (same on both OSes):
+
+```bash
+copilot plugin uninstall bloomfilter-agent-miner-copilot
+copilot plugin marketplace remove bloomfilter-plugins   # optional
+```
 
 ### Cursor
 
@@ -119,17 +129,19 @@ Same commands on both OSes.
 ### Copilot (VS Code)
 
 VS Code loads from its install dir, not the repo, so re-sync the edited files, then just fire the
-next hook — no editor restart needed (Python scripts spawn fresh):
+next hook — no editor restart needed. `scripts/*.py` and the `hooks/run-hook.*` launchers are all
+read fresh on every hook fire, so copying them is enough:
 
 macOS/Linux:
 ```bash
 SRC=/path/to/bloomfilter-plugins/plugins/agent-miner-copilot
 DST=~/.vscode/agent-plugins/github.com/Bloomfilter-Engineering/bloomfilter-plugins/plugins/agent-miner-copilot
 cp "$SRC"/scripts/*.py "$DST"/scripts/
+cp "$SRC"/hooks/run-hook.sh "$SRC"/hooks/run-hook.ps1 "$DST"/hooks/
 ```
 
-Windows (PowerShell): copy `scripts\*.py` from the repo into the matching
-`%USERPROFILE%\.vscode\agent-plugins\...\agent-miner-copilot-windows\scripts\` install dir.
+Windows (PowerShell): copy `scripts\*.py` and `hooks\run-hook.ps1` from the repo into the matching
+`%USERPROFILE%\.vscode\agent-plugins\...\agent-miner-copilot\scripts\` and `...\hooks\` install dirs.
 
 > Verify the exact install dir first (`diff -q` the repo vs. the install copy) — the path above was
 > observed during debugging and the host app may relocate it. Manifest/`hooks.json` changes still

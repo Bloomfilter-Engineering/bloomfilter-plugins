@@ -13,16 +13,34 @@ from collections.abc import Iterator
 from datetime import datetime, timezone
 from typing import Any
 
-PLUGIN_VERSION = "0.1.5"
+# Platform-specific stdlib modules used by ``_lock_file`` below.
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import fcntl
+
+PLUGIN_VERSION = "0.3.0"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "copilot"  # disambiguates plugins sharing the same log dir
 
 # GitHub Copilot fires hooks in two payload conventions, selected by event-name
 # casing: PascalCase event names (e.g. ``SubagentStop``) get snake_case fields,
-# while camelCase event names (e.g. ``subagentStart`` — the only event that is
-# camelCase-only on the CLI) get camelCase fields. We normalise camelCase keys
-# to their snake_case equivalents so the rest of the plugin reads uniformly.
+# while camelCase event names get camelCase fields. ``hooks/hooks.json``
+# registers PascalCase only — the CLI recognises those names and switches to
+# snake_case payloads to match VS Code — so this table is defensive: it keeps
+# older CLI builds (and any future camelCase-only event) reading uniformly.
+#
+# Registering both casings for the same event is NOT safe: VS Code maps e.g.
+# ``Stop`` and ``agentStop`` to the same internal event and would fire the hook
+# twice, double-capturing every turn.
+#
+# Subagent fields differ by runtime and are NOT interchangeable. VS Code sends
+# ``agent_id`` / ``agent_type`` (already snake_case, same names Claude Code
+# uses), where ``agent_id`` is the runSubagent ``tool_use_id`` minus its
+# ``__vscode-<n>`` suffix. The Copilot CLI SDK instead declares ``agentName`` /
+# ``agentDisplayName`` / ``agentDescription`` / ``stopReason`` — mapped below so
+# a CLI subagent arrives intact, though none has been captured yet.
 _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
     "sessionId": "session_id",
     "hookEventName": "hook_event_name",
@@ -37,7 +55,30 @@ _CAMEL_TO_SNAKE_PAYLOAD_KEYS = {
     "agentId": "agent_id",
     "permissionMode": "permission_mode",
     "notificationType": "notification_type",
+    # Copilot CLI subagent fields (SubagentStart/SubagentStop). VS Code sends
+    # agent_id/agent_type instead — see the note above _CAMEL_TO_SNAKE_PAYLOAD_KEYS.
+    "agentName": "agent_name",
+    "agentDisplayName": "agent_display_name",
+    "agentDescription": "agent_description",
+    "stopReason": "stop_reason",
+    "toolCallId": "tool_call_id",
 }
+
+# Cap on free-text subagent fields, matching the other agent-miner plugins.
+_SUBAGENT_FIELD_CAP = 10_000
+
+# Transcript read budget. Files up to MAX_TRANSCRIPT_BYTES are read whole so the
+# delta format's base snapshot (line 0) survives; larger ones degrade to the
+# last TAIL_WINDOW_BYTES so a runaway file can never be slurped on a hook.
+MAX_TRANSCRIPT_BYTES = 10_000_000
+TAIL_WINDOW_BYTES = 200_000
+
+
+def _cap_text(value: str) -> str:
+    """Truncate a string to the subagent field cap; return it unchanged otherwise."""
+    if len(value) > _SUBAGENT_FIELD_CAP:
+        return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
+    return value
 
 
 def normalize_hook_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -79,6 +120,13 @@ def detect_runtime(payload: dict[str, Any]) -> str:
             or "/chatSessions/" in transcript_path
         ):
             return "copilot-vscode"
+    # The CLI injects COPILOT_PLUGIN_ROOT/COPILOT_PLUGIN_DATA on every hook;
+    # VS Code injects only CLAUDE_PLUGIN_ROOT. Check this before the VS Code
+    # env vars so a CLI session running inside a VS Code integrated terminal
+    # isn't misdetected as copilot-vscode — that would silently disable the
+    # CLI dedup in collect_hook.py and double-count turns.
+    if os.environ.get("COPILOT_PLUGIN_ROOT"):
+        return "copilot-cli"
     if os.environ.get("VSCODE_PID") or os.environ.get("TERM_PROGRAM") == "vscode":
         return "copilot-vscode"
     if os.environ.get("COPILOT_HOME") or os.path.isdir(
@@ -120,7 +168,8 @@ def secure_makedirs(path: str) -> None:
 def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
-    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux).
+    Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux,
+    %APPDATA%\\bloomfilter on Windows).
     All agent-miner plugins write to the same well-known location so a single
     debug.log shows the full picture across Claude Code / Cursor / Codex /
     Copilot. The DEBUG_LOG_TAG prefix on each line disambiguates the source.
@@ -155,9 +204,14 @@ def debug_log(message: str) -> None:
 
 
 def read_json_config(path: str, key: str, default: str = "") -> str:
-    """Safely read a single key from a JSON config file."""
+    """Safely read a single key from a JSON config file.
+
+    Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
+    UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
+    snippet uses exactly that, so user-created configs land here BOM-prefixed.
+    """
     try:
-        with open(path, "r") as f:
+        with open(path, "r", encoding="utf-8-sig") as f:
             return json.load(f).get(key, default) or default
     except Exception:
         return default
@@ -211,9 +265,14 @@ def resolve_api_url() -> str:
 
 
 def read_payload() -> Any:
-    """Read JSON payload from stdin."""
+    """Read JSON payload from stdin.
+
+    Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
+    pipes to a native executable can prefix stdout with a UTF-8 BOM on
+    Windows PowerShell 5.1, which would otherwise break json.loads.
+    """
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read()
     return json.loads(raw) if raw.strip() else {}
 
@@ -253,11 +312,45 @@ def spawn_detached(args: list[str]) -> bool:
 # ---------------------------------------------------------------------------
 
 
+def _resolve_git_executable() -> str:
+    """Return a git executable path if available, or '' if none is found."""
+    git = shutil.which("git")
+    if git:
+        return git
+
+    if platform.system() != "Windows":
+        return ""
+
+    candidates = []
+    for env_name in ("ProgramFiles", "ProgramFiles(x86)"):
+        base = os.environ.get(env_name)
+        if base:
+            candidates.append(os.path.join(base, "Git", "cmd", "git.exe"))
+            candidates.append(os.path.join(base, "Git", "bin", "git.exe"))
+    local_app_data = os.environ.get("LocalAppData")
+    if local_app_data:
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "cmd", "git.exe")
+        )
+        candidates.append(
+            os.path.join(local_app_data, "Programs", "Git", "bin", "git.exe")
+        )
+    for candidate in candidates:
+        if os.path.isabs(candidate) and os.path.isfile(candidate):
+            return candidate
+
+    return ""
+
+
 def get_git_branch(project_dir: str) -> str:
     """Return the current git branch, or '' on failure."""
+    git = _resolve_git_executable()
+    if not git:
+        return ""
+
     try:
         result = subprocess.run(
-            ["git", "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
+            [git, "-C", project_dir, "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -273,7 +366,6 @@ def get_git_branch(project_dir: str) -> str:
 
 
 if platform.system() != "Windows":
-    import fcntl
 
     @contextlib.contextmanager
     def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
@@ -289,8 +381,57 @@ else:
 
     @contextlib.contextmanager
     def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
-        """No-op lock on Windows."""
-        yield
+        """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
+
+        msvcrt only supports exclusive locks — the ``exclusive`` arg is
+        accepted for API parity with the POSIX implementation but ignored.
+        Locks 1 byte at offset 0 as a coordination token. ``LK_LOCK``
+        retries every second up to 10 times before raising; if it does
+        raise we proceed unlocked (better than crashing the hook).
+
+        File position is saved and restored so the lock's seek to offset 0
+        does not disturb append-mode writes.
+        """
+        try:
+            fp.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            pos = fp.tell()
+        except (OSError, ValueError):
+            pos = None
+
+        try:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError as exc:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                "proceeding unsynchronized.",
+                file=sys.stderr,
+            )
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
+            yield
+        else:
+            try:
+                if pos is not None:
+                    fp.seek(pos)
+                yield
+            finally:
+                try:
+                    fp.seek(0)
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
+                    pass
+                if pos is not None:
+                    try:
+                        fp.seek(pos)
+                    except (OSError, ValueError):
+                        pass
 
 
 def get_batch_dir() -> str:
@@ -612,6 +753,10 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
       - input_tokens / output_tokens: int (latest turn, for backward compat)
       - result_count: int
       - model: str (latest turn, for backward compat)
+      - subagents: dict[str, dict] — agent_id -> {model, credits, prompt,
+            result, description} for every runSubagent call in the session.
+            The only source of a subagent's model and cost; the hook stream
+            carries neither.
     """
     empty = {
         "requests": [],
@@ -621,18 +766,31 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
         "output_tokens": 0,
         "result_count": 0,
         "model": "",
+        "subagents": {},
     }
 
     if not transcript_path or not os.path.exists(transcript_path):
         return empty
 
     try:
+        # Read the whole file when it is within budget. The new format is a
+        # delta log whose FIRST line is the base snapshot, so a tail-only read
+        # discards it and everything reconstructed from it: measured on real
+        # sessions, a 375 KB transcript parsed to 1 request with an empty model
+        # (and no subagent records) instead of its full history. Line counts are
+        # tiny — 20-60 lines even at 375 KB — so the cost is in bytes, not
+        # parsing. Beyond the cap fall back to the bounded tail, which at least
+        # keeps recent turns rather than reading an unbounded file on a hook.
         file_size = os.path.getsize(transcript_path)
-        read_start = max(0, file_size - 200_000)
+        read_start = (
+            0 if file_size <= MAX_TRANSCRIPT_BYTES else file_size - TAIL_WINDOW_BYTES
+        )
         with open(transcript_path, "rb") as tf:
             if read_start > 0:
                 tf.seek(read_start)
-            raw = tf.read()
+            # Cap the read itself: a file that grows after getsize() must not
+            # let us slurp past the budget the read_start branch chose.
+            raw = tf.read(TAIL_WINDOW_BYTES if read_start > 0 else MAX_TRANSCRIPT_BYTES)
         lines = raw.decode("utf-8", errors="replace").splitlines()
 
         entries = []
@@ -668,6 +826,13 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
             "output_tokens": 0,
             "result_count": len(records),
             "model": "",
+            # Flattened across every turn: agent_id -> subagent record. Keys are
+            # globally unique tool-call ids, so turns can't collide.
+            "subagents": {
+                agent_id: data
+                for rec in records
+                for agent_id, data in (rec.get("subagents") or {}).items()
+            },
         }
         for rec in reversed(records):
             if rec.get("response_content"):
@@ -777,6 +942,9 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
         "input_tokens": 0,
         "output_tokens": 0,
         "timestamp": req.get("timestamp", 0),
+        # agent_id -> {model, credits, prompt, result, description} for any
+        # runSubagent call made during this turn.
+        "subagents": {},
     }
 
     # User message
@@ -803,6 +971,32 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
 
     if content_parts:
         record["response_content"] = "\n".join(content_parts)
+
+    # --- Subagent invocations ---
+    # A runSubagent call is serialized as a response part whose
+    # ``toolSpecificData.kind`` is "subagent". It is the ONLY place VS Code
+    # records the child's model and cost — the hook stream carries neither.
+    # The part's ``toolCallId`` is the bare agent_id (the hook's ``agent_id``,
+    # i.e. the PostToolUse ``tool_use_id`` without its ``__vscode-<n>`` suffix),
+    # so it keys straight onto the envelope built at the runSubagent
+    # PostToolUse.
+    if isinstance(response_parts, list):
+        for part in response_parts:
+            if not isinstance(part, dict):
+                continue
+            data = part.get("toolSpecificData")
+            if not isinstance(data, dict) or data.get("kind") != "subagent":
+                continue
+            agent_id = part.get("toolCallId", "")
+            if not agent_id:
+                continue
+            record["subagents"][agent_id] = {
+                "model": data.get("modelName", ""),
+                "credits": data.get("credits"),
+                "prompt": data.get("prompt", ""),
+                "result": data.get("result", ""),
+                "description": data.get("description", ""),
+            }
 
     # --- Token counts, model, and ordered reasoning from result metadata ---
     result_obj = req.get("result")

@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8NoBom
+# Best-effort: decode the inherited hook payload (stdin) as UTF-8. Wrapped in
+# try/catch because setting InputEncoding can throw when stdin is a redirected
+# pipe with no real console attached.
+try { [Console]::InputEncoding = $utf8NoBom } catch {}
 $OutputEncoding = $utf8NoBom
 
 function Resolve-Python {
@@ -63,11 +67,24 @@ $startInfo.UseShellExecute = $false
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
+# Force UTF-8 (no BOM) on the child's redirected streams so non-ASCII payload
+# and the JSON response round-trip correctly regardless of the Windows code page.
+# Guarded: Standard*Encoding needs .NET Framework >= 4.6.1; with
+# $ErrorActionPreference = "Stop" a missing property would abort the hook and
+# silently drop the event on an older host.
+try {
+    $startInfo.StandardInputEncoding = $utf8NoBom
+    $startInfo.StandardOutputEncoding = $utf8NoBom
+    $startInfo.StandardErrorEncoding = $utf8NoBom
+} catch {}
 $process.StartInfo = $startInfo
 
 $null = $process.Start()
 $process.StandardInput.Write($stdin)
 $process.StandardInput.Close()
+# DO NOT change to a synchronous ReadToEnd() on stdout — draining stderr first
+# while stdout stays unread lets a large PostToolUse payload fill the stdout
+# pipe buffer, and the hook deadlocks until the host's timeout kills it.
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
 $stderr = $process.StandardError.ReadToEnd()
 $stdout = $stdoutTask.GetAwaiter().GetResult()
