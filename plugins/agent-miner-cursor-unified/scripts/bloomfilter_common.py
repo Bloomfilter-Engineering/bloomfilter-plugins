@@ -26,7 +26,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
@@ -212,7 +212,8 @@ def read_payload() -> Any:
     ``isinstance(payload, dict)``). Returns ``{}`` for empty or non-JSON input.
     """
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read().lstrip("\ufeff")
     if not raw.strip():
         return {}

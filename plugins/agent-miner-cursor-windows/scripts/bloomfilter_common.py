@@ -23,7 +23,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.1.5"
+PLUGIN_VERSION = "0.1.6"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_MAX_BYTES = 1_000_000  # 1 MB — rotation cap per file
@@ -203,7 +203,8 @@ def resolve_api_url():
 def read_payload():
     """Read JSON payload from stdin."""
     if platform.system() == "Windows":
-        sys.stdin.reconfigure(encoding="utf-8")
+        # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
+        sys.stdin.reconfigure(encoding="utf-8-sig")
     raw = sys.stdin.read().lstrip("\ufeff")
     if not raw.strip():
         return {}
