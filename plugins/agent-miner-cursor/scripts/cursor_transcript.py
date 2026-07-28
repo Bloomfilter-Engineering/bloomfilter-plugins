@@ -82,7 +82,7 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
         for block in _content_blocks(entry)
         if block.get("type") == "text" and block.get("text")
     ]
-    joined = "\n".join(t for t in texts if t).strip()
+    joined = "\n".join(text for text in texts if text).strip()
     match = _USER_QUERY_RE.search(joined)
     return (match.group(1).strip() if match else joined) or ""
 
@@ -174,29 +174,30 @@ def parse_transcript(path: str) -> dict[str, Any]:
 
         for block in _content_blocks(entry):
             block_type = block.get("type")
-            if block_type == "text":
-                text = _REDACTED_RE.sub(" ", block.get("text") or "").strip()
-                if text:
-                    # Last non-redacted assistant text wins as the response;
-                    # earlier ones are intermediate narration.
-                    current["agent_response"] = text
-            elif block_type == "tool_use":
-                tool_input = block.get("input")
-                if block.get("name") == "UpdateCurrentStep" and isinstance(
-                    tool_input, dict
-                ):
-                    summary = tool_input.get("final_summary")
-                    if isinstance(summary, str) and summary:
-                        current["_final_summary"] = summary
-                current["tool_calls"].append(
-                    {
-                        "started_at": "",
-                        "tool_name": block.get("name", ""),
-                        "tool_call_id": "",
-                        "tool_input": tool_input,
-                        "tool_output": None,
-                    }
-                )
+            match block_type:
+                case "text":
+                    text = _REDACTED_RE.sub(" ", block.get("text") or "").strip()
+                    if text:
+                        # Last non-redacted assistant text wins as the response;
+                        # earlier ones are intermediate narration.
+                        current["agent_response"] = text
+                case "tool_use":
+                    tool_input = block.get("input")
+                    if block.get("name") == "UpdateCurrentStep" and isinstance(
+                        tool_input, dict
+                    ):
+                        summary = tool_input.get("final_summary")
+                        if isinstance(summary, str) and summary:
+                            current["_final_summary"] = summary
+                    current["tool_calls"].append(
+                        {
+                            "started_at": "",
+                            "tool_name": block.get("name", ""),
+                            "tool_call_id": "",
+                            "tool_input": tool_input,
+                            "tool_output": None,
+                        }
+                    )
 
     if current is not None:
         turns.append(_finalize(current))
