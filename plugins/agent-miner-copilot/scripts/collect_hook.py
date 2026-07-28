@@ -810,9 +810,12 @@ def main() -> None:
         # A subagent turn awaiting its model/cost also needs the flush, and a
         # turn can carry exact tokens while its children are still bare — so
         # check for that independently rather than only on missing tokens.
-        summary = envelope.get("transcript_summary", {})
-        calls = summary.get("api_calls", [{}])
-        has_tokens = any(c.get("input_tokens") or c.get("output_tokens") for c in calls)
+        transcript_summary = envelope.get("transcript_summary", {})
+        api_calls = transcript_summary.get("api_calls", [{}])
+        parent_has_tokens = any(
+            call.get("input_tokens") or call.get("output_tokens")
+            for call in api_calls
+        )
         needs_subagent_data = any(
             not turn.get("model")
             for e in entries
@@ -822,10 +825,10 @@ def main() -> None:
         # nothing to do until the turn has actually stopped. Without this an
         # upload triggered by SubagentStop — which precedes the parent's Stop —
         # spawns a process that immediately aborts with reason=no-stops.
-        has_stop = any(e.get("hook_event_name") == "Stop" for e in entries)
+        has_stop_event = any(e.get("hook_event_name") == "Stop" for e in entries)
         if (
-            has_stop
-            and (not has_tokens or needs_subagent_data)
+            has_stop_event
+            and (not parent_has_tokens or needs_subagent_data)
             and runtime == "copilot-vscode"
         ):
             python_exe = sys.executable or "python3"

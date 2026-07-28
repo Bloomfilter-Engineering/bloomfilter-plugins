@@ -416,23 +416,22 @@ else:
                 except (OSError, ValueError):
                     pass
             yield
-            return
-
-        try:
-            if pos is not None:
-                fp.seek(pos)
-            yield
-        finally:
+        else:
             try:
-                fp.seek(0)
-                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
-            except OSError:
-                pass
-            if pos is not None:
-                try:
+                if pos is not None:
                     fp.seek(pos)
-                except (OSError, ValueError):
+                yield
+            finally:
+                try:
+                    fp.seek(0)
+                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                except OSError:
                     pass
+                if pos is not None:
+                    try:
+                        fp.seek(pos)
+                    except (OSError, ValueError):
+                        pass
 
 
 def get_batch_dir() -> str:
@@ -789,7 +788,11 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
         with open(transcript_path, "rb") as tf:
             if read_start > 0:
                 tf.seek(read_start)
-            raw = tf.read()
+            # Cap the read itself: a file that grows after getsize() must not
+            # let us slurp past the budget the read_start branch chose.
+            raw = tf.read(
+                TAIL_WINDOW_BYTES if read_start > 0 else MAX_TRANSCRIPT_BYTES
+            )
         lines = raw.decode("utf-8", errors="replace").splitlines()
 
         entries = []
