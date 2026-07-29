@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.3"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -361,7 +361,12 @@ def extract_transcript_summary(transcript_path):
 
     try:
         file_size = os.path.getsize(transcript_path)
-        read_start = max(0, file_size - 100_000)
+        # Read a generous tail so the whole current turn is in view. Token
+        # extraction alone only needs the last few assistant entries, but
+        # thinking capture needs every assistant line since the last user prompt
+        # (extended reasoning can be large), and correct thinking positions
+        # require seeing all of the turn's tool_use blocks.
+        read_start = max(0, file_size - 400_000)
         with open(transcript_path, "rb") as tf:
             tf.seek(read_start)
             raw = tf.read()
@@ -435,7 +440,53 @@ def extract_transcript_summary(transcript_path):
                 api_call["speed"] = speed
             api_calls.append(api_call)
 
-        return {"api_calls": api_calls}
+        # Extract thinking/reasoning in transcript order so the backend can build
+        # THINKING events. Reasoning lives ONLY in the transcript — it is never in
+        # a hook payload (last_assistant_message is final text only). Claude Code
+        # writes each content block on its own assistant line and SHARES one
+        # message id across a response's thinking/text/tool_use lines, so we walk
+        # the raw turn entries here: deduping by id (as the token logic above
+        # must, to avoid triple-counting usage) would drop the thinking and text
+        # lines and keep only the last block. position = number of tool_use blocks
+        # preceding the thought, matching the backend's interleave scheme.
+        thinking = []
+        tool_use_count = 0
+        for entry in turn_entries:
+            if not (
+                entry.get("type") == "assistant"
+                or entry.get("message", {}).get("role") == "assistant"
+            ):
+                continue
+            content = entry.get("message", {}).get("content", "")
+            if not isinstance(content, list):
+                continue
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                block_type = block.get("type")
+                if block_type == "thinking":
+                    text = block.get("thinking", "")
+                    if text:
+                        thinking.append(
+                            {"content": _cap_text(text), "position": tool_use_count}
+                        )
+                    elif block.get("signature"):
+                        # Opus extended-thinking text is encrypted — Claude Code
+                        # persists only the signature, never plaintext. Emit an
+                        # encrypted marker so the timeline still shows the model
+                        # reasoned (mirrors the Codex encrypted-thinking case).
+                        thinking.append(
+                            {"position": tool_use_count, "encrypted": True}
+                        )
+                elif block_type == "redacted_thinking":
+                    thinking.append({"position": tool_use_count, "encrypted": True})
+                elif block_type == "tool_use":
+                    tool_use_count += 1
+
+        summary = {"api_calls": api_calls}
+        if thinking:
+            summary["thinking"] = thinking
+        return summary
 
     except Exception:
         return None
@@ -595,6 +646,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 )
             turn.update(totals)
             turn["tool_calls"] = list(turn.pop("_tool_calls_by_id", {}).values())
+            turn["thinking"] = turn.pop("_thinking", [])
             return turn
 
         for entry in entries:
@@ -614,6 +666,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                     "ended_at": ts,
                     "_usage_by_id": {},
                     "_tool_calls_by_id": {},
+                    "_thinking": [],
                 }
                 continue
 
@@ -628,6 +681,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                     "ended_at": ts,
                     "_usage_by_id": {},
                     "_tool_calls_by_id": {},
+                    "_thinking": [],
                 }
 
             if ts:
@@ -650,6 +704,32 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                         block_type = block.get("type")
                         if block_type == "text" and block.get("text"):
                             current["agent_response"] = _cap_text(block["text"])
+                        elif block_type == "thinking":
+                            # position = tool calls seen so far, so the backend
+                            # renders this thought before that tool (trailing
+                            # thinking when it equals the final tool count).
+                            if block.get("thinking"):
+                                current["_thinking"].append(
+                                    {
+                                        "content": _cap_text(block["thinking"]),
+                                        "position": len(current["_tool_calls_by_id"]),
+                                    }
+                                )
+                            elif block.get("signature"):
+                                # Encrypted thinking — only a signature persists.
+                                current["_thinking"].append(
+                                    {
+                                        "position": len(current["_tool_calls_by_id"]),
+                                        "encrypted": True,
+                                    }
+                                )
+                        elif block_type == "redacted_thinking":
+                            current["_thinking"].append(
+                                {
+                                    "position": len(current["_tool_calls_by_id"]),
+                                    "encrypted": True,
+                                }
+                            )
                         elif block_type == "tool_use":
                             current["_tool_calls_by_id"][block.get("id", "")] = {
                                 "tool_name": block.get("name", ""),
