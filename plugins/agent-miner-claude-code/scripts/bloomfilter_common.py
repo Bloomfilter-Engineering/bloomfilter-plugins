@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.2.3"
+PLUGIN_VERSION = "0.2.4"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -451,37 +451,55 @@ def extract_transcript_summary(transcript_path):
         # preceding the thought, matching the backend's interleave scheme.
         thinking = []
         tool_use_count = 0
+        # Seed with the turn's user-prompt timestamp (it sits just before
+        # turn_entries) so the FIRST thought's duration spans from the prompt.
+        prev_ts = entries[last_user_idx].get("timestamp") if last_user_idx >= 0 else None
         for entry in turn_entries:
-            if not (
+            ts = entry.get("timestamp")
+            is_assistant = (
                 entry.get("type") == "assistant"
                 or entry.get("message", {}).get("role") == "assistant"
-            ):
-                continue
-            content = entry.get("message", {}).get("content", "")
-            if not isinstance(content, list):
-                continue
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                block_type = block.get("type")
-                if block_type == "thinking":
-                    text = block.get("thinking", "")
-                    if text:
+            )
+            content = entry.get("message", {}).get("content") if is_assistant else None
+            if isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    block_type = block.get("type")
+                    if block_type == "thinking":
+                        text = block.get("thinking", "")
+                        if text:
+                            thinking.append(
+                                _thinking_entry(
+                                    tool_use_count,
+                                    prev_ts,
+                                    ts,
+                                    content=_cap_text(text),
+                                )
+                            )
+                        elif block.get("signature"):
+                            # Opus extended-thinking text is encrypted — Claude
+                            # Code persists only the signature, never plaintext.
+                            # Emit an encrypted marker so the timeline still shows
+                            # the model reasoned (mirrors the Codex case).
+                            thinking.append(
+                                _thinking_entry(
+                                    tool_use_count, prev_ts, ts, encrypted=True
+                                )
+                            )
+                    elif block_type == "redacted_thinking":
                         thinking.append(
-                            {"content": _cap_text(text), "position": tool_use_count}
+                            _thinking_entry(
+                                tool_use_count, prev_ts, ts, encrypted=True
+                            )
                         )
-                    elif block.get("signature"):
-                        # Opus extended-thinking text is encrypted — Claude Code
-                        # persists only the signature, never plaintext. Emit an
-                        # encrypted marker so the timeline still shows the model
-                        # reasoned (mirrors the Codex encrypted-thinking case).
-                        thinking.append(
-                            {"position": tool_use_count, "encrypted": True}
-                        )
-                elif block_type == "redacted_thinking":
-                    thinking.append({"position": tool_use_count, "encrypted": True})
-                elif block_type == "tool_use":
-                    tool_use_count += 1
+                    elif block_type == "tool_use":
+                        tool_use_count += 1
+            # Track the previous entry's timestamp (from ANY entry, incl. tool
+            # results) so a thinking block's duration spans from the real prior
+            # event, not just the prior assistant line.
+            if ts:
+                prev_ts = ts
 
         summary = {"api_calls": api_calls}
         if thinking:
@@ -509,6 +527,71 @@ def _cap_text(value: str) -> str:
     if len(value) > _SUBAGENT_FIELD_CAP:
         return value[:_SUBAGENT_FIELD_CAP] + "…[truncated]"
     return value
+
+
+def _parse_iso_ts(value):
+    """Parse an ISO 8601 timestamp (trailing Z tolerated) into a datetime.
+
+    Args:
+        value: An ISO 8601 timestamp string, or anything else.
+
+    Returns:
+        datetime | None: The parsed datetime, or None if unparseable.
+    """
+    if not value or not isinstance(value, str):
+        return None
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except Exception:
+        return None
+
+
+def _duration_ms(start_ts, end_ts):
+    """Best-effort elapsed milliseconds between two ISO timestamps.
+
+    Args:
+        start_ts: The earlier ISO timestamp string.
+        end_ts: The later ISO timestamp string.
+
+    Returns:
+        int | None: Non-negative milliseconds, or None if either timestamp is
+            missing/unparseable or the span is negative (clock skew).
+    """
+    start = _parse_iso_ts(start_ts)
+    end = _parse_iso_ts(end_ts)
+    if not start or not end:
+        return None
+    ms = int((end - start).total_seconds() * 1000)
+    return ms if ms >= 0 else None
+
+
+def _thinking_entry(position, prev_ts, ts, content=None, encrypted=False):
+    """Build one thinking entry for the batch payload.
+
+    ``duration_ms`` is best-effort: the elapsed time from the previous transcript
+    entry to this thinking block's own timestamp. Thinking is the first block a
+    response emits, so this approximates request latency + reasoning generation —
+    the transcript exposes no finer signal (and no reasoning-token count).
+
+    Args:
+        position: Number of tool_use blocks preceding this thought in the turn.
+        prev_ts: Timestamp of the previous transcript entry (duration start).
+        ts: This thinking entry's timestamp (duration end).
+        content: Readable reasoning text, or None when encrypted/unavailable.
+        encrypted: True when only an encrypted signature exists (no text).
+
+    Returns:
+        dict: ``{position, [content], [encrypted], [duration_ms]}``.
+    """
+    entry = {"position": position}
+    if content is not None:
+        entry["content"] = content
+    if encrypted:
+        entry["encrypted"] = True
+    duration = _duration_ms(prev_ts, ts)
+    if duration:  # omit missing (None) and meaningless zero-length spans
+        entry["duration_ms"] = duration
+    return entry
 
 
 def extract_subagent_conversation(
@@ -649,10 +732,16 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             turn["thinking"] = turn.pop("_thinking", [])
             return turn
 
+        prev_ts = None
         for entry in entries:
             entry_type = entry.get("type")
             msg = entry.get("message", {})
             ts = entry.get("timestamp")
+            # Previous entry's timestamp (duration start for a thinking block),
+            # captured before advancing prev_ts to this entry.
+            entry_prev_ts = prev_ts
+            if ts:
+                prev_ts = ts
 
             if _is_real_user_prompt(entry):
                 if current is not None:
@@ -710,25 +799,31 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                             # thinking when it equals the final tool count).
                             if block.get("thinking"):
                                 current["_thinking"].append(
-                                    {
-                                        "content": _cap_text(block["thinking"]),
-                                        "position": len(current["_tool_calls_by_id"]),
-                                    }
+                                    _thinking_entry(
+                                        len(current["_tool_calls_by_id"]),
+                                        entry_prev_ts,
+                                        ts,
+                                        content=_cap_text(block["thinking"]),
+                                    )
                                 )
                             elif block.get("signature"):
                                 # Encrypted thinking — only a signature persists.
                                 current["_thinking"].append(
-                                    {
-                                        "position": len(current["_tool_calls_by_id"]),
-                                        "encrypted": True,
-                                    }
+                                    _thinking_entry(
+                                        len(current["_tool_calls_by_id"]),
+                                        entry_prev_ts,
+                                        ts,
+                                        encrypted=True,
+                                    )
                                 )
                         elif block_type == "redacted_thinking":
                             current["_thinking"].append(
-                                {
-                                    "position": len(current["_tool_calls_by_id"]),
-                                    "encrypted": True,
-                                }
+                                _thinking_entry(
+                                    len(current["_tool_calls_by_id"]),
+                                    entry_prev_ts,
+                                    ts,
+                                    encrypted=True,
+                                )
                             )
                         elif block_type == "tool_use":
                             current["_tool_calls_by_id"][block.get("id", "")] = {

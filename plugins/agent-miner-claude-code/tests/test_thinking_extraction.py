@@ -35,13 +35,14 @@ def _write_transcript(tmp_path, lines):
     return path
 
 
-def _assistant(msg_id, block, usage=True):
+def _assistant(msg_id, block, usage=True, ts="2026-07-29T00:00:00Z"):
     """Build one assistant transcript entry carrying a single content block.
 
     Args:
         msg_id: The shared message id for the response.
         block: The single content block dict.
         usage: Whether to attach a usage dict (as Claude Code does).
+        ts: The entry timestamp (used for best-effort thinking duration).
 
     Returns:
         dict: An assistant transcript entry.
@@ -50,13 +51,13 @@ def _assistant(msg_id, block, usage=True):
                "content": [block], "stop_reason": "tool_use"}
     if usage:
         message["usage"] = {"input_tokens": 10, "output_tokens": 5}
-    return {"type": "assistant", "message": message, "timestamp": "2026-07-29T00:00:00Z"}
+    return {"type": "assistant", "message": message, "timestamp": ts}
 
 
-def _user(text):
+def _user(text, ts="2026-07-29T00:00:00Z"):
     """Build a real user-prompt transcript entry."""
     return {"type": "user", "message": {"role": "user", "content": text},
-            "timestamp": "2026-07-29T00:00:00Z"}
+            "timestamp": ts}
 
 
 def test_main_turn_thinking_extracted_with_positions(tmp_path):
@@ -132,6 +133,47 @@ def test_redacted_thinking_marked_encrypted(tmp_path):
     summary = bc.extract_transcript_summary(path)
 
     assert summary["thinking"] == [{"position": 0, "encrypted": True}]
+
+
+def test_thinking_duration_from_timestamps(tmp_path):
+    """Best-effort duration = time from the previous entry to the thinking line.
+
+    First thought spans from the user prompt; the second (interleaved) thought
+    spans from the preceding tool_use entry — not just the prior assistant line.
+    """
+    lines = [
+        _user("do the thing", ts="2026-07-29T00:00:00Z"),
+        _assistant("A", {"type": "thinking", "thinking": "first", "signature": "s"},
+                   ts="2026-07-29T00:00:03Z"),
+        _assistant("A", {"type": "tool_use", "id": "t1", "name": "Read", "input": {}},
+                   ts="2026-07-29T00:00:04Z"),
+        _assistant("B", {"type": "thinking", "thinking": "second", "signature": "s"},
+                   ts="2026-07-29T00:00:06.500Z"),
+        _assistant("B", {"type": "text", "text": "answer"},
+                   ts="2026-07-29T00:00:09Z"),
+    ]
+    path = _write_transcript(tmp_path, lines)
+
+    thinking = bc.extract_transcript_summary(path)["thinking"]
+
+    assert thinking[0]["position"] == 0
+    assert thinking[0]["duration_ms"] == 3000
+    assert thinking[1]["position"] == 1
+    assert thinking[1]["duration_ms"] == 2500
+
+
+def test_thinking_no_duration_when_timestamps_equal(tmp_path):
+    """Identical timestamps yield no duration_ms rather than a noisy zero."""
+    lines = [
+        _user("hi"),
+        _assistant("A", {"type": "thinking", "thinking": "t", "signature": "s"}),
+        _assistant("A", {"type": "text", "text": "done"}),
+    ]
+    path = _write_transcript(tmp_path, lines)
+
+    thinking = bc.extract_transcript_summary(path)["thinking"]
+
+    assert thinking == [{"content": "t", "position": 0}]
 
 
 def test_subagent_thinking_interleaved(tmp_path):
