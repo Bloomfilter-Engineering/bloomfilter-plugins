@@ -11,7 +11,7 @@ import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 
-PLUGIN_VERSION = "0.2.4"
+PLUGIN_VERSION = "0.2.5"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -453,7 +453,9 @@ def extract_transcript_summary(transcript_path):
         tool_use_count = 0
         # Seed with the turn's user-prompt timestamp (it sits just before
         # turn_entries) so the FIRST thought's duration spans from the prompt.
-        prev_ts = entries[last_user_idx].get("timestamp") if last_user_idx >= 0 else None
+        prev_ts = (
+            entries[last_user_idx].get("timestamp") if last_user_idx >= 0 else None
+        )
         for entry in turn_entries:
             ts = entry.get("timestamp")
             is_assistant = (
@@ -489,9 +491,7 @@ def extract_transcript_summary(transcript_path):
                             )
                     elif block_type == "redacted_thinking":
                         thinking.append(
-                            _thinking_entry(
-                                tool_use_count, prev_ts, ts, encrypted=True
-                            )
+                            _thinking_entry(tool_use_count, prev_ts, ts, encrypted=True)
                         )
                     elif block_type == "tool_use":
                         tool_use_count += 1
@@ -581,13 +581,17 @@ def _thinking_entry(position, prev_ts, ts, content=None, encrypted=False):
         encrypted: True when only an encrypted signature exists (no text).
 
     Returns:
-        dict: ``{position, [content], [encrypted], [duration_ms]}``.
+        dict: ``{position, [content], [encrypted], [started_at], [duration_ms]}``.
     """
     entry = {"position": position}
     if content is not None:
         entry["content"] = content
     if encrypted:
         entry["encrypted"] = True
+    if ts:
+        # The block's own timestamp — lets the backend order thinking
+        # chronologically among the turn's tool calls (true interleave).
+        entry["started_at"] = ts
     duration = _duration_ms(prev_ts, ts)
     if duration:  # omit missing (None) and meaningless zero-length spans
         entry["duration_ms"] = duration
