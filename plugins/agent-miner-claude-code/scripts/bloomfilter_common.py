@@ -12,6 +12,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from typing import Any
 
 PLUGIN_VERSION = "0.2.6"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
@@ -369,9 +370,9 @@ def extract_transcript_summary(transcript_path):
         # (extended reasoning can be large), and correct thinking positions
         # require seeing all of the turn's tool_use blocks.
         read_start = max(0, file_size - 400_000)
-        with open(transcript_path, "rb") as tf:
-            tf.seek(read_start)
-            raw = tf.read()
+        with open(transcript_path, "rb") as transcript_file:
+            transcript_file.seek(read_start)
+            raw = transcript_file.read()
         lines = raw.decode("utf-8", errors="replace").splitlines()
 
         entries = []
@@ -531,7 +532,7 @@ def _cap_text(value: str) -> str:
     return value
 
 
-def _parse_iso_ts(value):
+def _parse_iso_ts(value: Any) -> datetime | None:
     """Parse an ISO 8601 timestamp (trailing Z tolerated) into a datetime.
 
     Args:
@@ -548,7 +549,7 @@ def _parse_iso_ts(value):
         return None
 
 
-def _duration_ms(start_ts, end_ts):
+def _duration_ms(start_ts: str | None, end_ts: str | None) -> int | None:
     """Best-effort elapsed milliseconds between two ISO timestamps.
 
     Args:
@@ -567,7 +568,13 @@ def _duration_ms(start_ts, end_ts):
     return ms if ms >= 0 else None
 
 
-def _thinking_entry(position, prev_ts, ts, content=None, encrypted=False):
+def _thinking_entry(
+    position: int,
+    prev_ts: str | None,
+    ts: str | None,
+    content: str | None = None,
+    encrypted: bool = False,
+) -> dict:
     """Build one thinking entry for the batch payload.
 
     ``duration_ms`` is best-effort: the elapsed time from the previous transcript
@@ -675,8 +682,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
         return None
 
     try:
-        with open(agent_transcript_path, "rb") as tf:
-            raw = tf.read()
+        with open(agent_transcript_path, "rb") as transcript_file:
+            raw = transcript_file.read()
         lines = raw.decode("utf-8", errors="replace").splitlines()
 
         entries = []
