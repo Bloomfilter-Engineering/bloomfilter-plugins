@@ -1,6 +1,10 @@
 {
   "name": "bloomfilter-agent-miner-claude-code",
+<<<<<<< HEAD
   "version": "0.2.6",
+=======
+  "version": "0.2.3",
+>>>>>>> db07fc4 (Fix stop hook)
   "description": "Agent mining hooks for Bloomfilter (Claude Code on Windows, macOS, Linux, and WSL)",
   "author": {
     "name": "Bloomfilter Engineering"

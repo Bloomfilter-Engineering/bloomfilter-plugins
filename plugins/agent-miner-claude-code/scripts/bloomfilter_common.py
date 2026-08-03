@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import platform
@@ -14,10 +15,25 @@ import urllib.request
 from datetime import datetime, timezone
 from typing import Any
 
+# Platform-specific stdlib modules used by ``_lock_file`` below.
+if platform.system() == "Windows":
+    import msvcrt
+else:
+    import fcntl
+
 PLUGIN_VERSION = "0.2.6"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
+
+# Socket timeout for the batch upload, in seconds. Deliberately well under the
+# per-hook timeout the runtime enforces (30s for Stop/SessionEnd in
+# hooks/hooks.json) so that a stalled POST raises URLError *inside* this
+# process — which debug_log records and which leaves the batch intact for the
+# next attempt — instead of the runtime killing the process mid-request. When
+# the two budgets were equal the runtime always won the race, so every stall
+# became an unlogged SIGKILL.
+UPLOAD_TIMEOUT_S = 15
 
 
 # ---------------------------------------------------------------------------
@@ -179,6 +195,86 @@ def get_git_branch(project_dir):
 
 
 # ---------------------------------------------------------------------------
+# Batch file locking
+# ---------------------------------------------------------------------------
+#
+# Every batch mutation below runs under an advisory cross-process lock. Hooks
+# are separate short-lived processes and several can overlap — a Stop upload
+# draining the batch while a PostToolUse from the next turn appends to it — so
+# an unsynchronized read-modify-write would drop entries.
+
+
+if platform.system() != "Windows":
+
+    @contextlib.contextmanager
+    def _lock_file(fp, exclusive=True):
+        """Acquire an flock on an open file, release on exit."""
+        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(fp, op)
+        try:
+            yield
+        finally:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+
+else:
+
+    @contextlib.contextmanager
+    def _lock_file(fp, exclusive=True):
+        """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
+
+        msvcrt only supports exclusive locks — the ``exclusive`` arg is
+        accepted for API parity with the POSIX implementation but ignored.
+        Locks 1 byte at offset 0 as a coordination token. ``LK_LOCK`` retries
+        every second up to 10 times before raising; if it does raise we
+        proceed unlocked (better than crashing the hook).
+
+        File position is saved and restored so the lock's seek to offset 0
+        does not disturb append-mode writes.
+        """
+        try:
+            fp.flush()
+        except (OSError, ValueError):
+            pass
+        try:
+            pos = fp.tell()
+        except (OSError, ValueError):
+            pos = None
+
+        try:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError as exc:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                "proceeding unsynchronized.",
+                file=sys.stderr,
+            )
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
+            yield
+            return
+
+        try:
+            if pos is not None:
+                fp.seek(pos)
+            yield
+        finally:
+            try:
+                fp.seek(0)
+                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+            if pos is not None:
+                try:
+                    fp.seek(pos)
+                except (OSError, ValueError):
+                    pass
+
+
+# ---------------------------------------------------------------------------
 # Batch file helpers
 # ---------------------------------------------------------------------------
 
@@ -203,9 +299,31 @@ def append_to_batch(session_id, entry):
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     with open(batch_file, "a") as f:
-        f.write(line)
+        with _lock_file(f, exclusive=True):
+            f.write(line)
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def _decode_batch_line(line):
+    """Decode one raw JSONL batch line.
+
+    Returns ``(is_record, value)``. ``is_record`` is True only for a non-blank
+    line that parses as JSON — exactly the lines ``read_batch`` returns and
+    ``upload_batch`` sends — and False for a blank or corrupt line. ``value``
+    holds the decoded object when ``is_record`` is True, else ``None``.
+
+    Both ``read_batch`` and ``drop_leading_entries`` route through this so the
+    records uploaded and the records drained can never diverge: corrupt lines
+    are skipped identically on both sides.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return False, None
+    try:
+        return True, json.loads(stripped)
+    except json.JSONDecodeError:
+        return False, None
 
 
 def read_batch(session_id):
@@ -214,31 +332,85 @@ def read_batch(session_id):
     if not os.path.isfile(batch_file):
         return []
     with open(batch_file, "r") as f:
-        lines = f.readlines()
+        with _lock_file(f, exclusive=False):
+            lines = f.readlines()
     entries = []
     for line in lines:
-        line = line.strip()
-        if line:
-            try:
-                entries.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+        is_record, value = _decode_batch_line(line)
+        if is_record:
+            entries.append(value)
     return entries
 
 
-def clear_batch(session_id):
-    """Delete the batch file for *session_id*."""
-    batch_file = get_batch_file(session_id)
-    if os.path.isfile(batch_file):
-        os.remove(batch_file)
-
-
 def rewrite_batch(session_id, entries):
-    """Re-write entries back to the batch file (used on upload failure)."""
+    """Re-write entries back to the batch file (race-safe).
+
+    Opens with ``a+`` so the file is not truncated until *after* the exclusive
+    lock is acquired. Concurrent ``append_to_batch`` calls block on the same
+    lock and never lose a line.
+    """
     batch_file = get_batch_file(session_id)
-    with open(batch_file, "w") as f:
-        for entry in entries:
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    with open(batch_file, "a+") as f:
+        with _lock_file(f, exclusive=True):
+            f.seek(0)
+            f.truncate()
+            for entry in entries:
+                f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+    if platform.system() != "Windows":
+        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def clear_batch(session_id):
+    """Truncate the batch file for *session_id* (race-safe).
+
+    Delegates to ``rewrite_batch`` so the truncation happens while holding the
+    exclusive lock. Leaves a zero-byte file rather than deleting: unlinking
+    would need to happen after the handle closes (Windows cannot unlink an open
+    file), which reopens the race this lock exists to close. ``read_batch``
+    returns ``[]`` for an empty and a missing file alike.
+    """
+    rewrite_batch(session_id, [])
+
+
+def drop_leading_entries(session_id, count):
+    """Remove the first *count* entries from the batch file (race-safe).
+
+    Used after a successful upload to delete exactly the entries that were
+    uploaded while preserving any entries ``append_to_batch`` added
+    concurrently — those land after the uploaded snapshot, so they survive as
+    the trailing lines here. This is the safe alternative to ``clear_batch``,
+    which would truncate those concurrent appends away.
+
+    The read-modify-write happens under a single exclusive lock (``a+`` so the
+    file is not truncated until the lock is held), so a concurrent append
+    either completes before this runs (and is preserved) or blocks until after.
+
+    Counts only the valid JSON records ``read_batch`` would return (via
+    ``_decode_batch_line``), so corrupt or blank lines in the leading region
+    are discarded without consuming the drop count — otherwise a corrupt line
+    could leave an already-uploaded entry behind to be re-sent next batch.
+    """
+    if count <= 0:
+        return
+    batch_file = get_batch_file(session_id)
+    if not os.path.isfile(batch_file):
+        return
+    with open(batch_file, "a+") as f:
+        with _lock_file(f, exclusive=True):
+            f.seek(0)
+            lines = f.readlines()
+            kept = []
+            dropped = 0
+            for line in lines:
+                if dropped < count:
+                    is_record, _ = _decode_batch_line(line)
+                    if is_record:
+                        dropped += 1
+                    continue
+                kept.append(line)
+            f.seek(0)
+            f.truncate()
+            f.writelines(kept)
     if platform.system() != "Windows":
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
@@ -295,7 +467,7 @@ def upload_batch(api_url, api_key, payload):
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT_S) as resp:
             status = resp.getcode()
             body = resp.read().decode("utf-8", errors="replace")
         debug_log(

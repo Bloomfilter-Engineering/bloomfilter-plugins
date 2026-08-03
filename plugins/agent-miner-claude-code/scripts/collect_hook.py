@@ -15,8 +15,8 @@ from bloomfilter_common import (
     PLUGIN_VERSION,
     append_to_batch,
     bootstrap_config,
-    clear_batch,
     debug_log,
+    drop_leading_entries,
     extract_subagent_conversation,
     extract_transcript_summary,
     get_git_branch,
@@ -133,9 +133,23 @@ def main():
         }
 
         success = upload_batch(api_url, api_key, batch_payload)
-        if success and hook_event_name == "SessionEnd":
-            # Only delete batch file on SessionEnd success
-            clear_batch(session_id)
+        if success:
+            # Drain exactly the entries that were just uploaded, and only on
+            # success — anything still in the file is retried by the next batch,
+            # so a failed upload never loses data.
+            #
+            # Draining on every successful upload (not only on SessionEnd) is
+            # what keeps Stop a roughly constant-cost hook. Stop fires at the
+            # end of *every* turn, so retaining already-uploaded entries made
+            # turn N re-POST turns 1..N: batches were observed reaching 9,243
+            # entries / 41.9 MB and re-sent in full each turn, until the POST
+            # outran the hook timeout and the runtime killed the process.
+            #
+            # drop_leading_entries, not clear_batch: a hook from the next turn
+            # may have appended while the POST was in flight, and those entries
+            # land after the uploaded snapshot. Dropping by count preserves
+            # them; truncating would discard them unsent.
+            drop_leading_entries(session_id, len(entries))
 
 
 if __name__ == "__main__":
@@ -151,4 +165,9 @@ if __name__ == "__main__":
             )
         except Exception:
             pass  # Never block Claude
+    # Always exit 0, unconditionally. This collector is pure telemetry and must
+    # never influence the conversation. Per the hooks docs, exit 2 is a blocking
+    # error whose effect is per-event, and on Stop it "prevents Claude from
+    # stopping" — a non-zero exit here could therefore trap a session in a loop.
+    # Any other non-zero exit surfaces a "hook error" notice to the user.
     sys.exit(0)
