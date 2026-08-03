@@ -25,6 +25,7 @@ from bloomfilter_common import (
     resolve_api_key,
     resolve_api_url,
     upload_batch,
+    upload_slot,
     utcnow_iso,
 )
 
@@ -117,23 +118,37 @@ def main():
             return
 
         api_url = resolve_api_url()
-        entries = read_batch(session_id)
-        if not entries:
-            debug_log(
-                f"upload skipped: hook={hook_event_name} session_id={session_id} "
-                "reason=empty-batch"
-            )
-            return
 
-        batch_payload = {
-            "session_id": session_id,
-            "source": "claude_code",
-            "plugin_version": PLUGIN_VERSION,
-            "hooks": entries,
-        }
+        # Single-flight per session: the snapshot must be taken and drained
+        # under the same guard, or two overlapping upload hooks would each
+        # snapshot the same records and each drain them, deleting unsent
+        # entries. See upload_slot's docstring.
+        with upload_slot(session_id) as acquired:
+            if not acquired:
+                debug_log(
+                    f"upload skipped: hook={hook_event_name} "
+                    f"session_id={session_id} reason=upload-already-in-flight"
+                )
+                return
 
-        success = upload_batch(api_url, api_key, batch_payload)
-        if success:
+            entries = read_batch(session_id)
+            if not entries:
+                debug_log(
+                    f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                    "reason=empty-batch"
+                )
+                return
+
+            batch_payload = {
+                "session_id": session_id,
+                "source": "claude_code",
+                "plugin_version": PLUGIN_VERSION,
+                "hooks": entries,
+            }
+
+            success = upload_batch(api_url, api_key, batch_payload)
+            if not success:
+                return
             # Drain exactly the entries that were just uploaded, and only on
             # success — anything still in the file is retried by the next batch,
             # so a failed upload never loses data.

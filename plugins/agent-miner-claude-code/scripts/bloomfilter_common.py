@@ -21,7 +21,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.6"
+PLUGIN_VERSION = "0.2.7"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -216,6 +216,16 @@ if platform.system() != "Windows":
         finally:
             fcntl.flock(fp, fcntl.LOCK_UN)
 
+    def _try_lock_exclusive(fp):
+        """Take an exclusive lock without waiting. Raises OSError if held."""
+        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(fp):
+        try:
+            fcntl.flock(fp, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
 else:
 
     @contextlib.contextmanager
@@ -273,6 +283,23 @@ else:
                 except (OSError, ValueError):
                     pass
 
+    def _try_lock_exclusive(fp):
+        """Take an exclusive lock without waiting. Raises OSError if held.
+
+        ``LK_NBLCK`` returns an error immediately instead of ``LK_LOCK``'s
+        retry-every-second-for-10-seconds, which is what makes this usable as a
+        "is someone else already uploading?" test.
+        """
+        fp.seek(0)
+        msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(fp):
+        try:
+            fp.seek(0)
+            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+
 
 # ---------------------------------------------------------------------------
 # Batch file helpers
@@ -292,6 +319,36 @@ def get_batch_file(session_id):
     if not safe_id or safe_id != session_id or ".." in session_id:
         raise ValueError(f"Invalid session_id: {session_id!r}")
     return os.path.join(get_batch_dir(), f"{safe_id}.jsonl")
+
+
+@contextlib.contextmanager
+def upload_slot(session_id):
+    """Yield True if this process may upload *session_id*, False if one is
+    already in flight.
+
+    The snapshot-upload-drain sequence is deliberately NOT atomic: the batch
+    lock is released for the duration of the POST so that tool hooks can keep
+    appending instead of blocking on the network. That leaves one hazard — two
+    overlapping upload hooks (a Stop whose POST is still running when
+    SessionEnd fires) would each snapshot the same N records, each upload them,
+    and then each drain N, the second drain deleting N records that were never
+    sent. This guard makes uploads single-flight per session so that interleave
+    cannot occur; the loser skips, and its entries go out with the next batch.
+
+    A separate lock file rather than the batch file itself, because the batch
+    lock must stay free while the POST is in flight.
+    """
+    lock_path = get_batch_file(session_id) + ".upload"
+    with open(lock_path, "a+") as f:
+        try:
+            _try_lock_exclusive(f)
+        except OSError:
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            _unlock(f)
 
 
 def append_to_batch(session_id, entry):
