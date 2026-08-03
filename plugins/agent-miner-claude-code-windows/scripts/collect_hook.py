@@ -15,6 +15,7 @@ from bloomfilter_common import (
     PLUGIN_VERSION,
     append_to_batch,
     bootstrap_config,
+    cleanup_session_batch,
     debug_log,
     drop_leading_entries,
     extract_subagent_conversation,
@@ -119,52 +120,67 @@ def main():
 
         api_url = resolve_api_url()
 
-        # Single-flight per session: the snapshot must be taken and drained
-        # under the same guard, or two overlapping upload hooks would each
-        # snapshot the same records and each drain them, deleting unsent
-        # entries. See upload_slot's docstring.
-        with upload_slot(session_id) as acquired:
-            if not acquired:
-                debug_log(
-                    f"upload skipped: hook={hook_event_name} "
-                    f"session_id={session_id} reason=upload-already-in-flight"
-                )
-                return
+        try:
+            upload_and_drain(hook_event_name, session_id, api_url, api_key)
+        finally:
+            # SessionEnd is terminal — nothing can append or upload again, so
+            # the drained batch file and the upload lock are removed instead of
+            # lingering as zero-byte files, one pair per session. Runs outside
+            # upload_slot so our own lock is released first, and on every exit
+            # path (including the early returns inside upload_and_drain).
+            if hook_event_name == "SessionEnd":
+                cleanup_session_batch(session_id)
 
-            entries = read_batch(session_id)
-            if not entries:
-                debug_log(
-                    f"upload skipped: hook={hook_event_name} session_id={session_id} "
-                    "reason=empty-batch"
-                )
-                return
 
-            batch_payload = {
-                "session_id": session_id,
-                "source": "claude_code",
-                "plugin_version": PLUGIN_VERSION,
-                "hooks": entries,
-            }
+def upload_and_drain(hook_event_name, session_id, api_url, api_key):
+    """Snapshot, POST, and drain the batch for *session_id*."""
+    # Single-flight per session: the snapshot must be taken and drained
+    # under the same guard, or two overlapping upload hooks would each
+    # snapshot the same records and each drain them, deleting unsent
+    # entries. See upload_slot's docstring.
+    with upload_slot(session_id) as acquired:
+        if not acquired:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} "
+                f"session_id={session_id} reason=upload-already-in-flight"
+            )
+            return
 
-            success = upload_batch(api_url, api_key, batch_payload)
-            if not success:
-                return
-            # Drain exactly the entries that were just uploaded, and only on
-            # success — anything still in the file is retried by the next batch,
-            # so a failed upload never loses data.
-            #
-            # Draining on every successful upload (not only on SessionEnd) is
-            # what keeps Stop a roughly constant-cost hook. Stop fires at the
-            # end of *every* turn, so retaining already-uploaded entries made
-            # turn N re-POST turns 1..N: batches were observed reaching 9,243
-            # entries / 41.9 MB and re-sent in full each turn, until the POST
-            # outran the hook timeout and the runtime killed the process.
-            #
-            # drop_leading_entries, not clear_batch: a hook from the next turn
-            # may have appended while the POST was in flight, and those entries
-            # land after the uploaded snapshot. Dropping by count preserves
-            # them; truncating would discard them unsent.
-            drop_leading_entries(session_id, len(entries))
+        entries = read_batch(session_id)
+        if not entries:
+            debug_log(
+                f"upload skipped: hook={hook_event_name} session_id={session_id} "
+                "reason=empty-batch"
+            )
+            return
+
+        batch_payload = {
+            "session_id": session_id,
+            "source": "claude_code",
+            "plugin_version": PLUGIN_VERSION,
+            "hooks": entries,
+        }
+
+        success = upload_batch(api_url, api_key, batch_payload)
+        if not success:
+            return
+
+        # Drain exactly the entries that were just uploaded, and only on
+        # success — anything still in the file is retried by the next batch,
+        # so a failed upload never loses data.
+        #
+        # Draining on every successful upload (not only on SessionEnd) is
+        # what keeps Stop a roughly constant-cost hook. Stop fires at the
+        # end of *every* turn, so retaining already-uploaded entries made
+        # turn N re-POST turns 1..N: batches were observed reaching 9,243
+        # entries / 41.9 MB and re-sent in full each turn, until the POST
+        # outran the hook timeout and the runtime killed the process.
+        #
+        # Dropping by count rather than truncating: a hook from the next turn
+        # may have appended while the POST was in flight, and those entries
+        # land after the uploaded snapshot. Dropping by count preserves them;
+        # a blanket truncate would discard them unsent.
+        drop_leading_entries(session_id, len(entries))
 
 
 if __name__ == "__main__":

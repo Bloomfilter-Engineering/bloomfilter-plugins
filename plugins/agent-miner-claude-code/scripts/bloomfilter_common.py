@@ -384,11 +384,24 @@ def _decode_batch_line(line):
 
 
 def read_batch(session_id):
-    """Read all entries from the batch file and return the list (no delete)."""
+    """Read all entries from the batch file and return the list (no delete).
+
+    Opened read/write when possible purely so the lock can be taken on
+    Windows. ``msvcrt.locking`` has no shared mode, so even this read takes an
+    exclusive byte-range lock, and read-only descriptors are widely reported to
+    be rejected by it. Microsoft's own ``_locking`` example locks an
+    ``_O_RDONLY`` descriptor, so plain ``"r"`` is expected to work — the
+    fallback costs nothing and keeps the batch readable even if the file is
+    read-only, which ``"r+"`` alone would turn into a hard failure.
+    """
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
         return []
-    with open(batch_file, "r") as f:
+    try:
+        f = open(batch_file, "r+")
+    except OSError:
+        f = open(batch_file, "r")
+    with f:
         with _lock_file(f, exclusive=False):
             lines = f.readlines()
     entries = []
@@ -417,16 +430,37 @@ def rewrite_batch(session_id, entries):
         os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def clear_batch(session_id):
-    """Truncate the batch file for *session_id* (race-safe).
+def cleanup_session_batch(session_id):
+    """Remove the drained batch file and its upload lock. SessionEnd only.
 
-    Delegates to ``rewrite_batch`` so the truncation happens while holding the
-    exclusive lock. Leaves a zero-byte file rather than deleting: unlinking
-    would need to happen after the handle closes (Windows cannot unlink an open
-    file), which reopens the race this lock exists to close. ``read_batch``
-    returns ``[]`` for an empty and a missing file alike.
+    ``drop_leading_entries`` leaves a zero-byte file behind once it drains the
+    last records, and ``upload_slot`` leaves a zero-byte lock file, so without
+    this every session would leak two dirents into ``batches/`` forever.
+
+    Only safe at SessionEnd, which is terminal: no tool hook can still be
+    appending, and no further upload will start. Emptiness is checked while
+    holding the exclusive lock and the file is unlinked only when it holds no
+    records, so a record can never be deleted unsent. The unlink happens after
+    the handle closes because Windows cannot unlink an open file.
     """
-    rewrite_batch(session_id, [])
+    batch_file = get_batch_file(session_id)
+    if os.path.isfile(batch_file):
+        with open(batch_file, "a+") as f:
+            with _lock_file(f, exclusive=True):
+                f.seek(0)
+                empty = not any(_decode_batch_line(line)[0] for line in f)
+        if empty:
+            try:
+                os.remove(batch_file)
+            except OSError:
+                pass
+
+    # Safe to unlink now: we are outside the upload_slot context, so our own
+    # lock is released, and a terminated session starts no further uploads.
+    try:
+        os.remove(batch_file + ".upload")
+    except OSError:
+        pass
 
 
 def drop_leading_entries(session_id, count):
@@ -435,8 +469,8 @@ def drop_leading_entries(session_id, count):
     Used after a successful upload to delete exactly the entries that were
     uploaded while preserving any entries ``append_to_batch`` added
     concurrently — those land after the uploaded snapshot, so they survive as
-    the trailing lines here. This is the safe alternative to ``clear_batch``,
-    which would truncate those concurrent appends away.
+    the trailing lines here. This is the safe alternative to truncating the
+    whole file, which would discard those concurrent appends unsent.
 
     The read-modify-write happens under a single exclusive lock (``a+`` so the
     file is not truncated until the lock is held), so a concurrent append
