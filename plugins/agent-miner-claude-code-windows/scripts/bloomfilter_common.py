@@ -34,6 +34,17 @@ DEBUG_LOG_TAG = "claude-code-windows"  # disambiguates plugins sharing the same 
 # became an unlogged SIGKILL.
 UPLOAD_TIMEOUT_S = 15
 
+# How long SessionEnd waits for an in-flight Stop upload to release the upload
+# slot before giving up. Stop does not wait at all — its records ship with the
+# next turn — but SessionEnd is a session's last chance to send anything, so
+# skipping there would strand records with no later hook to pick them up.
+# Budget check: this plus UPLOAD_TIMEOUT_S must stay inside the 30s hook
+# timeout that hooks/hooks.json sets for SessionEnd (5 + 15 = 20s).
+SESSION_END_SLOT_WAIT_S = 5
+
+# Poll interval while waiting for the upload slot.
+SLOT_POLL_INTERVAL_S = 0.1
+
 
 # ---------------------------------------------------------------------------
 # Path helpers
@@ -321,7 +332,7 @@ def get_batch_file(session_id):
 
 
 @contextlib.contextmanager
-def upload_slot(session_id):
+def upload_slot(session_id, wait_seconds=0.0):
     """Yield True if this process may upload *session_id*, False if one is
     already in flight.
 
@@ -334,16 +345,26 @@ def upload_slot(session_id):
     sent. This guard makes uploads single-flight per session so that interleave
     cannot occur; the loser skips, and its entries go out with the next batch.
 
+    *wait_seconds* exists because "the next batch" is not always coming. Stop
+    passes 0 and skips immediately: another turn will ship its records. There is
+    no turn after SessionEnd, so it waits instead — records skipped there would
+    sit in the batch file with nothing left to upload them.
+
     A separate lock file rather than the batch file itself, because the batch
     lock must stay free while the POST is in flight.
     """
     lock_path = get_batch_file(session_id) + ".upload"
     with open(lock_path, "a+") as f:
-        try:
-            _try_lock_exclusive(f)
-        except OSError:
-            yield False
-            return
+        deadline = time.monotonic() + max(0.0, wait_seconds)
+        while True:
+            try:
+                _try_lock_exclusive(f)
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    yield False
+                    return
+                time.sleep(SLOT_POLL_INTERVAL_S)
         try:
             yield True
         finally:
@@ -441,23 +462,49 @@ def cleanup_session_batch(session_id):
     holding the exclusive lock and the file is unlinked only when it holds no
     records, so a record can never be deleted unsent. The unlink happens after
     the handle closes because Windows cannot unlink an open file.
+
+    Nothing is removed unless the upload slot can be acquired first. If an
+    upload is still in flight, the lock file is the token protecting it:
+    unlinking it would let the next process create a fresh file at the same
+    path and take an uncontended lock, defeating the mutual exclusion. Leaving
+    both files in place is the safe outcome — the batch still holds unsent
+    records in that case anyway.
     """
     batch_file = get_batch_file(session_id)
-    if os.path.isfile(batch_file):
-        with open(batch_file, "a+") as f:
-            with _lock_file(f, exclusive=True):
-                f.seek(0)
-                empty = not any(_decode_batch_line(line)[0] for line in f)
-        if empty:
-            try:
-                os.remove(batch_file)
-            except OSError:
-                pass
+    lock_path = batch_file + ".upload"
 
-    # Safe to unlink now: we are outside the upload_slot context, so our own
-    # lock is released, and a terminated session starts no further uploads.
+    with open(lock_path, "a+") as lock_handle:
+        try:
+            _try_lock_exclusive(lock_handle)
+        except OSError:
+            debug_log(
+                f"cleanup skipped: session_id={session_id} "
+                "reason=upload-still-in-flight"
+            )
+            return
+        try:
+            if os.path.isfile(batch_file):
+                with open(batch_file, "a+") as f:
+                    with _lock_file(f, exclusive=True):
+                        f.seek(0)
+                        empty = not any(_decode_batch_line(line)[0] for line in f)
+                if empty:
+                    try:
+                        os.remove(batch_file)
+                    except OSError:
+                        pass
+                else:
+                    debug_log(
+                        f"cleanup: session_id={session_id} batch retained "
+                        "reason=unsent-records-remain"
+                    )
+        finally:
+            _unlock(lock_handle)
+
+    # Unlink after the handle closes (Windows cannot unlink an open file) and
+    # after the lock is released, having confirmed no other uploader held it.
     try:
-        os.remove(batch_file + ".upload")
+        os.remove(lock_path)
     except OSError:
         pass
 

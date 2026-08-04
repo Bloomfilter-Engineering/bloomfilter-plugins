@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    SESSION_END_SLOT_WAIT_S,
     append_to_batch,
     bootstrap_config,
     cleanup_session_batch,
@@ -138,11 +139,24 @@ def upload_and_drain(hook_event_name, session_id, api_url, api_key):
     # under the same guard, or two overlapping upload hooks would each
     # snapshot the same records and each drain them, deleting unsent
     # entries. See upload_slot's docstring.
-    with upload_slot(session_id) as acquired:
+    # Stop does not wait for the slot: if another upload holds it, this turn's
+    # records ship with the next one. SessionEnd has no next turn, so it waits —
+    # records skipped there would sit in the batch with nothing left to send
+    # them. The wait is bounded so the hook still finishes inside its budget.
+    slot_wait_seconds = (
+        SESSION_END_SLOT_WAIT_S if hook_event_name == "SessionEnd" else 0.0
+    )
+    with upload_slot(session_id, wait_seconds=slot_wait_seconds) as acquired:
         if not acquired:
             debug_log(
                 f"upload skipped: hook={hook_event_name} "
-                f"session_id={session_id} reason=upload-already-in-flight"
+                f"session_id={session_id} reason=upload-already-in-flight "
+                f"waited={slot_wait_seconds}s"
+                + (
+                    " WARNING=records-remain-unsent-no-later-hook-will-send-them"
+                    if hook_event_name == "SessionEnd"
+                    else ""
+                )
             )
             return
 
