@@ -42,7 +42,16 @@ GIT_BRANCH_HOOKS = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_HOOKS = {"Stop", "UserPromptSubmit"}
 
 
-def main():
+def main() -> None:
+    """Handle one hook invocation: batch the payload, and upload when due.
+
+    The hook event name arrives as ``argv[1]`` and the JSON payload on stdin.
+    Every hook appends an envelope to the session's batch file; the events in
+    :data:`UPLOAD_HOOKS` additionally ship the batch to the API. Any condition
+    that makes the invocation unusable — no event name, a non-object payload, no
+    session id, no API key — is recorded in the debug log and returns quietly,
+    because a telemetry collector must never disturb the host.
+    """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
         debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
@@ -61,11 +70,11 @@ def main():
         return
 
     project_dir = payload.get("cwd", "") or os.environ.get("CLAUDE_PROJECT_DIR", "")
-    plugin_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    plugin_root_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
     # On SessionStart: bootstrap config and check for API key
     if hook_event_name == "SessionStart":
-        bootstrap_config(plugin_root)
+        bootstrap_config(plugin_root_dir)
         api_key = resolve_api_key()
         if not api_key:
             debug_log(
@@ -90,21 +99,21 @@ def main():
     # Extract transcript token summary on Stop
     if hook_event_name in TRANSCRIPT_HOOKS:
         transcript_path = payload.get("transcript_path", "")
-        summary = extract_transcript_summary(transcript_path)
-        if summary:
-            envelope["transcript_summary"] = summary
+        transcript_summary = extract_transcript_summary(transcript_path)
+        if transcript_summary:
+            envelope["transcript_summary"] = transcript_summary
 
     # On SubagentStop, capture the subagent's own (sidechain) transcript so the
     # backend can build a full child AgentSession. Read it NOW — these files are
     # garbage-collected and may be gone by the time the batch uploads.
     if hook_event_name == "SubagentStop":
         agent_transcript_path = payload.get("agent_transcript_path", "")
-        conversation = extract_subagent_conversation(
+        subagent_conversation = extract_subagent_conversation(
             agent_transcript_path,
             expected_last_message=payload.get("last_assistant_message"),
         )
-        if conversation:
-            envelope["subagent_transcript"] = conversation
+        if subagent_conversation:
+            envelope["subagent_transcript"] = subagent_conversation
 
     # Append to batch file
     append_to_batch(session_id, envelope)
@@ -133,12 +142,26 @@ def main():
                 cleanup_session_batch(session_id)
 
 
-def upload_and_drain(hook_event_name, session_id, api_url, api_key):
-    """Snapshot, POST, and drain the batch for *session_id*."""
-    # Single-flight per session: the snapshot must be taken and drained
-    # under the same guard, or two overlapping upload hooks would each
-    # snapshot the same records and each drain them, deleting unsent
-    # entries. See upload_slot's docstring.
+def upload_and_drain(
+    hook_event_name: str, session_id: str, api_url: str, api_key: str
+) -> None:
+    """Ship one session's batched records, then remove the ones that landed.
+
+    Snapshot, POST and drain all happen inside a single :func:`upload_slot`, so
+    two overlapping upload hooks cannot each snapshot the same records and each
+    drain them — which would delete the second snapshot's records unsent.
+
+    Returns without draining whenever the records are not confirmed stored: no
+    upload slot, an empty batch, or any non-2xx response. Those records stay
+    queued for the next batch, so telemetry is never dropped on failure.
+
+    Args:
+        hook_event_name: Event that triggered the upload. Selects how long to
+            wait for the upload slot, and labels the debug log line.
+        session_id: Session whose batch is uploaded.
+        api_url: Base URL of the Bloomfilter API.
+        api_key: Value sent as the ``X-MCP-Token`` header.
+    """
     # Stop does not wait for the slot: if another upload holds it, this turn's
     # records ship with the next one. SessionEnd has no next turn, so it waits —
     # records skipped there would sit in the batch with nothing left to send
@@ -146,8 +169,8 @@ def upload_and_drain(hook_event_name, session_id, api_url, api_key):
     slot_wait_seconds = (
         SESSION_END_SLOT_WAIT_S if hook_event_name == "SessionEnd" else 0.0
     )
-    with upload_slot(session_id, wait_seconds=slot_wait_seconds) as acquired:
-        if not acquired:
+    with upload_slot(session_id, wait_seconds=slot_wait_seconds) as has_upload_slot:
+        if not has_upload_slot:
             debug_log(
                 f"upload skipped: hook={hook_event_name} "
                 f"session_id={session_id} reason=upload-already-in-flight "
@@ -160,8 +183,8 @@ def upload_and_drain(hook_event_name, session_id, api_url, api_key):
             )
             return
 
-        entries = read_batch(session_id)
-        if not entries:
+        snapshot_entries = read_batch(session_id)
+        if not snapshot_entries:
             debug_log(
                 f"upload skipped: hook={hook_event_name} session_id={session_id} "
                 "reason=empty-batch"
@@ -172,11 +195,11 @@ def upload_and_drain(hook_event_name, session_id, api_url, api_key):
             "session_id": session_id,
             "source": "claude_code",
             "plugin_version": PLUGIN_VERSION,
-            "hooks": entries,
+            "hooks": snapshot_entries,
         }
 
-        success = upload_batch(api_url, api_key, batch_payload)
-        if not success:
+        upload_succeeded = upload_batch(api_url, api_key, batch_payload)
+        if not upload_succeeded:
             return
 
         # Drain exactly the entries that were just uploaded, and only on
@@ -194,7 +217,7 @@ def upload_and_drain(hook_event_name, session_id, api_url, api_key):
         # may have appended while the POST was in flight, and those entries
         # land after the uploaded snapshot. Dropping by count preserves them;
         # a blanket truncate would discard them unsent.
-        drop_leading_entries(session_id, len(entries))
+        drop_leading_entries(session_id, len(snapshot_entries))
 
 
 if __name__ == "__main__":

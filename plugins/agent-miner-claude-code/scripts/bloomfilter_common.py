@@ -13,7 +13,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any
+from typing import IO, Any, Iterator
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -218,96 +218,137 @@ def get_git_branch(project_dir):
 if platform.system() != "Windows":
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
-        """Acquire an flock on an open file, release on exit."""
-        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(fp, op)
+    def _lock_file(file_handle: IO, exclusive: bool = True) -> Iterator[None]:
+        """Hold an advisory ``flock`` on an open file for the block's duration.
+
+        Args:
+            file_handle: An open file object. Its descriptor is locked and its
+                file position is left untouched.
+            exclusive: True for a write lock (``LOCK_EX``), False for a shared
+                read lock (``LOCK_SH``).
+
+        Yields:
+            None. The lock is held for the body of the ``with`` statement and
+            released on exit, including when the body raises.
+        """
+        lock_operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(file_handle, lock_operation)
         try:
             yield
         finally:
-            fcntl.flock(fp, fcntl.LOCK_UN)
+            fcntl.flock(file_handle, fcntl.LOCK_UN)
 
-    def _try_lock_exclusive(fp):
-        """Take an exclusive lock without waiting. Raises OSError if held."""
-        fcntl.flock(fp, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    def _try_lock_exclusive(file_handle: IO) -> None:
+        """Take an exclusive lock without waiting for it.
 
-    def _unlock(fp):
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+
+        Raises:
+            OSError: If another process already holds the lock.
+        """
+        fcntl.flock(file_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(file_handle: IO) -> None:
+        """Release a lock previously taken by :func:`_try_lock_exclusive`.
+
+        Args:
+            file_handle: The file object that was locked. Failures are ignored,
+                since the process is exiting the guarded section either way.
+        """
         try:
-            fcntl.flock(fp, fcntl.LOCK_UN)
+            fcntl.flock(file_handle, fcntl.LOCK_UN)
         except OSError:
             pass
 
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp, exclusive=True):
-        """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
+    def _lock_file(file_handle: IO, exclusive: bool = True) -> Iterator[None]:
+        """Hold a cross-process byte-range lock via ``msvcrt.locking``.
 
-        msvcrt only supports exclusive locks — the ``exclusive`` arg is
-        accepted for API parity with the POSIX implementation but ignored.
-        Locks 1 byte at offset 0 as a coordination token. ``LK_LOCK`` retries
-        every second up to 10 times before raising; if it does raise we
-        proceed unlocked (better than crashing the hook).
+        Locks a single byte at offset 0 as a coordination token. ``LK_LOCK``
+        retries once a second up to ten times before raising; if it does raise,
+        the body still runs unsynchronized, because degrading is preferable to
+        crashing the host's hook.
 
-        File position is saved and restored so the lock's seek to offset 0
-        does not disturb append-mode writes.
+        The file position is saved and restored around the lock so that the
+        seek to offset 0 does not disturb append-mode writes.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Accepted for parity with the POSIX implementation and
+                ignored — msvcrt offers exclusive locks only.
+
+        Yields:
+            None. The lock is released on exit when it was acquired at all.
         """
         try:
-            fp.flush()
+            file_handle.flush()
         except (OSError, ValueError):
             pass
         try:
-            pos = fp.tell()
+            saved_position = file_handle.tell()
         except (OSError, ValueError):
-            pos = None
+            saved_position = None
 
-        try:
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
-        except OSError as exc:
-            print(
-                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
-                "proceeding unsynchronized.",
-                file=sys.stderr,
-            )
-            if pos is not None:
+        def restore_saved_position() -> None:
+            if saved_position is not None:
                 try:
-                    fp.seek(pos)
+                    file_handle.seek(saved_position)
                 except (OSError, ValueError):
                     pass
+
+        try:
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
+        except OSError as lock_error:
+            print(
+                f"[bloomfilter] Could not acquire batch file lock "
+                f"({lock_error}); proceeding unsynchronized.",
+                file=sys.stderr,
+            )
+            restore_saved_position()
             yield
             return
 
         try:
-            if pos is not None:
-                fp.seek(pos)
+            restore_saved_position()
             yield
         finally:
             try:
-                fp.seek(0)
-                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                file_handle.seek(0)
+                msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
             except OSError:
                 pass
-            if pos is not None:
-                try:
-                    fp.seek(pos)
-                except (OSError, ValueError):
-                    pass
+            restore_saved_position()
 
-    def _try_lock_exclusive(fp):
-        """Take an exclusive lock without waiting. Raises OSError if held.
+    def _try_lock_exclusive(file_handle: IO) -> None:
+        """Take an exclusive lock without waiting for it.
 
-        ``LK_NBLCK`` returns an error immediately instead of ``LK_LOCK``'s
-        retry-every-second-for-10-seconds, which is what makes this usable as a
-        "is someone else already uploading?" test.
+        Uses ``LK_NBLCK``, which fails immediately rather than ``LK_LOCK``'s
+        retry-every-second-for-ten-seconds. That immediacy is what makes this
+        usable as an "is another upload already running?" test.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+
+        Raises:
+            OSError: If another process already holds the lock.
         """
-        fp.seek(0)
-        msvcrt.locking(fp.fileno(), msvcrt.LK_NBLCK, 1)
+        file_handle.seek(0)
+        msvcrt.locking(file_handle.fileno(), msvcrt.LK_NBLCK, 1)
 
-    def _unlock(fp):
+    def _unlock(file_handle: IO) -> None:
+        """Release a lock previously taken by :func:`_try_lock_exclusive`.
+
+        Args:
+            file_handle: The file object that was locked. Failures are ignored,
+                since the process is exiting the guarded section either way.
+        """
         try:
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
         except OSError:
             pass
 
@@ -317,25 +358,45 @@ else:
 # ---------------------------------------------------------------------------
 
 
-def get_batch_dir():
-    """Return (and create) the batch directory."""
-    batch_dir = os.path.join(get_config_dir(), "batches")
-    secure_makedirs(batch_dir)
-    return batch_dir
+def get_batch_dir() -> str:
+    """Return the directory holding per-session batch files, creating it.
+
+    Returns:
+        Absolute path to ``<config-dir>/batches``.
+    """
+    batch_dir_path = os.path.join(get_config_dir(), "batches")
+    secure_makedirs(batch_dir_path)
+    return batch_dir_path
 
 
-def get_batch_file(session_id):
-    """Return path to the JSONL batch file for *session_id*."""
-    safe_id = os.path.basename(session_id)
-    if not safe_id or safe_id != session_id or ".." in session_id:
+def get_batch_file(session_id: str) -> str:
+    """Return the path of the JSONL batch file for one session.
+
+    Args:
+        session_id: Session identifier taken from the hook payload. It becomes
+            the file stem verbatim, so it must be a bare filename component.
+
+    Returns:
+        Absolute path to ``<batch-dir>/<session_id>.jsonl``.
+
+    Raises:
+        ValueError: If *session_id* is empty, contains a path separator, or
+            contains a parent-directory reference — any of which would let a
+            crafted payload write outside the batch directory.
+    """
+    sanitized_session_id = os.path.basename(session_id)
+    if (
+        not sanitized_session_id
+        or sanitized_session_id != session_id
+        or ".." in session_id
+    ):
         raise ValueError(f"Invalid session_id: {session_id!r}")
-    return os.path.join(get_batch_dir(), f"{safe_id}.jsonl")
+    return os.path.join(get_batch_dir(), f"{sanitized_session_id}.jsonl")
 
 
 @contextlib.contextmanager
-def upload_slot(session_id, wait_seconds=0.0):
-    """Yield True if this process may upload *session_id*, False if one is
-    already in flight.
+def upload_slot(session_id: str, wait_seconds: float = 0.0) -> Iterator[bool]:
+    """Claim the exclusive right to upload one session's batch.
 
     The snapshot-upload-drain sequence is deliberately NOT atomic: the batch
     lock is released for the duration of the POST so that tool hooks can keep
@@ -346,137 +407,169 @@ def upload_slot(session_id, wait_seconds=0.0):
     sent. This guard makes uploads single-flight per session so that interleave
     cannot occur; the loser skips, and its entries go out with the next batch.
 
-    *wait_seconds* exists because "the next batch" is not always coming. Stop
-    passes 0 and skips immediately: another turn will ship its records. There is
-    no turn after SessionEnd, so it waits instead — records skipped there would
-    sit in the batch file with nothing left to upload them.
+    The lock lives in a sidecar file rather than the batch file itself, because
+    the batch lock must stay free while the POST is in flight.
 
-    A separate lock file rather than the batch file itself, because the batch
-    lock must stay free while the POST is in flight.
+    Args:
+        session_id: Session whose upload slot is being claimed.
+        wait_seconds: How long to keep retrying before giving up. Stop passes 0
+            and skips at once, because another turn will ship its records. There
+            is no turn after SessionEnd, so it passes a budget instead — records
+            skipped there would sit in the batch file with nothing left to
+            upload them.
+
+    Yields:
+        True if this process claimed the slot and may upload, False if another
+        upload is already in flight and this one should skip.
     """
-    lock_path = get_batch_file(session_id) + ".upload"
-    with open(lock_path, "a+") as f:
-        deadline = time.monotonic() + max(0.0, wait_seconds)
+    upload_lock_path = get_batch_file(session_id) + ".upload"
+    with open(upload_lock_path, "a+") as lock_file_handle:
+        wait_deadline = time.monotonic() + max(0.0, wait_seconds)
         while True:
             try:
-                _try_lock_exclusive(f)
+                _try_lock_exclusive(lock_file_handle)
                 break
             except OSError:
-                if time.monotonic() >= deadline:
+                if time.monotonic() >= wait_deadline:
                     yield False
                     return
                 time.sleep(SLOT_POLL_INTERVAL_S)
         try:
             yield True
         finally:
-            _unlock(f)
+            _unlock(lock_file_handle)
 
 
-def append_to_batch(session_id, entry):
-    """Append a single JSON line to the batch file for *session_id*."""
-    batch_file = get_batch_file(session_id)
-    line = json.dumps(entry, separators=(",", ":")) + "\n"
-    with open(batch_file, "a") as f:
-        with _lock_file(f, exclusive=True):
-            f.write(line)
-    if platform.system() != "Windows":
-        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
+    """Append one envelope to a session's batch file as a JSON line.
 
-
-def _decode_batch_line(line):
-    """Decode one raw JSONL batch line.
-
-    Returns ``(is_record, value)``. ``is_record`` is True only for a non-blank
-    line that parses as JSON — exactly the lines ``read_batch`` returns and
-    ``upload_batch`` sends — and False for a blank or corrupt line. ``value``
-    holds the decoded object when ``is_record`` is True, else ``None``.
-
-    Both ``read_batch`` and ``drop_leading_entries`` route through this so the
-    records uploaded and the records drained can never diverge: corrupt lines
-    are skipped identically on both sides.
+    Args:
+        session_id: Session the entry belongs to.
+        entry: The hook envelope to persist. Must be JSON-serializable.
     """
-    stripped = line.strip()
-    if not stripped:
+    batch_file_path = get_batch_file(session_id)
+    serialized_entry = json.dumps(entry, separators=(",", ":")) + "\n"
+    with open(batch_file_path, "a") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.write(serialized_entry)
+    if platform.system() != "Windows":
+        os.chmod(batch_file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+
+
+def _decode_batch_line(raw_line: str) -> tuple[bool, Any]:
+    """Decode one raw JSONL line from a batch file.
+
+    Both :func:`read_batch` and :func:`drop_leading_entries` route through this
+    so that the records uploaded and the records drained can never diverge:
+    corrupt lines are skipped identically on both sides.
+
+    Args:
+        raw_line: A single line read from a batch file, newline included.
+
+    Returns:
+        A ``(is_record, decoded_entry)`` pair. ``is_record`` is True only for a
+        non-blank line that parses as JSON — exactly the lines ``read_batch``
+        returns and ``upload_batch`` sends. ``decoded_entry`` holds the decoded
+        object when ``is_record`` is True and None otherwise.
+    """
+    stripped_line = raw_line.strip()
+    if not stripped_line:
         return False, None
     try:
-        return True, json.loads(stripped)
+        return True, json.loads(stripped_line)
     except json.JSONDecodeError:
         return False, None
 
 
-def read_batch(session_id):
-    """Read all entries from the batch file and return the list (no delete).
+def read_batch(session_id: str) -> list[dict[str, Any]]:
+    """Read every valid entry from a session's batch file without removing any.
 
-    Opened read/write when possible purely so the lock can be taken on
-    Windows. ``msvcrt.locking`` has no shared mode, so even this read takes an
-    exclusive byte-range lock, and read-only descriptors are widely reported to
-    be rejected by it. Microsoft's own ``_locking`` example locks an
+    The file is opened read/write when possible purely so that the lock can be
+    taken on Windows: ``msvcrt.locking`` has no shared mode, so even this read
+    takes an exclusive byte-range lock, and read-only descriptors are widely
+    reported to be rejected by it. Microsoft's own ``_locking`` example locks an
     ``_O_RDONLY`` descriptor, so plain ``"r"`` is expected to work — the
-    fallback costs nothing and keeps the batch readable even if the file is
+    fallback costs nothing and keeps the batch readable even when the file is
     read-only, which ``"r+"`` alone would turn into a hard failure.
+
+    Args:
+        session_id: Session whose batch is read.
+
+    Returns:
+        The decoded entries in file order. Empty when the batch file is missing
+        or holds no valid records; blank and corrupt lines are skipped.
     """
-    batch_file = get_batch_file(session_id)
-    if not os.path.isfile(batch_file):
+    batch_file_path = get_batch_file(session_id)
+    if not os.path.isfile(batch_file_path):
         return []
     try:
-        f = open(batch_file, "r+")
+        batch_file_handle = open(batch_file_path, "r+")
     except OSError:
-        f = open(batch_file, "r")
-    with f:
-        with _lock_file(f, exclusive=False):
-            lines = f.readlines()
+        batch_file_handle = open(batch_file_path, "r")
+    with batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=False):
+            raw_lines = batch_file_handle.readlines()
     entries = []
-    for line in lines:
-        is_record, value = _decode_batch_line(line)
+    for raw_line in raw_lines:
+        is_record, decoded_entry = _decode_batch_line(raw_line)
         if is_record:
-            entries.append(value)
+            entries.append(decoded_entry)
     return entries
 
 
-def rewrite_batch(session_id, entries):
-    """Re-write entries back to the batch file (race-safe).
+def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
+    """Replace a session's batch file contents with *entries*.
 
-    Opens with ``a+`` so the file is not truncated until *after* the exclusive
-    lock is acquired. Concurrent ``append_to_batch`` calls block on the same
+    Opened with ``a+`` so the file is not truncated until *after* the exclusive
+    lock is acquired. Concurrent :func:`append_to_batch` calls block on the same
     lock and never lose a line.
+
+    Args:
+        session_id: Session whose batch is rewritten.
+        entries: Entries to write, in order. An empty list empties the file.
     """
-    batch_file = get_batch_file(session_id)
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
-            f.truncate()
+    batch_file_path = get_batch_file(session_id)
+    with open(batch_file_path, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
+            batch_file_handle.truncate()
             for entry in entries:
-                f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                batch_file_handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
     if platform.system() != "Windows":
-        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        os.chmod(batch_file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
-def cleanup_session_batch(session_id):
-    """Remove the drained batch file and its upload lock. SessionEnd only.
+def cleanup_session_batch(session_id: str) -> None:
+    """Delete a session's drained batch file and its upload lock sidecar.
 
-    ``drop_leading_entries`` leaves a zero-byte file behind once it drains the
-    last records, and ``upload_slot`` leaves a zero-byte lock file, so without
-    this every session would leak two dirents into ``batches/`` forever.
+    :func:`drop_leading_entries` leaves a zero-byte file behind once it drains
+    the last records, and :func:`upload_slot` leaves a zero-byte lock file, so
+    without this every session would leak two directory entries into
+    ``batches/`` forever.
 
-    Only safe at SessionEnd, which is terminal: no tool hook can still be
-    appending, and no further upload will start. Emptiness is checked while
-    holding the exclusive lock and the file is unlinked only when it holds no
-    records, so a record can never be deleted unsent. The unlink happens after
-    the handle closes because Windows cannot unlink an open file.
+    Only safe to call at SessionEnd, which is terminal: no tool hook can still
+    be appending and no further upload will start. Emptiness is checked while
+    holding the exclusive lock and the batch file is unlinked only when it holds
+    no records, so a record can never be deleted unsent. The unlink happens
+    after the handle closes, because Windows cannot unlink an open file.
 
     Nothing is removed unless the upload slot can be acquired first. If an
     upload is still in flight, the lock file is the token protecting it:
-    unlinking it would let the next process create a fresh file at the same
-    path and take an uncontended lock, defeating the mutual exclusion. Leaving
-    both files in place is the safe outcome — the batch still holds unsent
-    records in that case anyway.
-    """
-    batch_file = get_batch_file(session_id)
-    lock_path = batch_file + ".upload"
+    unlinking it would let the next process create a fresh file at the same path
+    and take an uncontended lock, defeating the mutual exclusion. Leaving both
+    files in place is the safe outcome — the batch still holds unsent records in
+    that case anyway.
 
-    with open(lock_path, "a+") as lock_handle:
+    Args:
+        session_id: Session whose files are removed. A batch still holding
+            records — an upload that failed, say — is deliberately left alone.
+    """
+    batch_file_path = get_batch_file(session_id)
+    upload_lock_path = batch_file_path + ".upload"
+
+    with open(upload_lock_path, "a+") as lock_file_handle:
         try:
-            _try_lock_exclusive(lock_handle)
+            _try_lock_exclusive(lock_file_handle)
         except OSError:
             debug_log(
                 f"cleanup skipped: session_id={session_id} "
@@ -484,14 +577,17 @@ def cleanup_session_batch(session_id):
             )
             return
         try:
-            if os.path.isfile(batch_file):
-                with open(batch_file, "a+") as f:
-                    with _lock_file(f, exclusive=True):
-                        f.seek(0)
-                        empty = not any(_decode_batch_line(line)[0] for line in f)
-                if empty:
+            if os.path.isfile(batch_file_path):
+                with open(batch_file_path, "a+") as batch_file_handle:
+                    with _lock_file(batch_file_handle, exclusive=True):
+                        batch_file_handle.seek(0)
+                        has_no_records = not any(
+                            _decode_batch_line(raw_line)[0]
+                            for raw_line in batch_file_handle
+                        )
+                if has_no_records:
                     try:
-                        os.remove(batch_file)
+                        os.remove(batch_file_path)
                     except OSError:
                         pass
                 else:
@@ -500,57 +596,63 @@ def cleanup_session_batch(session_id):
                         "reason=unsent-records-remain"
                     )
         finally:
-            _unlock(lock_handle)
+            _unlock(lock_file_handle)
 
     # Unlink after the handle closes (Windows cannot unlink an open file) and
     # after the lock is released, having confirmed no other uploader held it.
     try:
-        os.remove(lock_path)
+        os.remove(upload_lock_path)
     except OSError:
         pass
 
 
-def drop_leading_entries(session_id, count):
-    """Remove the first *count* entries from the batch file (race-safe).
+def drop_leading_entries(session_id: str, record_count: int) -> None:
+    """Remove the first *record_count* records from a session's batch file.
 
-    Used after a successful upload to delete exactly the entries that were
-    uploaded while preserving any entries ``append_to_batch`` added
-    concurrently — those land after the uploaded snapshot, so they survive as
-    the trailing lines here. This is the safe alternative to truncating the
-    whole file, which would discard those concurrent appends unsent.
+    Called after a successful upload to delete exactly the records that were
+    sent, while preserving any that :func:`append_to_batch` added concurrently —
+    those land after the uploaded snapshot, so they survive as the trailing
+    lines here. This is the safe alternative to truncating the whole file, which
+    would discard those concurrent appends unsent.
 
     The read-modify-write happens under a single exclusive lock (``a+`` so the
-    file is not truncated until the lock is held), so a concurrent append
-    either completes before this runs (and is preserved) or blocks until after.
+    file is not truncated until the lock is held), so a concurrent append either
+    completes before this runs, and is preserved, or blocks until after.
 
-    Counts only the valid JSON records ``read_batch`` would return (via
-    ``_decode_batch_line``), so corrupt or blank lines in the leading region
-    are discarded without consuming the drop count — otherwise a corrupt line
-    could leave an already-uploaded entry behind to be re-sent next batch.
+    Only the valid JSON records :func:`read_batch` would return are counted, so
+    corrupt or blank lines in the leading region are discarded without consuming
+    the count. Counting them instead would exhaust the budget early and leave an
+    already-uploaded record behind to be re-sent in the next batch.
+
+    Args:
+        session_id: Session whose batch is drained.
+        record_count: How many leading records to remove, normally
+            ``len(entries)`` from the snapshot that was just uploaded. Values of
+            zero or less are a no-op.
     """
-    if count <= 0:
+    if record_count <= 0:
         return
-    batch_file = get_batch_file(session_id)
-    if not os.path.isfile(batch_file):
+    batch_file_path = get_batch_file(session_id)
+    if not os.path.isfile(batch_file_path):
         return
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
-            lines = f.readlines()
-            kept = []
-            dropped = 0
-            for line in lines:
-                if dropped < count:
-                    is_record, _ = _decode_batch_line(line)
+    with open(batch_file_path, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
+            raw_lines = batch_file_handle.readlines()
+            retained_lines = []
+            dropped_record_count = 0
+            for raw_line in raw_lines:
+                if dropped_record_count < record_count:
+                    is_record, _ = _decode_batch_line(raw_line)
                     if is_record:
-                        dropped += 1
+                        dropped_record_count += 1
                     continue
-                kept.append(line)
-            f.seek(0)
-            f.truncate()
-            f.writelines(kept)
+                retained_lines.append(raw_line)
+            batch_file_handle.seek(0)
+            batch_file_handle.truncate()
+            batch_file_handle.writelines(retained_lines)
     if platform.system() != "Windows":
-        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        os.chmod(batch_file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
 
 
 # ---------------------------------------------------------------------------
@@ -558,18 +660,32 @@ def drop_leading_entries(session_id, count):
 # ---------------------------------------------------------------------------
 
 
-def upload_batch(api_url, api_key, payload):
-    """POST raw hook batch to the Bloomfilter API. Returns True on 2xx.
+def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> bool:
+    """POST a batch of hook envelopes to the Bloomfilter API.
 
-    Validates the URL scheme up front: only http/https are allowed.
-
-    Network interactions are logged to <bloomfilter-config>/debug.log: the
-    request URL + session_id + hook count + payload bytes, the response
-    status + truncated body, and any HTTPError / URLError / unexpected
+    The URL scheme is validated up front — only http and https are accepted.
+    Every network interaction is recorded in ``<bloomfilter-config>/debug.log``:
+    the request URL, session id, record count and payload size; the response
+    status and a truncated body; and any HTTPError, URLError or unexpected
     exception.
+
+    The socket timeout is :data:`UPLOAD_TIMEOUT_S`, deliberately shorter than
+    the runtime's per-hook budget so a stalled POST fails here — and is logged —
+    rather than being killed mid-request from outside.
+
+    Args:
+        api_url: Base URL of the Bloomfilter API, without the endpoint path.
+        api_key: Value sent as the ``X-MCP-Token`` header.
+        payload: Request body with ``session_id``, ``source``,
+            ``plugin_version`` and a ``hooks`` list. Must be JSON-serializable.
+
+    Returns:
+        True if the server answered 2xx, meaning the records are safe to drain.
+        False for an invalid URL, an unserializable payload, a transport error,
+        or any non-2xx status — in which case the caller must keep the records.
     """
-    parsed = urllib.parse.urlparse(api_url or "")
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+    parsed_api_url = urllib.parse.urlparse(api_url or "")
+    if parsed_api_url.scheme not in ("http", "https") or not parsed_api_url.netloc:
         debug_log(f"upload_batch: skipped — invalid api_url={api_url!r}")
         print(
             "[bloomfilter] Upload skipped: invalid Bloomfilter API URL.",
@@ -577,75 +693,82 @@ def upload_batch(api_url, api_key, payload):
         )
         return False
 
-    url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
+    endpoint_url = f"{api_url.rstrip('/')}/api/agent-sessions/hooks/"
     session_id = payload.get("session_id", "?") if isinstance(payload, dict) else "?"
-    hook_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
+    record_count = len(payload.get("hooks", [])) if isinstance(payload, dict) else 0
 
     try:
-        data = json.dumps(payload).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        encoded_payload = json.dumps(payload).encode("utf-8")
+    except (TypeError, ValueError) as serialization_error:
         debug_log(
             f"upload_batch: skipped — payload not JSON-serializable "
-            f"session_id={session_id} error={type(exc).__name__}: {exc}"
+            f"session_id={session_id} "
+            f"error={type(serialization_error).__name__}: {serialization_error}"
         )
         return False
 
     debug_log(
-        f"upload_batch: sending POST {url} session_id={session_id} "
-        f"hooks={hook_count} bytes={len(data)}"
+        f"upload_batch: sending POST {endpoint_url} session_id={session_id} "
+        f"hooks={record_count} bytes={len(encoded_payload)}"
     )
 
     try:
-        req = urllib.request.Request(
-            url,
-            data=data,
+        request = urllib.request.Request(
+            endpoint_url,
+            data=encoded_payload,
             headers={
                 "Content-Type": "application/json",
                 "X-MCP-Token": api_key,
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT_S) as resp:
-            status = resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_S) as response:
+            status_code = response.getcode()
+            response_body = response.read().decode("utf-8", errors="replace")
         debug_log(
-            f"upload_batch: response status={status} session_id={session_id} "
-            f"body={body[:500]!r}"
+            f"upload_batch: response status={status_code} session_id={session_id} "
+            f"body={response_body[:500]!r}"
         )
-        if status != 201:
-            print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
-        return 200 <= status < 300
-    except urllib.error.HTTPError as exc:
-        try:
-            err_body = exc.read().decode("utf-8", errors="replace").strip()
-        except Exception:
-            err_body = ""
-        reason = getattr(exc, "reason", "")
-        debug_log(
-            f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
-            f"session_id={session_id} body={err_body[:500]!r}"
-        )
-        message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
-        if reason:
-            message += f" {reason}"
-        print(message, file=sys.stderr)
-        if err_body:
+        if status_code != 201:
             print(
-                f"[bloomfilter] Upload response body: {err_body[:500]}", file=sys.stderr
+                f"[bloomfilter] Upload response status: {status_code}",
+                file=sys.stderr,
+            )
+        return 200 <= status_code < 300
+    except urllib.error.HTTPError as http_error:
+        try:
+            error_body = http_error.read().decode("utf-8", errors="replace").strip()
+        except Exception:
+            error_body = ""
+        failure_reason = getattr(http_error, "reason", "")
+        debug_log(
+            f"upload_batch: HTTPError status={http_error.code} "
+            f"reason={failure_reason!r} session_id={session_id} "
+            f"body={error_body[:500]!r}"
+        )
+        stderr_message = f"[bloomfilter] Upload failed with HTTP {http_error.code}"
+        if failure_reason:
+            stderr_message += f" {failure_reason}"
+        print(stderr_message, file=sys.stderr)
+        if error_body:
+            print(
+                f"[bloomfilter] Upload response body: {error_body[:500]}",
+                file=sys.stderr,
             )
         return False
-    except urllib.error.URLError as exc:
+    except urllib.error.URLError as url_error:
         debug_log(
-            f"upload_batch: URLError session_id={session_id} reason={exc.reason!r}"
+            f"upload_batch: URLError session_id={session_id} "
+            f"reason={url_error.reason!r}"
         )
-        print(f"[bloomfilter] Upload failed: {exc.reason}", file=sys.stderr)
+        print(f"[bloomfilter] Upload failed: {url_error.reason}", file=sys.stderr)
         return False
-    except Exception as exc:
+    except Exception as unexpected_error:
         debug_log(
             f"upload_batch: error session_id={session_id} "
-            f"type={type(exc).__name__} message={exc!s}"
+            f"type={type(unexpected_error).__name__} message={unexpected_error!s}"
         )
-        print(f"[bloomfilter] Upload failed: {exc}", file=sys.stderr)
+        print(f"[bloomfilter] Upload failed: {unexpected_error}", file=sys.stderr)
         return False
 
 
