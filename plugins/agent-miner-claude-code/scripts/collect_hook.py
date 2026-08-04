@@ -6,6 +6,7 @@ the batch to the Bloomfilter API on Stop and SessionEnd events.
 """
 
 import os
+import subprocess
 import sys
 
 # Ensure the scripts directory is on the path for local imports
@@ -33,6 +34,11 @@ from bloomfilter_common import (
 
 # Hooks that trigger an upload to the BE
 UPLOAD_HOOKS = {"Stop", "SessionEnd"}
+
+# argv[1] sentinel marking a re-invocation of this script as the detached
+# SessionEnd uploader (see _spawn_detached_upload). Chosen so it can never
+# collide with a real hook event name.
+DETACHED_UPLOAD_ARG = "__bloomfilter_detached_upload__"
 
 # Hooks where we fetch the current git branch
 GIT_BRANCH_HOOKS = {"SessionStart", "UserPromptSubmit"}
@@ -118,28 +124,116 @@ def main() -> None:
     # Append to batch file
     append_to_batch(session_id, envelope)
 
-    # Upload on Stop/SessionEnd
-    if hook_event_name in UPLOAD_HOOKS:
-        api_key = resolve_api_key()
-        if not api_key:
-            debug_log(
-                f"upload skipped: hook={hook_event_name} session_id={session_id} "
-                "reason=no-api-key"
-            )
-            return
+    # Upload on Stop/SessionEnd.
+    #
+    # Stop uploads inline: it fires between turns, not on exit, so briefly
+    # blocking on the POST is harmless and keeps the per-turn flow simple.
+    #
+    # SessionEnd hands the upload to a detached child instead. The POST is a
+    # blocking network call, but the runtime cancels the SessionEnd hook the
+    # instant the host begins shutting down — so an inline upload races that
+    # teardown and gets killed mid-request ("Hook cancelled"), leaving the
+    # final batch orphaned on disk. Detaching lets the host exit immediately
+    # while the upload finishes independently in the background.
+    if hook_event_name == "SessionEnd":
+        if not _spawn_detached_upload(session_id):
+            # Detach failed — upload inline rather than drop the batch. Blocking
+            # briefly (and risking the cancel) beats losing the session's data.
+            perform_upload(hook_event_name, session_id)
+    elif hook_event_name in UPLOAD_HOOKS:
+        perform_upload(hook_event_name, session_id)
 
-        api_url = resolve_api_url()
 
-        try:
-            upload_and_drain(hook_event_name, session_id, api_url, api_key)
-        finally:
-            # SessionEnd is terminal — nothing can append or upload again, so
-            # the drained batch file and the upload lock are removed instead of
-            # lingering as zero-byte files, one pair per session. Runs outside
-            # upload_slot so our own lock is released first, and on every exit
-            # path (including the early returns inside upload_and_drain).
-            if hook_event_name == "SessionEnd":
-                cleanup_session_batch(session_id)
+def perform_upload(hook_event_name: str, session_id: str) -> None:
+    """Resolve credentials and ship one session's batch, then clean up.
+
+    Shared by the inline path (Stop, and the SessionEnd fallback when detaching
+    fails) and by the detached SessionEnd child, so every path drives the
+    identical upload → drain → cleanup sequence. Returns quietly when no API key
+    is configured.
+
+    Args:
+        hook_event_name: Event that triggered the upload; selects the slot wait
+            and whether the terminal SessionEnd cleanup runs.
+        session_id: Session whose batch is uploaded.
+    """
+    api_key = resolve_api_key()
+    if not api_key:
+        debug_log(
+            f"upload skipped: hook={hook_event_name} session_id={session_id} "
+            "reason=no-api-key"
+        )
+        return
+
+    api_url = resolve_api_url()
+
+    try:
+        upload_and_drain(hook_event_name, session_id, api_url, api_key)
+    finally:
+        # SessionEnd is terminal — nothing can append or upload again, so the
+        # drained batch file and the upload lock are removed instead of
+        # lingering as zero-byte files, one pair per session. Runs outside
+        # upload_slot so our own lock is released first, and on every exit path
+        # (including the early returns inside upload_and_drain).
+        if hook_event_name == "SessionEnd":
+            cleanup_session_batch(session_id)
+
+
+def _spawn_detached_upload(session_id: str) -> bool:
+    """Launch a detached child to upload *session_id*'s batch, then return at once.
+
+    The child re-invokes this script with :data:`DETACHED_UPLOAD_ARG` and runs
+    :func:`perform_upload` for SessionEnd. It is started in its own session /
+    process group with its standard streams detached, so the host quitting — and
+    the SIGHUP/SIGTERM that teardown delivers to the hook's process group —
+    cannot reach it. The parent returns immediately, so the SessionEnd hook
+    completes well inside its timeout and never blocks the host's exit on the
+    network.
+
+    The SessionEnd envelope is already appended to the batch before this is
+    called, so the child's snapshot includes it.
+
+    Args:
+        session_id: Session whose batch the detached child uploads.
+
+    Returns:
+        True if the child was launched; False if spawning raised, so the caller
+        can fall back to an inline upload rather than orphan the batch.
+    """
+    command = [
+        sys.executable,
+        os.path.abspath(__file__),
+        DETACHED_UPLOAD_ARG,
+        session_id,
+    ]
+    popen_kwargs = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        # Detach from the console and the parent's process group so closing the
+        # host window does not take the uploader down with it.
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        # New session leader: detaches from the controlling terminal so the
+        # host's shutdown signals to its own process group are not delivered.
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(command, **popen_kwargs)
+        return True
+    except Exception as exc:
+        debug_log(
+            f"detached upload spawn failed: session_id={session_id} "
+            f"type={type(exc).__name__} message={exc!s}"
+        )
+        return False
 
 
 def upload_and_drain(
@@ -222,7 +316,13 @@ def upload_and_drain(
 
 if __name__ == "__main__":
     try:
-        main()
+        # Detached SessionEnd uploader: re-invoked by _spawn_detached_upload with
+        # the sentinel + session id, it skips hook parsing (no stdin payload) and
+        # just runs the upload. Any other invocation is a normal hook.
+        if len(sys.argv) > 2 and sys.argv[1] == DETACHED_UPLOAD_ARG:
+            perform_upload("SessionEnd", sys.argv[2])
+        else:
+            main()
     except Exception as exc:
         try:
             from bloomfilter_common import debug_log
