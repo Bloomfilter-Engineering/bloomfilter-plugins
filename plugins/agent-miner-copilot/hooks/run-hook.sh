@@ -22,9 +22,15 @@ root="${CLAUDE_PLUGIN_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}"
 # PowerShell) and the Copilot CLI runs them through powershell.exe on win32, so
 # neither ever reaches this branch. Kept so this file stays in step with the
 # claude-code/codex copies.
-if [ "${OS:-}" = "Windows_NT" ]; then
-  exec powershell.exe -NoProfile -ExecutionPolicy Bypass \
-    -File "$root/hooks/run-hook.ps1" "$event"
+if [ "${OS:-}" = "Windows_NT" ] && command -v powershell.exe >/dev/null 2>&1; then
+  # Convert the POSIX script path so `powershell.exe -File` can open it (Git Bash /
+  # MSYS / Cygwin). When powershell.exe is absent the guard above skips delegation
+  # and the POSIX discovery below runs instead, so the hook still fails soft.
+  _bf_ps1="$root/hooks/run-hook.ps1"
+  if command -v cygpath >/dev/null 2>&1; then
+    _bf_ps1="$(cygpath -w "$_bf_ps1" 2>/dev/null || printf '%s' "$_bf_ps1")"
+  fi
+  exec powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$_bf_ps1" "$event"
 fi
 
 # Name existence is not enough: an asdf/pyenv/mise shim resolves as a name but
@@ -77,4 +83,12 @@ if [ -z "$python" ]; then
   exit 0
 fi
 
-exec "$python" "$root/scripts/collect_hook.py" "$event"
+# Run (not exec) so a non-zero collector exit still yields {} instead of a hook
+# error -- the collector always exits 0 by design, so this makes the fail-soft
+# contract unconditional and mirrors run-hook.ps1. The SessionEnd detached uploader
+# redirects its own stdout to DEVNULL, so it never holds this captured pipe open.
+if _bf_out="$("$python" "$root/scripts/collect_hook.py" "$event")" && [ -n "$_bf_out" ]; then
+  printf '%s\n' "$_bf_out"
+else
+  printf '%s\n' '{}'
+fi

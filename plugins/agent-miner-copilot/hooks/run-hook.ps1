@@ -110,7 +110,7 @@ $process.StartInfo = $startInfo
 $null = $process.Start()
 $process.StandardInput.Write($stdin)
 $process.StandardInput.Close()
-# DO NOT change to a synchronous ReadToEnd() on stdout — draining stderr first
+# DO NOT change to a synchronous ReadToEnd() on stdout -- draining stderr first
 # while stdout stays unread lets a large PostToolUse payload fill the stdout
 # pipe buffer, and the hook deadlocks until the host's timeout kills it.
 $stdoutTask = $process.StandardOutput.ReadToEndAsync()
