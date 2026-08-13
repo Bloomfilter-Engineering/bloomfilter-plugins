@@ -12,7 +12,7 @@
 event="$1"
 
 # Resolve the plugin root the runtime injects; fall back to the parent of hooks/.
-root="${CLAUDE_PLUGIN_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}"
+root="${CURSOR_PLUGIN_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}"
 
 # Windows under Git Bash / MSYS: hand off to the PowerShell launcher so Python
 # discovery (python/python3/py -3) and UTF-8 stdin marshalling match the
