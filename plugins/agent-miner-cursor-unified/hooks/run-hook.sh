@@ -12,16 +12,11 @@
 event="$1"
 
 # Resolve the plugin root the runtime injects; fall back to the parent of hooks/.
-root="${CLAUDE_PLUGIN_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}"
+root="${CURSOR_PLUGIN_ROOT:-"$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"}"
 
 # Windows under Git Bash / MSYS: hand off to the PowerShell launcher so Python
 # discovery (python/python3/py -3) and UTF-8 stdin marshalling match the
 # no-Git-Bash path instead of guessing at an interpreter here.
-#
-# Inert for Copilot in practice — VS Code runs hooks through ComSpec (Windows
-# PowerShell) and the Copilot CLI runs them through powershell.exe on win32, so
-# neither ever reaches this branch. Kept so this file stays in step with the
-# claude-code/codex copies.
 if [ "${OS:-}" = "Windows_NT" ] && command -v powershell.exe >/dev/null 2>&1; then
   # Convert the POSIX script path so `powershell.exe -File` can open it (Git Bash /
   # MSYS / Cygwin). When powershell.exe is absent the guard above skips delegation

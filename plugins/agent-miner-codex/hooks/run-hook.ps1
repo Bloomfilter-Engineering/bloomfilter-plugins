@@ -22,18 +22,38 @@ trap {
 }
 
 function Resolve-Python {
+    # Name existence is not enough: an asdf/pyenv/mise shim, or the Microsoft
+    # Store `python.exe` stub, resolves as a name but fails when actually run.
+    # Probe every candidate source by executing it, requiring Python >= 3.10 (the
+    # collector floor) AND that the collector's module-top imports resolve (json,
+    # subprocess, urllib.request). Canonical names first; `py -3` last, since some environments
+    # ship a `py` that does not behave like the real launcher. `-All` so a broken
+    # first match on PATH (e.g. the Store stub) cannot hide a real interpreter.
     $candidates = @(
-        @{ Command = "python"; Args = @() },
         @{ Command = "python3"; Args = @() },
+        @{ Command = "python"; Args = @() },
         @{ Command = "py"; Args = @("-3") }
     )
+    $probe = 'import sys, json, subprocess, urllib.request; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)'
 
     foreach ($candidate in $candidates) {
-        $command = Get-Command $candidate.Command -ErrorAction SilentlyContinue
-        if ($command) {
-            return @{
-                Executable = $command.Source
-                Arguments = $candidate.Args
+        $sources = @(Get-Command $candidate.Command -All -CommandType Application -ErrorAction SilentlyContinue)
+        foreach ($command in $sources) {
+            try {
+                # Stdin from $null so the probe can never consume the hook payload
+                # the caller reads later; *> $null discards probe output. A probe
+                # that throws (Store stub, encoding error) is caught and skipped,
+                # never propagated -- discovery always fails soft.
+                $probeArgs = @($candidate.Args) + @('-c', $probe)
+                $null | & $command.Source @probeArgs *> $null
+                if ($LASTEXITCODE -eq 0) {
+                    return @{
+                        Executable = $command.Source
+                        Arguments = $candidate.Args
+                    }
+                }
+            } catch {
+                continue
             }
         }
     }
