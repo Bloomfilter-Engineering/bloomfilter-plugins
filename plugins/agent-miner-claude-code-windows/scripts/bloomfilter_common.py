@@ -1738,6 +1738,43 @@ def _extract_api_calls(scoped_entries):
     return api_calls
 
 
+# The runtime records the conversation's display name in the transcript rather
+# than in any hook payload, under two entry kinds: one written when the user
+# names the conversation themselves, and one holding a name generated from the
+# opening prompt. A user-chosen name always wins, and the newest of each kind
+# wins, because a conversation can be renamed at any point in its life.
+#
+# Both kinds are re-emitted as the conversation grows, so the tail already in
+# hand carries them and no extra read is needed.
+TITLE_ENTRY_FIELDS = (("custom-title", "customTitle"), ("ai-title", "aiTitle"))
+
+
+def _extract_session_title(entries):
+    """Return the conversation's display name from transcript entries.
+
+    Args:
+        entries: Parsed transcript entries, in file order.
+
+    Returns:
+        The name to report, or "" when the transcript carries none.
+    """
+    found = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        entry_type = entry.get("type")
+        for candidate_type, field in TITLE_ENTRY_FIELDS:
+            if entry_type != candidate_type:
+                continue
+            value = entry.get(field)
+            if isinstance(value, str) and value.strip():
+                found[candidate_type] = value.strip()
+    for candidate_type, _ in TITLE_ENTRY_FIELDS:
+        if found.get(candidate_type):
+            return found[candidate_type]
+    return ""
+
+
 def extract_transcript_summary(transcript_path):
     """Parse transcript JSONL and return a condensed token summary.
 
@@ -1907,6 +1944,9 @@ def extract_transcript_summary(transcript_path):
             summary["turns"] = turns
         if thinking:
             summary["thinking"] = thinking
+        session_title = _extract_session_title(entries)
+        if session_title:
+            summary["session_title"] = session_title
         return summary
 
     except Exception:
