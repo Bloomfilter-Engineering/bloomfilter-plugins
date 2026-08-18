@@ -18,3 +18,7 @@ Thumbs.db
 # Python
 __pycache__/
 *.pyc
+
+# Claude Code
+.claude/planning/
+.claude/reviews/

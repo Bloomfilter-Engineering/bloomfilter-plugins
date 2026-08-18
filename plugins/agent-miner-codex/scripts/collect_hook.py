@@ -2,22 +2,30 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    UPLOAD_OK,
+    UPLOAD_RETRY_BUDGET_S,
+    UPLOAD_TOO_LARGE,
     append_to_batch,
     bootstrap_config,
     clear_batch,
     debug_log,
     extract_subagent_conversation,
     get_git_branch,
+    is_foreign_runtime_payload,
     read_batch,
     read_payload,
+    record_delivered_prefix,
     resolve_api_key,
     resolve_api_url,
+    select_uploadable_prefix,
+    sweep_stale_batches,
     upload_batch,
     utcnow_iso,
 )
@@ -95,6 +103,18 @@ def main() -> None:
         return
 
     payload = read_payload()
+
+    # Refuse a session that belongs to a different runtime. Editors discover and
+    # execute each other's collectors, so this one can be handed hooks from a
+    # session it does not serve -- and whichever collector uploads first is the
+    # one the whole session gets filed under, so acting on it silently records
+    # another tool's work as this one's.
+    if is_foreign_runtime_payload(payload):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} "
+            "reason=payload-belongs-to-another-runtime"
+        )
+        return
     session_id = _resolve_session_id(payload)
     if not session_id:
         return
@@ -104,6 +124,26 @@ def main() -> None:
 
     if hook_event_name == "SessionStart":
         bootstrap_config(plugin_root)
+        # Expire batches whose session died before draining them. Swept here and
+        # nowhere else: a directory scan costs about a millisecond, fine once per
+        # session but not on a per-tool hook that fires thousands of times. A
+        # batch is only removed once fully uploaded, so without this the
+        # directory grows without limit.
+        #
+        # Deliberately runs whether or not an API key is configured. Batching
+        # happens either way, so gating the only garbage collector behind a key
+        # means an install without one keeps every prompt, tool input and tool
+        # output on disk in cleartext forever. Nothing recoverable is lost: the
+        # age threshold is weeks, and a batch that old belongs to a session that
+        # ended long ago.
+        #
+        # The session being started is passed so its own batch is never treated
+        # as stale: at this point it has appended nothing, so a resumed
+        # session's file still carries the previous sitting's mtime. Note this
+        # runtime then starts the session from an empty batch anyway (below), so
+        # here the argument only guarantees the sweep cannot race that reset.
+        sweep_stale_batches(current_session_id=session_id)
+
         clear_batch(session_id)
 
     envelope: dict[str, Any] = {
@@ -304,28 +344,65 @@ def main() -> None:
             debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
             return
 
-        # Cumulative read — never truncate mid-session. The BE assumes each
-        # upload contains the full session history (turn_number resets to 0
-        # and increments through the batch); truncating after upload would
-        # cause subsequent uploads to overwrite earlier turns at turn 0.
-        # Idempotency is handled BE-side via update_or_create on
-        # (session, turn_number).
+        # Cumulative read — never truncate mid-session. This runtime supplies no
+        # stable per-turn identity of its own, so a turn is identified by its
+        # position in the upload: every upload has to start from the first record
+        # or the positions shift under everything already sent. Re-sending is
+        # safe; truncating is not.
         batch_entries = read_batch(session_id)
         if not batch_entries:
             debug_log(f"upload skipped: session_id={session_id} reason=empty-batch")
             return
 
         api_url = resolve_api_url()
-        upload_batch(
-            api_url,
-            api_key,
-            {
-                "session_id": session_id,
-                "source": "codex",
-                "plugin_version": PLUGIN_VERSION,
-                "hooks": batch_entries,
-            },
-        )
+
+        # Send only as much of the batch as fits in one request. Posting the
+        # whole file made an oversize batch permanent: the server refuses it,
+        # nothing is delivered, later hooks append, and the next attempt is
+        # larger still. A prefix is safe here precisely because this runtime
+        # never truncates: every upload starts at the first record, so the
+        # position of each turn is identical every time and a prefix simply stops
+        # short of the newest turns, which the next upload then carries.
+        upload_count = select_uploadable_prefix(batch_entries)
+        pending_entries = batch_entries[:upload_count]
+        batch_payload = {
+            "session_id": session_id,
+            "source": "codex",
+            "plugin_version": PLUGIN_VERSION,
+            "hooks": pending_entries,
+        }
+
+        # Budget starts before the first request, not after it: the first
+        # request can burn the whole socket timeout on its own, so a clock
+        # started afterwards lets the worst case run past the hook's limit
+        # and be killed mid-flight -- the failure this budget exists to stop.
+        retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
+        upload_result = upload_batch(api_url, api_key, batch_payload)
+
+        while (
+            upload_result == UPLOAD_TOO_LARGE
+            and len(pending_entries) > 1
+            and time.monotonic() < retry_deadline
+        ):
+            pending_entries = pending_entries[: len(pending_entries) // 2]
+            debug_log(
+                f"upload retry after too-large: session_id={session_id} "
+                f"hooks={len(pending_entries)}"
+            )
+            batch_payload["hooks"] = pending_entries
+            upload_result = upload_batch(api_url, api_key, batch_payload)
+
+        # Record how much of the batch the collector has now seen. A runtime that
+        # re-sends everything uses this to know which records belong to turns it
+        # has already closed, and so which are safe to shed when the file grows.
+        if upload_result == UPLOAD_OK:
+            record_delivered_prefix(session_id, len(pending_entries))
+
+        if upload_result != UPLOAD_OK:
+            debug_log(
+                f"upload incomplete: session_id={session_id} "
+                f"result={upload_result} hooks={len(pending_entries)}"
+            )
 
 
 if __name__ == "__main__":

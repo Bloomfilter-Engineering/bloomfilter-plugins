@@ -17,24 +17,31 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
-    _cap_text,
+    UPLOAD_OK,
+    UPLOAD_RETRY_BUDGET_S,
+    UPLOAD_TOO_LARGE,
     append_to_batch,
     bootstrap_config,
+    _cap_text,
     clear_batch,
     debug_log,
     derive_chat_sessions_path,
     detect_runtime,
     find_copilot_transcript,
     get_git_branch,
+    is_foreign_runtime_payload,
     normalize_hook_payload,
     parse_cli_transcript,
     parse_copilot_transcript,
     read_batch,
     read_payload,
+    record_delivered_prefix,
     resolve_api_key,
     resolve_api_url,
     rewrite_batch,
+    select_uploadable_prefix,
     spawn_detached,
+    sweep_stale_batches,
     upload_batch,
     utcnow_iso,
 )
@@ -300,7 +307,7 @@ def run_reupload_worker(session_id: str) -> None:
     metadata, then overlay exact data onto every turn and re-upload.
 
     Runs in its own process (see spawn_detached) so it never blocks the Stop
-    hook. The backend's update_or_create makes the re-upload idempotent, and
+    hook. Re-sending a session is safe by design here, and
     exact token counts clear any earlier estimate.
     """
     api_key = resolve_api_key()
@@ -406,13 +413,80 @@ def run_reupload_worker(session_id: str) -> None:
         rewrite_batch(session_id, batch_entries)
 
     api_url = resolve_api_url()
+    _upload_with_size_backoff(
+        api_url, api_key, session_id, batch_entries, "reupload_worker"
+    )
+
+
+def _upload_with_size_backoff(
+    api_url: str,
+    api_key: str,
+    session_id: str,
+    entries: list,
+    context: str,
+) -> str:
+    """Send as much of a batch as one request can carry, shrinking on refusal.
+
+    Shared by both upload sites so they cannot drift apart: this runtime uploads
+    the batch cumulatively and never removes what it has delivered, so a body the
+    collector refuses would otherwise be refused again on every later hook and
+    the session's telemetry would stop there for good.
+
+    A prefix is safe here precisely because nothing is ever removed: every upload
+    starts at the first record, so the position of each turn is identical every
+    time and a prefix simply stops short of the newest turns, which the next
+    upload then carries.
+
+    Args:
+        api_url: Collector base URL.
+        api_key: Key for the collector, already resolved.
+        session_id: Session the batch belongs to, for logging.
+        entries: The batch snapshot, in file order.
+        context: Which caller this is, for logging.
+
+    Returns:
+        The final upload outcome, so a caller can branch on it if it needs to.
+    """
+    upload_count = select_uploadable_prefix(entries)
+    pending_entries = entries[:upload_count]
     batch_payload = {
         "session_id": session_id,
         "source": "copilot",
         "plugin_version": PLUGIN_VERSION,
-        "hooks": batch_entries,
+        "hooks": pending_entries,
     }
-    upload_batch(api_url, api_key, batch_payload)
+    # Budget starts before the first request, not after it: the first
+    # request can burn the whole socket timeout on its own, so a clock
+    # started afterwards lets the worst case run past the hook's limit
+    # and be killed mid-flight -- the failure this budget exists to stop.
+    retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
+    upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    while (
+        upload_result == UPLOAD_TOO_LARGE
+        and len(pending_entries) > 1
+        and time.monotonic() < retry_deadline
+    ):
+        pending_entries = pending_entries[: len(pending_entries) // 2]
+        debug_log(
+            f"upload retry after too-large: context={context} "
+            f"session_id={session_id} hooks={len(pending_entries)}"
+        )
+        batch_payload["hooks"] = pending_entries
+        upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    # Record how much of the batch the collector has now seen. A runtime that
+    # re-sends everything uses this to know which records belong to turns it has
+    # already closed, and so which are safe to shed when the file grows.
+    if upload_result == UPLOAD_OK:
+        record_delivered_prefix(session_id, len(pending_entries))
+
+    if upload_result != UPLOAD_OK:
+        debug_log(
+            f"upload incomplete: context={context} session_id={session_id} "
+            f"result={upload_result} hooks={len(pending_entries)}"
+        )
+    return upload_result
 
 
 def main() -> None:
@@ -431,6 +505,18 @@ def main() -> None:
         return
 
     payload = read_payload()
+
+    # Refuse a session that belongs to a different runtime. Editors discover and
+    # execute each other's collectors, so this one can be handed hooks from a
+    # session it does not serve -- and whichever collector uploads first is the
+    # one the whole session gets filed under, so acting on it silently records
+    # another tool's work as this one's.
+    if is_foreign_runtime_payload(payload):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} "
+            "reason=payload-belongs-to-another-runtime"
+        )
+        return
     if not isinstance(payload, dict):
         debug_log(
             f"hook skipped: hook={hook_event_name} reason=non-object-payload "
@@ -532,6 +618,27 @@ def main() -> None:
     # Bootstrap config on SessionStart or first UserPromptSubmit
     if hook_event_name in BOOTSTRAP_HOOKS:
         bootstrap_config(plugin_root)
+        # Expire batches whose session died before draining them. Swept on the
+        # session-start hook and nowhere else: a directory scan costs about a
+        # millisecond, fine once per session but not on a per-tool hook that
+        # fires thousands of times. A batch is only removed once fully
+        # uploaded, so without this the directory grows without limit.
+        #
+        # Deliberately BEFORE the key check below. Batching happens whether or
+        # not a key is configured, so gating the only garbage collector behind
+        # one means an install without a key keeps every prompt, tool input and
+        # tool output on disk in cleartext forever. Nothing recoverable is lost:
+        # the age threshold is weeks, and a batch that old belongs to a session
+        # that ended long ago.
+        #
+        # The session being started is passed so its own batch is never treated
+        # as stale: at this point it has appended nothing, so a resumed
+        # session's file still carries the previous sitting's mtime. Note this
+        # runtime then starts the session from an empty batch anyway (below), so
+        # here the argument only guarantees the sweep cannot race that reset.
+        if hook_event_name == "SessionStart":
+            sweep_stale_batches(current_session_id=session_id)
+
         api_key = resolve_api_key()
         if not api_key:
             debug_log(
@@ -770,8 +877,8 @@ def main() -> None:
     append_to_batch(session_id, envelope)
 
     # Upload on Stop — batch is NOT cleared so it accumulates the full
-    # session history.  The backend's update_or_create handles idempotency
-    # for existing turns.  Earlier Stop entries that were missing their
+    # session history. Re-sending records already delivered is safe by design
+    # on this runtime.  Earlier Stop entries that were missing their
     # agent_response (transcript not flushed in time) are backfilled above
     # from the now-complete transcript.
     if hook_event_name in UPLOAD_HOOKS:
@@ -792,14 +899,9 @@ def main() -> None:
             )
             return
 
-        batch_payload = {
-            "session_id": session_id,
-            "source": "copilot",
-            "plugin_version": PLUGIN_VERSION,
-            "hooks": entries,
-        }
-
-        upload_batch(api_url, api_key, batch_payload)
+        _upload_with_size_backoff(
+            api_url, api_key, session_id, entries, hook_event_name
+        )
 
         # On VS Code, chatSessions metadata is flushed ~10-22 s after Stop,
         # so if this turn shipped without exact tokens we hand off to a
@@ -830,10 +932,28 @@ def main() -> None:
             and (not parent_has_tokens or needs_subagent_data)
             and runtime == "copilot-vscode"
         ):
-            python_exe = sys.executable or "python3"
-            spawned = spawn_detached(
-                [python_exe, os.path.abspath(__file__), "__reupload", session_id]
-            )
+            # Only ever an absolute interpreter path, never a bare name: a
+            # process started without an explicit executable path searches the
+            # current directory before PATH on some platforms, and the current
+            # directory here is whatever project the editor has open -- so a
+            # repository shipping its own python-named binary would run instead.
+            # Skipping the refresh is the safe outcome when no path is known.
+            python_executable = sys.executable
+            spawned = False
+            if python_executable and os.path.isabs(python_executable):
+                spawned = spawn_detached(
+                    [
+                        python_executable,
+                        os.path.abspath(__file__),
+                        "__reupload",
+                        session_id,
+                    ]
+                )
+            else:
+                debug_log(
+                    f"reupload_worker: not spawned session_id={session_id} "
+                    "reason=no-absolute-interpreter-path"
+                )
             if not spawned:
                 debug_log(
                     f"reupload_worker: spawn failed session_id={session_id} "

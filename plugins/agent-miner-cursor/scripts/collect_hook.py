@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    SESSION_END_SLOT_WAIT_S,
+    UPLOAD_OK,
+    UPLOAD_RETRY_BUDGET_S,
+    UPLOAD_TOO_LARGE,
     append_to_batch,
     append_to_batch_deduped,
     bootstrap_config,
@@ -16,11 +21,16 @@ from bloomfilter_common import (
     drop_leading_entries,
     extract_subagent_conversation,
     get_git_branch,
+    is_foreign_runtime_payload,
     read_batch,
     read_payload,
+    record_delivered_prefix,
     resolve_api_key,
     resolve_api_url,
+    select_uploadable_prefix,
+    sweep_stale_batches,
     upload_batch,
+    upload_slot,
     utcnow_iso,
 )
 
@@ -104,6 +114,18 @@ def main() -> None:
         return
 
     payload = read_payload()
+
+    # Refuse a session that belongs to a different runtime. Editors discover and
+    # execute each other's collectors, so this one can be handed hooks from a
+    # session it does not serve -- and whichever collector uploads first is the
+    # one the whole session gets filed under, so acting on it silently records
+    # another tool's work as this one's.
+    if is_foreign_runtime_payload(payload):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} "
+            "reason=payload-belongs-to-another-runtime"
+        )
+        return
     if not isinstance(payload, dict):
         debug_log(
             f"hook skipped: hook={hook_event_name} reason=non-object-payload "
@@ -134,6 +156,26 @@ def main() -> None:
 
     if hook_event_name == "sessionStart":
         bootstrap_config(plugin_root)
+        # Expire batches whose session died before draining them. Swept here and
+        # nowhere else: a directory scan costs about a millisecond, fine once per
+        # session but not on a per-tool hook that fires thousands of times. A
+        # batch is only removed once fully uploaded, so without this the
+        # directory grows without limit.
+        #
+        # Deliberately BEFORE the key check. Batching happens whether or not a
+        # key is configured, so gating the only garbage collector behind one
+        # means an install without a key keeps every prompt, tool input and
+        # tool output on disk in cleartext forever. Nothing recoverable is lost
+        # by sweeping first: the age threshold is weeks, and a batch that old
+        # belongs to a session that ended long ago.
+        #
+        # The session being started is passed so its own batch is never treated
+        # as stale: at this point it has appended nothing, so a resumed
+        # session's file still carries the previous sitting's mtime. Note this
+        # runtime then starts the session from an empty batch anyway (below), so
+        # here the argument only guarantees the sweep cannot race that reset.
+        sweep_stale_batches(current_session_id=session_id)
+
         clear_batch(session_id)
         api_key = resolve_api_key()
         if not api_key:
@@ -229,27 +271,96 @@ def main() -> None:
             return
 
         api_url = resolve_api_url()
-        entries = read_batch(session_id)
-        if not entries:
-            debug_log(
-                f"upload skipped: hook={hook_event_name} session_id={session_id} "
-                "reason=empty-batch"
-            )
-            return
 
-        batch_payload = {
-            "session_id": session_id,
-            "source": "cursor",
-            "plugin_version": PLUGIN_VERSION,
-            "hooks": entries,
-        }
+        # One upload per session at a time. Three different hooks can trigger an
+        # upload here, and the session-end one drains what it sent *by count* --
+        # so two overlapping uploads would each snapshot the same records, each
+        # send them, and the drain would then remove records that were never
+        # sent. The slot also makes eviction and upload mutually exclusive, for
+        # the same reason. Only the session-end hook waits for the slot: there
+        # is no later hook to carry its records if it skips.
+        slot_wait_seconds = (
+            SESSION_END_SLOT_WAIT_S if hook_event_name == "sessionEnd" else 0.0
+        )
+        with upload_slot(session_id, wait_seconds=slot_wait_seconds) as has_slot:
+            if not has_slot:
+                debug_log(
+                    f"upload skipped: hook={hook_event_name} "
+                    f"session_id={session_id} reason=upload-already-in-flight"
+                )
+                return
 
-        success = upload_batch(api_url, api_key, batch_payload)
-        if success and hook_event_name == "sessionEnd":
-            # Remove only the entries we just uploaded; any hook appended
-            # concurrently during the upload is preserved for the next batch
-            # rather than truncated away.
-            drop_leading_entries(session_id, len(entries))
+            entries = read_batch(session_id)
+            if not entries:
+                debug_log(
+                    f"upload skipped: hook={hook_event_name} "
+                    f"session_id={session_id} reason=empty-batch"
+                )
+                return
+
+            # Send only as much of the batch as fits in one request. Posting the
+            # whole file made an oversize batch permanent: the server refuses it,
+            # nothing is delivered, later hooks append, and the next attempt is
+            # larger still. A prefix converts that into incremental delivery.
+            upload_count = select_uploadable_prefix(entries)
+            pending_entries = entries[:upload_count]
+
+            batch_payload = {
+                "session_id": session_id,
+                "source": "cursor",
+                "plugin_version": PLUGIN_VERSION,
+                "hooks": pending_entries,
+            }
+
+            # Budget starts before the first request, not after it: the first
+            # request can burn the whole socket timeout on its own, so a clock
+            # started afterwards lets the worst case run past the hook's limit
+            # and be killed mid-flight -- the failure this budget exists to stop.
+            retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
+            upload_result = upload_batch(api_url, api_key, batch_payload)
+
+            while (
+                upload_result == UPLOAD_TOO_LARGE
+                and len(pending_entries) > 1
+                and time.monotonic() < retry_deadline
+            ):
+                pending_entries = pending_entries[: len(pending_entries) // 2]
+                debug_log(
+                    f"upload retry after too-large: hook={hook_event_name} "
+                    f"session_id={session_id} hooks={len(pending_entries)}"
+                )
+                batch_payload["hooks"] = pending_entries
+                upload_result = upload_batch(api_url, api_key, batch_payload)
+
+            # A lone envelope the server will not accept can never be delivered,
+            # and it sits at the head of the file -- so keeping it blocks every
+            # record behind it forever, which is the same permanent strand in a
+            # new place. Drop exactly that one and let the rest through. Loud,
+            # because it is real data loss: an envelope this large is usually one
+            # enormous tool result, and the alternative is losing the whole
+            # session's telemetry.
+            if upload_result == UPLOAD_TOO_LARGE and len(pending_entries) == 1:
+                oversize_event = pending_entries[0].get("hook_event_name", "?")
+                debug_log(
+                    f"upload dropping undeliverable envelope: "
+                    f"hook={hook_event_name} session_id={session_id} "
+                    f"envelope={oversize_event} "
+                    "reason=single-envelope-exceeds-server-limit"
+                )
+                drop_leading_entries(session_id, 1)
+                return
+
+        # Record how much of the batch the collector has now seen. A runtime that
+        # re-sends everything uses this to know which records belong to turns it
+        # has already closed, and so which are safe to shed when the file grows.
+        if upload_result == UPLOAD_OK:
+            record_delivered_prefix(session_id, len(pending_entries))
+
+            if upload_result == UPLOAD_OK and hook_event_name == "sessionEnd":
+                # Remove only the entries we just uploaded; any hook appended
+                # concurrently during the upload is preserved for the next batch
+                # rather than truncated away.
+                drop_leading_entries(session_id, len(pending_entries))
 
 
 if __name__ == "__main__":
