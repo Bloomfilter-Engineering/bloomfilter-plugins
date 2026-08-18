@@ -1820,11 +1820,9 @@ def extract_transcript_summary(transcript_path):
                 continue
             last_user_idx = i
 
-        # Every real user prompt starts a turn. Grouping by prompt instead of
-        # reporting only the newest turn is what lets a turn whose Stop never
-        # fired still deliver its tokens: the next hook sees it in the window
-        # and ships it keyed to its own prompt id, so the backend can route it
-        # to its own row rather than summing it onto the latest turn.
+        # Every real user prompt starts a turn. The scan exists to find where
+        # the newest one begins; a tool result is not a prompt, so it does not
+        # open a turn.
         turn_start_indexes = []
         for i, entry in enumerate(entries):
             if entry.get("type") != "user":
@@ -1848,27 +1846,13 @@ def extract_transcript_summary(transcript_path):
         # different prompt ids across consecutive hooks.
         turn_entries = entries[last_user_idx + 1 :] if last_user_idx >= 0 else entries
 
-        turns = []
-        for position, start_index in enumerate(turn_start_indexes):
-            end_index = (
-                turn_start_indexes[position + 1]
-                if position + 1 < len(turn_start_indexes)
-                else len(entries)
-            )
-            prompt_id = entries[start_index].get("promptId", "")
-            if not prompt_id:
-                continue
-            grouped_calls = _extract_api_calls(entries[start_index + 1 : end_index])
-            if grouped_calls:
-                turns.append({"prompt_id": prompt_id, "api_calls": grouped_calls})
-
         api_calls = _extract_api_calls(turn_entries)
+        session_title = _extract_session_title(entries)
         # The newest turn can legitimately have no calls yet — a prompt that has
-        # not been answered, or a tail of non-assistant entries. Bail only when
-        # there is nothing at all to report: returning None here because the
-        # *current* turn was empty would throw away every recovered turn behind
-        # it, which is the whole point of the grouping.
-        if not api_calls and not turns:
+        # not been answered, or a tail of non-assistant entries. A conversation
+        # name on its own is still worth reporting, so bail only when there is
+        # nothing at all to send.
+        if not api_calls and not session_title:
             return None
 
         # Extract thinking/reasoning in transcript order so the backend can build
@@ -1932,19 +1916,16 @@ def extract_transcript_summary(transcript_path):
             if ts:
                 prev_ts = ts
 
-        # api_calls stays the newest turn so the long-standing field keeps its
-        # original meaning for anything already reading it; turns carries the grouped
-        # form, including turns whose own Stop never fired. thinking is the
-        # newest turn ONLY — it is reasoning plaintext, capped per block but not
-        # in count, and the backend writes every block against the single turn
-        # it is handed, so widening it would both inflate the payload and file
-        # an older turn's reasoning under this one.
+        # Everything here is the newest turn only. A turn whose own end hook
+        # never fired is recovered by the next prompt instead, which reports the
+        # calls it can still see; shipping a per-turn breakdown as well was
+        # measured at ~93% of this payload and had no consumer, and payload size
+        # is the binding constraint on delivery. thinking in particular must stay
+        # scoped to one turn: it is reasoning plaintext, capped per block but not
+        # in count, and every block is filed against the single turn handed over.
         summary = {"api_calls": api_calls}
-        if turns:
-            summary["turns"] = turns
         if thinking:
             summary["thinking"] = thinking
-        session_title = _extract_session_title(entries)
         if session_title:
             summary["session_title"] = session_title
         return summary
