@@ -47,7 +47,7 @@ SUPPORTED_HOOKS: set[str] = {
 # subagent_transcript regardless. Safe because the BE rebuilds an unfinalized
 # turn's events on the later Stop upload (see _handle_turn_start) — the
 # SubagentStop upload only materializes the turn's start + subagent anchor.
-UPLOAD_HOOKS: set[str] = {"Stop", "SubagentStop"}
+UPLOAD_HOOKS: set[str] = {"SessionEnd", "Stop", "SubagentStop"}
 GIT_BRANCH_HOOKS: set[str] = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_EXTRACT_HOOKS: set[str] = {"Stop"}
 SESSION_META_HOOKS: set[str] = {"SessionStart"}

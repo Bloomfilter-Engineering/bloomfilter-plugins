@@ -74,7 +74,12 @@ if (-not $python) {
 
 $pluginRoot = $env:CLAUDE_PLUGIN_ROOT
 if (-not $pluginRoot) {
-    $pluginRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    # $PSScriptRoot is the directory holding this script — the plugin's
+    # hooks/ directory — so one parent is the plugin root. Two was one too
+    # many: it landed on the directory holding every plugin, and the
+    # collector path built from it does not exist, so the hook answered {}
+    # and captured nothing. The POSIX sibling takes one level.
+    $pluginRoot = Split-Path -Parent $PSScriptRoot
 }
 
 $script = Join-Path $pluginRoot "scripts\collect_hook.py"

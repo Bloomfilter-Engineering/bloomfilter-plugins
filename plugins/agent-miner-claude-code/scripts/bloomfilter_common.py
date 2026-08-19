@@ -1805,21 +1805,6 @@ def extract_transcript_summary(transcript_path):
             except json.JSONDecodeError:
                 continue
 
-        # Find the last real user prompt (not a tool_result)
-        last_user_idx = -1
-        for i, entry in enumerate(entries):
-            if entry.get("type") != "user":
-                continue
-            if entry.get("toolUseResult"):
-                continue
-            msg = entry.get("message", {})
-            content = msg.get("content", "")
-            if isinstance(content, list) and all(
-                c.get("type") == "tool_result" for c in content
-            ):
-                continue
-            last_user_idx = i
-
         # Every real user prompt starts a turn. The scan exists to find where
         # the newest one begins; a tool result is not a prompt, so it does not
         # open a turn.
