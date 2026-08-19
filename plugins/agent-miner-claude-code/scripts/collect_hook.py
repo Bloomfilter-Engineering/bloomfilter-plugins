@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Universal hook handler for Bloomfilter agent mining.
-
-Collects raw hook payloads, batches them in a JSONL file, and uploads
-the batch to the Bloomfilter API on Stop and SessionEnd events.
-"""
 
 import os
 import subprocess
@@ -40,7 +35,7 @@ from bloomfilter_common import (
     utcnow_iso,
 )
 
-# Hooks that trigger an upload to the BE
+# Hooks that trigger an upload to the API
 UPLOAD_HOOKS = {"Stop", "SessionEnd"}
 
 # argv[1] sentinel marking a re-invocation of this script as the detached
@@ -148,7 +143,7 @@ def main() -> None:
             envelope["transcript_summary"] = transcript_summary
 
     # On SubagentStop, capture the subagent's own (sidechain) transcript so the
-    # backend can build a full child AgentSession. Read it NOW — these files are
+    # API can build a full child session. Read it NOW — these files are
     # garbage-collected and may be gone by the time the batch uploads.
     if hook_event_name == "SubagentStop":
         agent_transcript_path = payload.get("agent_transcript_path", "")

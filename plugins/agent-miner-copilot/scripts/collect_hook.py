@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Universal hook handler for Bloomfilter agent mining (VS Code Copilot).
-
-Collects raw hook payloads, batches them in a JSONL file, and uploads
-the batch to the Bloomfilter API on Stop events.
-"""
 
 import json
 import os
@@ -46,7 +41,7 @@ from bloomfilter_common import (
     utcnow_iso,
 )
 
-# Hooks that trigger an upload to the BE. SubagentStop is included because a
+# Hooks that trigger an upload to the API. SubagentStop is included because a
 # subagent can finish after the parent turn's final Stop, which would otherwise
 # strand its entry in the batch until the next turn. The batch is cumulative and
 # the backend is idempotent, so the extra upload is safe (same rationale as the
@@ -673,7 +668,7 @@ def main() -> None:
     # envelope (_process_subagents iterates stop hooks), so we build it here and
     # write it back onto the SubagentStop entry already in the batch rather than
     # attaching it to this one. Attaching it here would create an empty child
-    # session: the BE would find no transcript and fall through to its
+    # session: the API would find no transcript and fall through to its
     # last_assistant_message summary fallback, which Copilot never sends.
     if hook_event_name == "PostToolUse" and payload.get("tool_name") == "runSubagent":
         entries = read_batch(session_id)

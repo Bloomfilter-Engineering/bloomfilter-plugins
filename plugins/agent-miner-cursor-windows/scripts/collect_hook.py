@@ -185,7 +185,7 @@ def main() -> None:
         return
 
     # Cursor ships postToolUse tool_output as a JSON-encoded string; decode
-    # so the BE extractor sees a dict (like claude_code / copilot).
+    # so the API's extractor sees a dict, as it does for the other runtimes.
     if hook_event_name in {"postToolUse", "postToolUseFailure"}:
         raw_output = payload.get("tool_output")
         if isinstance(raw_output, str) and raw_output.lstrip()[:1] in ("{", "["):
@@ -239,23 +239,28 @@ def main() -> None:
     if hook_event_name in GIT_BRANCH_HOOKS and project_dir:
         envelope["git_branch"] = get_git_branch(project_dir)
 
-    # Top-level cwd on sessionStart — BE session config reads it from the
+    # Top-level cwd on sessionStart — the API's session config reads it from the
     # envelope rather than payload.workspace_roots (no list-index support).
     if hook_event_name == "sessionStart" and project_dir:
         envelope["cwd"] = project_dir
 
-    # Synthesize transcript_summary.api_calls so the BE's _apply_token_data path
+    # Synthesize transcript_summary.api_calls so the API's token path
     # (same as copilot/claude_code) sees the token data Cursor delivers directly
-    # on the payload. Key rename: cursor's cache_write_tokens → BE's
+    # on the payload. Key rename: cursor's cache_write_tokens → the API's
     # cache_creation_tokens.
     #
     # Cursor documents no token fields on any hook, so where they arrive is a
-    # measurement, not a contract: every `stop` envelope carries them, and
-    # `afterAgentResponse` is not fired at all by Cursor 3.16.29. Both are
-    # accepted — `stop` because it is what actually delivers the counts,
-    # `afterAgentResponse` so a release that moves them back is still handled.
+    # measurement rather than a contract. Observed on 3.16.29: a completed
+    # generation fires `afterAgentResponse` and `stop` with identical counts, and
+    # an aborted one fires only `stop`, carrying no counts at all. Both events are
+    # accepted here so a release that drops either still reports; today only
+    # `afterAgentResponse` reaches a turn, because the collector API treats `stop`
+    # as an ignored event.
+    #
     # The fields stay optional: absent, the turn keeps no token data rather than
-    # recording four zeroes, which would price a real turn at nothing.
+    # recording four zeroes, which would price a real turn at nothing. Values are
+    # passed through as received — the API is responsible for coercing a count it
+    # cannot use, since these fields are not typed by the vendor either.
     token_fields = (
         "input_tokens",
         "output_tokens",
@@ -273,7 +278,7 @@ def main() -> None:
             "model": payload.get("model", ""),
             "response_id": payload.get("generation_id", ""),
         }
-        # Only set when the payload actually says: the BE reads a missing key as
+        # Only set when the payload actually says: the API reads a missing key as
         # "no statement" and falls back to the trailing-suffix heuristic, while a
         # present key overrides it.
         stated_speed = _speed_from_model_params(payload)
@@ -287,7 +292,7 @@ def main() -> None:
     # agent_transcript_path null — the transcript lives at
     # <parent_conv_dir>/subagents/<child_conv>.jsonl, discovered by matching the
     # task. The backend turns subagent_transcript into a linked child
-    # AgentSession keyed on payload.subagent_id. Read NOW — before the file is
+    # child session keyed on payload.subagent_id. Read NOW — before the file is
     # GC'd. The subagent_id carries an embedded newline (tool_call_id + gen id);
     # leave it as-is, it is stable across start/stop so backend keying holds.
     if hook_event_name == "subagentStop":

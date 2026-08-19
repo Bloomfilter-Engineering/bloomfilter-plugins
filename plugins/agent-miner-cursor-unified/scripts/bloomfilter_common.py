@@ -157,11 +157,20 @@ def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform."""
     system = platform.system()
     if system == "Windows":
-        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        # A variable that is set but empty must fall back, not resolve to "".
+        # os.environ.get returns the default only when the key is absent, so an
+        # empty value would make this path relative and land the batch — prompts
+        # and reasoning text in cleartext — in the hook's working directory,
+        # which is the user's project.
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        if not os.path.isabs(base):
+            base = os.path.expanduser("~")
         return os.path.join(base, "bloomfilter")
-    xdg = os.environ.get(
-        "XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
     )
+    if not os.path.isabs(xdg):
+        xdg = os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(xdg, "bloomfilter")
 
 

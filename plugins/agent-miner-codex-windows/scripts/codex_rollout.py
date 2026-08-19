@@ -85,7 +85,7 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
                                           tool_call_id, exit_code, duration_ms} pairs.
         file_edits             — list of apply_patch-derived per-file ops.
         api_calls              — list of token-usage dicts ready for
-                                 transcript_summary.api_calls (BE-schema field names).
+                                 transcript_summary.api_calls, using the API's field names.
         model                  — the model recorded for this turn's turn_context.
         time_to_first_token_ms — captured from event_msg.task_complete.
     """
@@ -467,7 +467,7 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
           ],
         }
 
-    `structured_patch` matches the BE-native shape consumed by
+    `structured_patch` matches the shape consumed by
     FileEditExtractor.count_added_lines / count_removed_lines.
     """
     if not isinstance(patch_text, str) or "*** Begin Patch" not in patch_text:

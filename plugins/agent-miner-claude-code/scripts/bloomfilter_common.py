@@ -156,11 +156,14 @@ TURN_TERMINAL_HOOK_EVENTS = frozenset({"Stop", "StopFailure", "SessionEnd"})
 #     recovery path, so it is the one that must fit. Read-and-parse over a
 #     multi-megabyte transcript lands in the tens of milliseconds, orders of
 #     magnitude inside that budget.
-#   - Payload. Only per-call token counts and turn keys are emitted, not the
-#     transcript text, so what is read is far larger than what is sent and the
-#     emitted payload stays well inside the request cap even at the widest window.
+#   - Payload. The summary built from the transcript is a small fraction of the
+#     transcript itself, so the emitted payload stays inside the request cap even
+#     at the widest window. It is not counts alone, though: alongside the per-call
+#     token counts it carries the session title and the turn's reasoning text,
+#     which is plaintext. Each reasoning block is length-capped but their number
+#     is not, so the size is bounded by those caps rather than by the transcript.
 #
-# Re-measure both if the emitted shape ever grows to include transcript content.
+# Re-measure both if what the summary emits grows again.
 TRANSCRIPT_READ_BYTES = 8_000_000
 
 
@@ -173,11 +176,20 @@ def get_config_dir():
     """Return the Bloomfilter config directory for the current platform."""
     system = platform.system()
     if system == "Windows":
-        base = os.environ.get("APPDATA", os.path.expanduser("~"))
+        # A variable that is set but empty must fall back, not resolve to "".
+        # os.environ.get returns the default only when the key is absent, so an
+        # empty value would make this path relative and land the batch — prompts
+        # and reasoning text in cleartext — in the hook's working directory,
+        # which is the user's project.
+        base = os.environ.get("APPDATA") or os.path.expanduser("~")
+        if not os.path.isabs(base):
+            base = os.path.expanduser("~")
         return os.path.join(base, "bloomfilter")
-    xdg = os.environ.get(
-        "XDG_CONFIG_HOME", os.path.join(os.path.expanduser("~"), ".config")
+    xdg = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
     )
+    if not os.path.isabs(xdg):
+        xdg = os.path.join(os.path.expanduser("~"), ".config")
     return os.path.join(xdg, "bloomfilter")
 
 
@@ -254,6 +266,11 @@ def bootstrap_config(plugin_root):
     if not os.path.isfile(config_file):
         secure_makedirs(config_dir)
         shutil.copy2(template, config_file)
+        # copy2 preserves the packaged template's mode, which is world-readable.
+        # This file is where the API key is then written, so it has to be narrowed
+        # to the owner — the batch files beside it already are.
+        if platform.system() != "Windows":
+            os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
         print(
             f"[bloomfilter] Created config at {config_file} — add your API key to get started."
         )
@@ -2115,7 +2132,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
     Unlike :func:`extract_transcript_summary` (which reads only the tail and
     returns token totals for the last turn), this reads the WHOLE subagent
     transcript and returns per-turn user_prompt/agent_response, tool calls, and
-    summed token usage so the backend can build a full child AgentSession.
+    summed token usage so the API can build a full child session.
 
     A subagent transcript is the same JSONL format as a normal session and its
     first user entry is the real task prompt. Normally there is a single real

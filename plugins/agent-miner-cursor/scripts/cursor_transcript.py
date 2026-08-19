@@ -1,26 +1,3 @@
-"""Parse a Cursor subagent transcript into the backend's child-session shape.
-
-Cursor runs each subagent as its own conversation and writes that conversation
-to ``<parent_conv_dir>/subagents/<child_conv_id>.jsonl`` — but the
-``subagentStop`` hook does NOT expose that path (``agent_transcript_path`` is
-null) or the child conversation id. The plugin discovers the file by matching
-the hook's ``task`` against each candidate transcript's opening user query (see
-``bloomfilter_common.find_subagent_transcript``); this module turns the matched
-file into ``{"turns": [...]}`` shaped for ``_build_child_turns``.
-
-Transcript format (one JSON object per line):
-    {"role": "user"|"assistant", "message": {"content": [block, ...]}}
-    {"type": "turn_ended", "status": "success"|...}
-where each ``block`` is ``{"type": "text", "text": ...}`` or
-``{"type": "tool_use", "name": ..., "input": {...}}``.
-
-Known limitations (Cursor exposes nothing more in the transcript):
-  * No token usage — all token totals are 0.
-  * ``tool_use`` blocks carry the call input but no output.
-  * No per-message timestamps (only a human-readable ``<timestamp>`` inside the
-    opening user text, which we do not parse); turn spans are left empty.
-"""
-
 from __future__ import annotations
 
 import json
@@ -148,9 +125,23 @@ def parse_transcript(path: str) -> dict[str, Any]:
     """Parse a Cursor subagent transcript into ``{"turns": [...]}``.
 
     One turn per real user message (usually a single turn with many tool
-    calls). Each turn is shaped for the backend's ``_build_child_turns``:
+    calls). Each turn is shaped for the API's child-session builder:
     ``user_prompt``, ``agent_response``, ``tool_calls`` (input only), zeroed
     token totals, and empty spans (Cursor exposes no per-message timestamps).
+
+    The transcript is one JSON object per line, in two shapes::
+
+        {"role": "user"|"assistant", "message": {"content": [block, ...]}}
+        {"type": "turn_ended", "status": "success"|...}
+
+    where a block is ``{"type": "text", "text": ...}`` or
+    ``{"type": "tool_use", "name": ..., "input": {...}}``. This is not a
+    documented format, so unknown line and block shapes are skipped rather
+    than treated as errors.
+
+    What the transcript does not contain bounds what any caller can report:
+    no token usage, no tool output (a ``tool_use`` block carries the call
+    input only), and no per-message timestamps.
     """
     turns: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None
