@@ -594,6 +594,43 @@ def _evict_batch_if_oversize(session_id: str, batch_file_size: int) -> None:
         )
 
 
+def _terminate_partial_final_line(batch_file_path: str, locked_handle: Any) -> None:
+    """Close off a half-written final line before appending after it.
+
+    A process killed mid-append leaves a line with no terminating newline. The
+    next append would concatenate onto it and both records would then read as one
+    broken line, so the record already lost takes the next good one down with it —
+    silently, with no error anywhere. Writing the missing newline first confines
+    the loss to the torn record.
+
+    The final byte is read through a separate read-only descriptor rather than
+    through the handle, which works whether the caller opened the file append-only
+    or append-and-read, and leaves the handle's position untouched either way.
+    Python documents append-mode writes as landing at end-of-file only "on some
+    Unix systems ... regardless of the current seek position", so nothing here
+    depends on that. The caller holds the exclusive lock across the whole
+    check-and-write, so no other process can append between the two.
+
+    Args:
+        batch_file_path: Path of the batch file being appended to.
+        locked_handle: The exclusively locked append handle to write through.
+    """
+    try:
+        file_size = os.fstat(locked_handle.fileno()).st_size
+    except OSError:
+        return
+    if not file_size:
+        return
+    try:
+        with open(batch_file_path, "rb") as probe_handle:
+            probe_handle.seek(file_size - 1)
+            if probe_handle.read(1) == b"\n":
+                return
+    except OSError:
+        return
+    locked_handle.write("\n")
+
+
 def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
     """Append one JSON object to the session batch file."""
     if _append_is_refused(session_id, entry):
@@ -603,6 +640,7 @@ def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
     batch_file_size = 0
     with open(batch_file_path, "a") as batch_file:
         with _lock_file(batch_file, exclusive=True):
+            _terminate_partial_final_line(batch_file_path, batch_file)
             batch_file.write(line)
             batch_file.flush()
             batch_file_size = batch_file.tell()
