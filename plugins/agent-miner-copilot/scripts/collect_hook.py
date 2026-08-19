@@ -733,11 +733,11 @@ def main() -> None:
             # ~10-22 s, so blocking the Stop hook here is wasteful.
             parsed = parse_copilot_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
-            have_current_turn = len(requests) >= expected_turns and requests[-1].get(
-                "response_content"
-            )
             current_req = (
                 requests[-1] if requests and len(requests) >= expected_turns else None
+            )
+            have_current_turn = current_req is not None and current_req.get(
+                "response_content"
             )
 
             # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---

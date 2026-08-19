@@ -39,7 +39,7 @@
           {
             "type": "command",
             "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SessionEnd; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" SessionEnd",
-            "timeout": 30
+            "timeout": 3
           }
         ]
       }

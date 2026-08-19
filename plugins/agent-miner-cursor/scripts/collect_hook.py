@@ -41,6 +41,9 @@ from bloomfilter_common import (
 # re-upload safe and link the child to the parent.
 UPLOAD_HOOKS = {"stop", "sessionEnd", "subagentStop"}
 GIT_BRANCH_HOOKS = {"sessionStart", "beforeSubmitPrompt"}
+# Hooks whose payload may carry the turn's token counts. See where these are
+# lifted into transcript_summary.api_calls for why both are listed.
+TOKEN_BEARING_HOOKS = {"stop", "afterAgentResponse"}
 
 
 def _thought_already_batched(records: list, payload: dict) -> bool:
@@ -99,6 +102,46 @@ def _resolve_session_id(payload: dict) -> str:
     fallback so a shared payload shape resolves under either runtime.
     """
     return payload.get("conversation_id") or payload.get("session_id") or ""
+
+
+def _speed_from_model_params(payload: dict) -> str:
+    """Return the speed tier Cursor states on the payload, or "" when it does not.
+
+    Cursor reports the session's mode choices as
+    ``model_params: [{"id": "fast", "value": "false"}, ...]``. That is a statement
+    where a trailing ``-fast`` in the model id is only an inference, so it is
+    preferred when offered. Measured live, the field is present on some turns and
+    null on others, so absence has to leave the id heuristic in charge rather than
+    assert a default.
+
+    The field is undocumented, so its shape is not a contract: anything that is not
+    the expected list-of-objects is treated as saying nothing. Guessing wrong here
+    changes real cost, because Cursor publishes separate rates for its fast
+    variants.
+
+    Args:
+        payload: The hook payload as the runtime sent it.
+
+    Returns:
+        "fast", "standard", or "" when the payload states nothing usable.
+    """
+    params = payload.get("model_params")
+    if not isinstance(params, list):
+        return ""
+    for entry in params:
+        if not isinstance(entry, dict) or entry.get("id") != "fast":
+            continue
+        value = entry.get("value")
+        if isinstance(value, bool):
+            return "fast" if value else "standard"
+        if isinstance(value, str):
+            lowered = value.strip().lower()
+            if lowered in ("true", "1", "yes"):
+                return "fast"
+            if lowered in ("false", "0", "no"):
+                return "standard"
+        return ""
+    return ""
 
 
 def main() -> None:
@@ -201,31 +244,42 @@ def main() -> None:
     if hook_event_name == "sessionStart" and project_dir:
         envelope["cwd"] = project_dir
 
-    # Synthesize transcript_summary.api_calls on the turn-end hook so the BE's
-    # _apply_token_data path (same as copilot/claude_code) sees the token data
-    # Cursor delivers directly on the payload. Key rename: cursor's
-    # cache_write_tokens → BE's cache_creation_tokens.
+    # Synthesize transcript_summary.api_calls so the BE's _apply_token_data path
+    # (same as copilot/claude_code) sees the token data Cursor delivers directly
+    # on the payload. Key rename: cursor's cache_write_tokens → BE's
+    # cache_creation_tokens.
+    #
+    # Cursor documents no token fields on any hook, so where they arrive is a
+    # measurement, not a contract: every `stop` envelope carries them, and
+    # `afterAgentResponse` is not fired at all by Cursor 3.16.29. Both are
+    # accepted — `stop` because it is what actually delivers the counts,
+    # `afterAgentResponse` so a release that moves them back is still handled.
+    # The fields stay optional: absent, the turn keeps no token data rather than
+    # recording four zeroes, which would price a real turn at nothing.
     token_fields = (
         "input_tokens",
         "output_tokens",
         "cache_read_tokens",
         "cache_write_tokens",
     )
-    if hook_event_name == "afterAgentResponse" and any(
+    if hook_event_name in TOKEN_BEARING_HOOKS and any(
         field in payload and payload.get(field) is not None for field in token_fields
     ):
-        envelope["transcript_summary"] = {
-            "api_calls": [
-                {
-                    "input_tokens": payload.get("input_tokens", 0),
-                    "output_tokens": payload.get("output_tokens", 0),
-                    "cache_read_tokens": payload.get("cache_read_tokens", 0),
-                    "cache_creation_tokens": payload.get("cache_write_tokens", 0),
-                    "model": payload.get("model", ""),
-                    "response_id": payload.get("generation_id", ""),
-                }
-            ]
+        api_call = {
+            "input_tokens": payload.get("input_tokens", 0),
+            "output_tokens": payload.get("output_tokens", 0),
+            "cache_read_tokens": payload.get("cache_read_tokens", 0),
+            "cache_creation_tokens": payload.get("cache_write_tokens", 0),
+            "model": payload.get("model", ""),
+            "response_id": payload.get("generation_id", ""),
         }
+        # Only set when the payload actually says: the BE reads a missing key as
+        # "no statement" and falls back to the trailing-suffix heuristic, while a
+        # present key overrides it.
+        stated_speed = _speed_from_model_params(payload)
+        if stated_speed:
+            api_call["speed"] = stated_speed
+        envelope["transcript_summary"] = {"api_calls": [api_call]}
 
     # On subagentStop, parse the subagent's own transcript into a normalized
     # child conversation and attach it. Cursor fires this hook under the PARENT

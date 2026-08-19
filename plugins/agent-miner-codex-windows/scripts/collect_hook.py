@@ -40,6 +40,7 @@ SUPPORTED_HOOKS: set[str] = {
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "SessionEnd",
 }
 # Upload on Stop (turn end) AND SubagentStop: a subagent can outlive the parent
 # turn (Codex doesn't always `wait` on it), so its SubagentStop may fire after
