@@ -761,6 +761,35 @@ def record_delivered_prefix(session_id: str, record_count: int) -> None:
         return
 
 
+def _reduce_delivered_prefix(session_id: str, removed_record_count: int) -> None:
+    """Lower a session's delivered count after records leave the head of its file.
+
+    The count is a position, not a set of record ids, so it only means anything
+    relative to the current file. Draining without lowering it leaves a count
+    larger than the file holds, and eviction reads that count to decide which
+    records have already been delivered safely -- so a session that appends again
+    has its fresh, unsent records treated as already sent.
+
+    Args:
+        session_id: Session whose marker is lowered.
+        removed_record_count: How many records were removed from the head.
+
+    Returns:
+        None.
+    """
+    if removed_record_count <= 0:
+        return
+    remaining = max(read_delivered_prefix(session_id) - removed_record_count, 0)
+    marker_path = _delivered_marker_path(session_id)
+    try:
+        with open(marker_path, "w") as marker_file:
+            marker_file.write(str(remaining))
+        if platform.system() != "Windows":
+            os.chmod(marker_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    except OSError:
+        return
+
+
 def _safe_eviction_limit(entries: list[dict[str, Any]], delivered_count: int) -> int:
     """Return how far into a batch it is safe to evict.
 
@@ -1136,6 +1165,7 @@ def drop_leading_entries(session_id: str, record_count: int) -> None:
             batch_file_handle.flush()
     if platform.system() != "Windows":
         os.chmod(batch_file_path, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    _reduce_delivered_prefix(session_id, dropped_record_count)
 
 
 def is_foreign_runtime_payload(payload: Any) -> bool:
@@ -1275,6 +1305,57 @@ OVERSIZE_TEXT_MARKER = "…[bloomfilter: truncated, envelope exceeded request bu
 MAX_CAP_DEPTH = 40
 
 
+# Shortest cap the shrinking walk will apply. Below this the text left is too
+# short to identify what was cut, and an envelope that still does not fit at this
+# cap is not going to be rescued by cutting further.
+MIN_CAP_CHARS = 256
+
+# What one capped string costs on the wire beyond the text kept: the marker, in
+# encoded bytes rather than characters, plus the quotes and separator JSON adds.
+_MARKER_ENCODED_BYTES = len(json.dumps(OVERSIZE_TEXT_MARKER).encode("utf-8")) - 2
+_STRING_PUNCTUATION_BYTES = 3
+
+# Ceiling on capping rounds. Each one is a full copy and a full measurement, and
+# halving from any starting cap reaches the floor well inside this, so it only
+# bounds a pathological input rather than a real one.
+_MAX_SHRINK_ROUNDS = 24
+
+
+def _string_stats(value: Any, depth: int = 0) -> tuple:
+    """Return how many strings are inside *value* and how long the longest is.
+
+    Walked once, so the shrinking cap can be chosen from the envelope's own
+    contents instead of from the request budget. Bounded by the same depth limit
+    as the capping walk so the two agree about what they can reach; anything
+    deeper is not counted, exactly as it is not capped.
+
+    Args:
+        value: Any JSON-compatible value.
+        depth: Current nesting depth.
+
+    Returns:
+        A (count, longest_length) tuple.
+    """
+    if isinstance(value, str):
+        return 1, len(value)
+    if depth >= MAX_CAP_DEPTH:
+        return 0, 0
+    if isinstance(value, dict):
+        items = list(value.keys()) + list(value.values())
+    elif isinstance(value, list):
+        items = value
+    else:
+        return 0, 0
+    count = 0
+    longest = 0
+    for item in items:
+        item_count, item_longest = _string_stats(item, depth + 1)
+        count += item_count
+        if item_longest > longest:
+            longest = item_longest
+    return count, longest
+
+
 def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
     """Return *value* with every string inside it capped to *character_limit*.
 
@@ -1312,6 +1393,55 @@ def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
     return value
 
 
+# Key left on a reduced envelope so the cut is visible in the collected data
+# rather than looking like an envelope that arrived this sparse.
+_REDUCED_MARKER_KEY = "bloomfilter_reduced"
+
+
+def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
+    """Return a stand-in small enough to send for an envelope nothing can carry.
+
+    Last resort, for an envelope capping cannot bring under budget. Neither
+    obvious option is available. Dropping it renumbers: on a runtime that
+    supplies no per-turn key, a turn boundary's *position* is its identity, so
+    removing one shifts every turn after it and the following turn's prompt lands
+    against this turn's tool events. Keeping it stalls: no request containing it
+    fits, so nothing behind it is ever delivered.
+
+    So it stays where it is, reduced to the scalars that identify it, with the
+    bulk replaced by a marker that is visibly not something the model produced.
+
+    Args:
+        entry: The envelope to reduce.
+        max_bytes: Size the reduced envelope must fit within.
+
+    Returns:
+        A reduced copy, small enough to send.
+    """
+    def keep(value: Any) -> bool:
+        if isinstance(value, str):
+            return len(value) <= MIN_CAP_CHARS
+        return isinstance(value, (int, float, bool)) or value is None
+
+    reduced: dict[str, Any] = {}
+    for key, value in entry.items():
+        if keep(value):
+            reduced[key] = value
+        elif key == "payload" and isinstance(value, dict):
+            reduced[key] = {k: v for k, v in value.items() if keep(v)}
+            reduced[key][_REDUCED_MARKER_KEY] = OVERSIZE_TEXT_MARKER
+        else:
+            reduced[key] = OVERSIZE_TEXT_MARKER
+    if _entry_size(reduced) <= max_bytes:
+        return reduced
+    # Even the identifiers do not fit, which takes thousands of them. Keep what
+    # names the envelope and nothing else, so its position is still held.
+    return {
+        "hook_event_name": entry.get("hook_event_name", ""),
+        _REDUCED_MARKER_KEY: OVERSIZE_TEXT_MARKER,
+    }
+
+
 def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     """Return a copy of *entry* small enough to send, or the entry unchanged.
 
@@ -1330,17 +1460,36 @@ def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     Returns:
         A shrunk copy, or the original entry when it cannot be shrunk.
     """
-    character_limit = max_bytes // 2
-    previous_size = _entry_size(entry)
-    while character_limit >= 256:
+    string_count, longest_string = _string_stats(entry)
+
+    # First cap: the share of the budget each capped string can afford, counting
+    # what capping *adds* as well as what it keeps. The marker is measured in
+    # encoded bytes, not characters -- it opens with an ellipsis, which JSON
+    # escapes to six bytes -- and each string also carries its quotes and
+    # separator. Under-counting either lands the first round a few bytes over
+    # budget on exactly the envelopes this exists for.
+    per_string_cost = _MARKER_ENCODED_BYTES + _STRING_PUNCTUATION_BYTES
+    affordable = max_bytes // max(string_count, 1) - per_string_cost
+
+    # Never above the longest string, or the round cuts nothing; never below the
+    # floor, or the text left cannot show what was cut. A zero here means every
+    # string sits below the depth the capping walk descends to, where whole
+    # containers are replaced instead -- so the floor is the right starting cap.
+    character_limit = max(MIN_CAP_CHARS, min(affordable, longest_string or MIN_CAP_CHARS))
+
+    # Halve on any round that does not fit, whether or not it made progress. A
+    # round that changes nothing does not mean the envelope cannot be cut: the
+    # cap may simply still be above every string, and multi-byte text inflates
+    # under JSON escaping by up to twelve times, so a cap that looks generous in
+    # characters can be far too generous in bytes. Treating no-progress as proof
+    # of impossibility is what left these envelopes untouched.
+    for _ in range(_MAX_SHRINK_ROUNDS):
         shrunk = _cap_strings(entry, character_limit)
-        shrunk_size = _entry_size(shrunk)
-        if shrunk_size <= max_bytes:
+        if _entry_size(shrunk) <= max_bytes:
             return shrunk
-        if shrunk_size >= previous_size:
+        if character_limit <= MIN_CAP_CHARS:
             break
-        previous_size = shrunk_size
-        character_limit //= 2
+        character_limit = max(MIN_CAP_CHARS, character_limit // 2)
     return entry
 
 
@@ -1376,12 +1525,29 @@ def shed_undeliverable_entries(
             continue
         event_name = entry.get("hook_event_name", "") if isinstance(entry, dict) else ""
         if event_name in PROTECTED_HOOK_EVENTS:
-            shrunk_entries[index] = _shrink_entry(entry, max_bytes)
+            shrunk = _shrink_entry(entry, max_bytes)
+            shrunk_size = _entry_size(shrunk)
+            if shrunk_size <= max_bytes:
+                shrunk_entries[index] = shrunk
+                debug_log(
+                    "shed_undeliverable_entries: shrank an oversize turn-start "
+                    f"envelope envelope={event_name} bytes={_entry_size(entry)} "
+                    f"shrunk_bytes={shrunk_size} "
+                    "reason=dropping-it-would-renumber-later-turns"
+                )
+                continue
+            # Shrinking failed, so the envelope is reduced to its identifiers
+            # instead. It is not dropped: on a runtime with no per-turn key a
+            # boundary's position is its identity, and removing one renumbers
+            # every turn behind it. It is not kept either -- no request holding
+            # it fits, so the batch would never advance past it.
+            shrunk_entries[index] = _reduce_to_identity(entry, max_bytes)
             debug_log(
-                "shed_undeliverable_entries: shrank an oversize turn-start "
-                f"envelope envelope={event_name} bytes={_entry_size(entry)} "
-                f"shrunk_bytes={_entry_size(shrunk_entries[index])} "
-                "reason=dropping-it-would-renumber-later-turns"
+                "shed_undeliverable_entries: reduced an oversize turn-start "
+                f"envelope to its identifiers envelope={event_name} "
+                f"bytes={_entry_size(entry)} "
+                f"reduced_bytes={_entry_size(shrunk_entries[index])} "
+                "reason=could-not-be-shrunk-and-dropping-it-would-renumber"
             )
             continue
         undeliverable_indexes.add(index)
@@ -1659,6 +1825,13 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
             headers={
                 "Content-Type": "application/json",
                 "X-MCP-Token": api_key,
+                # Also headers, not only the body: a request refused for
+                # its size is never parsed, so the body's copy is exactly
+                # what cannot be read when the sender matters most.
+                # Version alone does not identify a build -- several
+                # share one -- so the source travels with it.
+                "X-Plugin-Version": PLUGIN_VERSION,
+                "X-Plugin-Source": DEBUG_LOG_TAG,
             },
             method="POST",
         )
@@ -2306,7 +2479,9 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                         elif block_type == "tool_use":
                             current["_tool_calls_by_id"][block.get("id", "")] = {
                                 "tool_name": block.get("name", ""),
-                                "tool_input": block.get("input"),
+                                "tool_input": _cap_strings(
+                                    block.get("input"), _SUBAGENT_FIELD_CAP
+                                ),
                                 "tool_output": None,
                                 "tool_call_id": block.get("id", ""),
                                 "started_at": ts,
