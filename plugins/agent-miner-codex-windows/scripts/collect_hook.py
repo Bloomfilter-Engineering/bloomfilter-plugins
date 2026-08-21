@@ -52,19 +52,24 @@ SUPPORTED_HOOKS: set[str] = {
 UPLOAD_HOOKS: set[str] = {"SessionEnd", "Stop", "SubagentStop"}
 # Events whose upload is handed to a detached child instead of run inline.
 #
-# SessionEnd is the one hook this runtime gives a materially shorter deadline
-# than the others: it runs during teardown, so the runtime defaults it to 1s and
-# refuses to honour more than 3s, clamping anything larger. A blocking POST
-# cannot fit that -- the socket timeout alone is several times the whole budget --
-# so an inline upload here is killed mid-request rather than timing out inside
-# this process, which loses the batch and logs nothing. Detaching lets the hook
-# return at once and the upload finish independently.
+# Both are events whose deadline is shorter than one upload can take. A POST can
+# spend the whole socket timeout on its own and the oversize-retry budget on top,
+# so an inline upload on either is killed mid-request rather than timing out
+# inside this process -- which loses the batch and logs nothing, because the kill
+# lands before the code that would record it. Detaching lets the hook return at
+# once and the upload finish independently.
 #
-# Raising the manifest timeout is not an option even where the runtime would
-# allow it: the timeout is part of the identity this runtime hashes to record
-# hook trust, so editing it marks every already-installed hook as modified and
-# silently stops all capture until each user re-approves it.
-DETACHED_UPLOAD_HOOKS: set[str] = {"SessionEnd"}
+# SessionEnd runs during teardown, so this runtime defaults it to 1s and refuses
+# to honour more than 3s, clamping anything larger. SubagentStop is given longer
+# but still less than the upload's worst case, and it blocks the parent agent
+# from collecting the subagent's result while it runs.
+#
+# Raising the manifest timeout is not the fix, even for SubagentStop where this
+# runtime would allow it: the timeout is part of the identity this runtime hashes
+# to record hook trust, so editing it marks every already-installed hook as
+# modified and silently stops all capture until each user re-approves it. That
+# makes the collector the only side that can change.
+DETACHED_UPLOAD_HOOKS: set[str] = {"SessionEnd", "SubagentStop"}
 # argv[1] sentinel marking a re-invocation of this script as the detached
 # uploader. Chosen so it can never collide with a real hook event name.
 DETACHED_UPLOAD_ARG: str = "__bloomfilter_detached_upload__"

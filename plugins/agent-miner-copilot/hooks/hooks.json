@@ -93,7 +93,7 @@
             "windows": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"${CLAUDE_PLUGIN_ROOT}\\hooks\\run-hook.ps1\" SubagentStop",
             "osx": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SubagentStop",
             "linux": "sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SubagentStop",
-            "timeout": 10
+            "timeout": 30
           }
         ]
       }
