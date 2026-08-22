@@ -974,6 +974,13 @@ def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
 # rather than looking like an envelope that arrived this sparse.
 _REDUCED_MARKER_KEY = "bloomfilter_reduced"
 
+# The envelope subtree every runtime's ingest config reads a turn's tokens from,
+# and the key inside it that holds them. Reduction keeps these when it keeps
+# nothing else: a turn without them is not merely thinner, it is a turn that
+# reads as free.
+_TOKEN_SOURCE_KEY = "transcript_summary"
+_TOKEN_CALLS_KEY = "api_calls"
+
 
 def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     """Return a stand-in small enough to send for an envelope nothing can carry.
@@ -1007,6 +1014,19 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
         elif key == "payload" and isinstance(value, dict):
             reduced[key] = {k: v for k, v in value.items() if keep(v)}
             reduced[key][_REDUCED_MARKER_KEY] = OVERSIZE_TEXT_MARKER
+        elif key == _TOKEN_SOURCE_KEY and isinstance(value, dict):
+            # The token counts stay, whatever else goes. They are what the cost
+            # of the turn is computed from, and they are numbers, so keeping them
+            # costs almost nothing however large the text was. Dropping them does
+            # not make the turn look incomplete -- it still finalises, still sets
+            # its end time, and reads as a turn that genuinely cost nothing.
+            preserved = {
+                inner_key: inner_value
+                for inner_key, inner_value in value.items()
+                if inner_key == _TOKEN_CALLS_KEY
+            }
+            preserved[_REDUCED_MARKER_KEY] = OVERSIZE_TEXT_MARKER
+            reduced[key] = _cap_strings(preserved, MIN_CAP_CHARS)
         else:
             reduced[key] = OVERSIZE_TEXT_MARKER
     if _entry_size(reduced) <= max_bytes:
