@@ -1006,6 +1006,7 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
     Returns:
         A reduced copy, small enough to send.
     """
+
     def keep(value: Any) -> bool:
         if isinstance(value, str):
             return len(value) <= MIN_CAP_CHARS
@@ -1076,7 +1077,9 @@ def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     # floor, or the text left cannot show what was cut. A zero here means every
     # string sits below the depth the capping walk descends to, where whole
     # containers are replaced instead -- so the floor is the right starting cap.
-    character_limit = max(MIN_CAP_CHARS, min(affordable, longest_string or MIN_CAP_CHARS))
+    character_limit = max(
+        MIN_CAP_CHARS, min(affordable, longest_string or MIN_CAP_CHARS)
+    )
 
     # Halve on any round that does not fit, whether or not it made progress. A
     # round that changes nothing does not mean the envelope cannot be cut: the
