@@ -112,7 +112,9 @@ FOREIGN_RUNTIME_MARKERS = frozenset({"cursor_version"})
 # envelope count, while tool-output envelopes dominate the bytes, so shedding by
 # size alone would discard precisely the records the upload exists to deliver.
 # Never evicted.
-PROTECTED_HOOK_EVENTS = frozenset({"UserPromptSubmit", "Stop", "SessionStart"})
+PROTECTED_HOOK_EVENTS = frozenset(
+    {"UserPromptSubmit", "Stop", "SessionStart", "SessionEnd"}
+)
 
 # Evicted only after every unprotected envelope is gone: the subagent-stop
 # envelope carries a child session's token totals, but can grow to a large share
@@ -722,6 +724,12 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
 def clear_batch(session_id: str) -> None:
     """Clear a session batch without deleting the coordination file."""
     rewrite_batch(session_id, [])
+    # The delivered-prefix marker counts leading records of this batch, so it
+    # goes with them. A count left standing over an emptied file describes
+    # records that no longer exist, and the next sitting's records are then
+    # measured against it and read as already delivered.
+    with contextlib.suppress(OSError):
+        os.unlink(_delivered_marker_path(session_id))
 
 
 def _decode_batch_line(line: str) -> tuple[bool, Any]:

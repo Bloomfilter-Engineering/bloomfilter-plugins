@@ -891,6 +891,12 @@ def clear_batch(session_id: str) -> None:
         None.
     """
     rewrite_batch(session_id, [])
+    # The delivered-prefix marker counts leading records of this batch, so it
+    # goes with them. A count left standing over an emptied file describes
+    # records that no longer exist, and the next sitting's records are then
+    # measured against it and read as already delivered.
+    with contextlib.suppress(OSError):
+        os.unlink(_delivered_marker_path(session_id))
 
 
 def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:

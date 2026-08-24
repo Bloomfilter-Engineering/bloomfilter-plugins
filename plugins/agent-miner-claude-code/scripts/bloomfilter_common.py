@@ -1048,12 +1048,12 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
 
 
 def cleanup_session_batch(session_id: str) -> None:
-    """Delete a session's drained batch file and its upload lock sidecar.
+    """Delete a session's drained batch file and both of its sidecars.
 
     :func:`drop_leading_entries` leaves a zero-byte file behind once it drains
-    the last records, and :func:`upload_slot` leaves a zero-byte lock file, so
-    without this every session would leak two directory entries into
-    ``batches/`` forever.
+    the last records, :func:`upload_slot` leaves a zero-byte lock file, and the
+    same drain writes a delivered marker, so without this every session would
+    leak three directory entries into ``batches/`` forever.
 
     Only safe to call at SessionEnd, which is terminal: no tool hook can still
     be appending and no further upload will start. Emptiness is checked while
@@ -1098,6 +1098,11 @@ def cleanup_session_batch(session_id: str) -> None:
                         os.remove(batch_file_path)
                     except OSError:
                         pass
+                    # The delivered marker counts records in the file just
+                    # removed, so it goes with it. The age sweep iterates
+                    # ``*.jsonl`` only, so a marker left here is never reaped.
+                    with contextlib.suppress(OSError):
+                        os.unlink(_delivered_marker_path(session_id))
                 else:
                     debug_log(
                         f"cleanup: session_id={session_id} batch retained "

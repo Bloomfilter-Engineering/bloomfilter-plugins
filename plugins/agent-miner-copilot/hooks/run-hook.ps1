@@ -102,14 +102,15 @@ $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
 # Force UTF-8 (no BOM) on the child's redirected streams so non-ASCII payload
 # and the JSON response round-trip correctly regardless of the Windows code page.
-# Guarded: Standard*Encoding needs .NET Framework >= 4.6.1; with
-# $ErrorActionPreference = "Stop" a missing property would abort the hook and
-# silently drop the event on an older host.
-try {
+# StandardInputEncoding only exists on .NET Core 2.1+ (PowerShell 7+); Windows
+# PowerShell 5.1 runs on .NET Framework, where assigning it throws. Set it only
+# when present and keep the other two unconditional: sharing one try meant the
+# throw skipped the two properties that do exist on 5.1, and the catch hid it.
+if ($startInfo.PSObject.Properties.Name -contains "StandardInputEncoding") {
     $startInfo.StandardInputEncoding = $utf8NoBom
-    $startInfo.StandardOutputEncoding = $utf8NoBom
-    $startInfo.StandardErrorEncoding = $utf8NoBom
-} catch {}
+}
+$startInfo.StandardOutputEncoding = $utf8NoBom
+$startInfo.StandardErrorEncoding = $utf8NoBom
 $process.StartInfo = $startInfo
 
 $null = $process.Start()
