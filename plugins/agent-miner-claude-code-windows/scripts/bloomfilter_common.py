@@ -1608,6 +1608,14 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
     """
 
     def keep(value: Any) -> bool:
+        """Whether a value is small enough to carry into the reduced envelope.
+
+        Args:
+            value: A value read off the envelope being reduced.
+
+        Returns:
+            True for a short string or any scalar, False for anything larger.
+        """
         if isinstance(value, str):
             return len(value) <= MIN_CAP_CHARS
         return isinstance(value, (int, float, bool)) or value is None
@@ -1617,7 +1625,11 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
         if keep(value):
             reduced[key] = value
         elif key == "payload" and isinstance(value, dict):
-            reduced[key] = {k: v for k, v in value.items() if keep(v)}
+            reduced[key] = {
+                inner_key: inner_value
+                for inner_key, inner_value in value.items()
+                if keep(inner_value)
+            }
             reduced[key][_REDUCED_MARKER_KEY] = OVERSIZE_TEXT_MARKER
         elif key == _TOKEN_SOURCE_KEY and isinstance(value, dict):
             # The token counts stay, whatever else goes. They are what the cost
@@ -1808,16 +1820,13 @@ def evict_low_value_entries(
     total_bytes = sum(_entry_size(entry) for entry in entries)
     if total_bytes <= max_bytes:
         return entries
-    # Skipped only when there is nothing left to shed. An earlier version bailed
-    # as soon as the protected envelopes alone exceeded *max_bytes*, on the
-    # grounds that eviction could no longer reach the budget — but reaching it
-    # was never the contract. This function sheds down to the protected floor
-    # and returns whatever that leaves, as the docstring says. Bailing early
-    # kept the file above MAX_BATCH_RETAINED_BYTES, which is the threshold
-    # `_append_is_refused` actually gates on, so every later unprotected record
-    # was refused for the rest of the session while sheddable bytes sat in the
-    # file. Measured on a cumulative build: 1,602,750 bytes retained with
-    # 801,840 sheddable, needing only 102,750 to come back under the cap.
+    # Skipped only when there is nothing left to shed — never merely because the
+    # protected envelopes alone exceed *max_bytes*. Reaching the budget was
+    # never the contract: this function sheds down to the protected floor and
+    # returns whatever that leaves. Bailing out early would keep the file above
+    # MAX_BATCH_RETAINED_BYTES, which is the threshold `_append_is_refused`
+    # gates on, so every later unprotected record would be refused for the rest
+    # of the session while sheddable bytes sat in the file.
     protected_bytes = sum(
         _entry_size(entry)
         for entry in entries
@@ -2138,13 +2147,13 @@ def _extract_api_calls(scoped_entries: list[dict[str, Any]]) -> list[dict[str, A
         cache-write TTL split, model, response id and stop reason.
     """
     usage_entries = [
-        e
-        for e in scoped_entries
+        entry
+        for entry in scoped_entries
         if (
-            e.get("type") == "assistant"
-            or e.get("message", {}).get("role") == "assistant"
+            entry.get("type") == "assistant"
+            or entry.get("message", {}).get("role") == "assistant"
         )
-        and e.get("message", {}).get("usage")
+        and entry.get("message", {}).get("usage")
     ]
     if not usage_entries:
         return []
