@@ -55,7 +55,7 @@ UPLOAD_HOOKS: set[str] = {"SessionEnd", "Stop", "SubagentStop"}
 # Both are events whose deadline is shorter than one upload can take. A POST can
 # spend the whole socket timeout on its own and the oversize-retry budget on top,
 # so an inline upload on either is killed mid-request rather than timing out
-# inside this process -- which loses the batch and logs nothing, because the kill
+# inside this process — which loses the batch and logs nothing, because the kill
 # lands before the code that would record it. Detaching lets the hook return at
 # once and the upload finish independently.
 #
@@ -127,8 +127,8 @@ def _spawn_detached_upload(session_id: str) -> bool:
 
     The child re-invokes this script with :data:`DETACHED_UPLOAD_ARG` and runs
     :func:`_upload_session_batch`. It is started in its own session / process
-    group with its standard streams detached, so the runtime quitting -- and the
-    signals teardown delivers to the hook's process group -- cannot reach it.
+    group with its standard streams detached, so the runtime quitting — and the
+    signals teardown delivers to the hook's process group — cannot reach it.
 
     The hook's envelope is already appended to the batch before this is called,
     so the child's snapshot includes it.
@@ -145,7 +145,7 @@ def _spawn_detached_upload(session_id: str) -> bool:
     # Only ever an absolute interpreter path, never a bare name: a process
     # started without an explicit executable path searches the current directory
     # before PATH on some platforms, and the current directory here is whatever
-    # project the user has open -- so a repository shipping its own
+    # project the user has open — so a repository shipping its own
     # python-named binary would run instead.
     if not interpreter or not os.path.isabs(interpreter):
         debug_log(
@@ -199,7 +199,7 @@ def main() -> None:
 
     # Refuse a session that belongs to a different runtime. Editors discover and
     # execute each other's collectors, so this one can be handed hooks from a
-    # session it does not serve -- and whichever collector uploads first is the
+    # session it does not serve — and whichever collector uploads first is the
     # one the whole session gets filed under, so acting on it silently records
     # another tool's work as this one's.
     if is_foreign_runtime_payload(payload):
@@ -496,7 +496,7 @@ def _upload_session_batch(session_id: str) -> None:
     # Budget starts before the first request, not after it: the first
     # request can burn the whole socket timeout on its own, so a clock
     # started afterwards lets the worst case run past the hook's limit
-    # and be killed mid-flight -- the failure this budget exists to stop.
+    # and be killed mid-flight — the failure this budget exists to stop.
     retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
     upload_result = upload_batch(api_url, api_key, batch_payload)
 

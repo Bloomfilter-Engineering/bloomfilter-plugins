@@ -160,7 +160,7 @@ def main() -> None:
 
     # Refuse a session that belongs to a different runtime. Editors discover and
     # execute each other's collectors, so this one can be handed hooks from a
-    # session it does not serve -- and whichever collector uploads first is the
+    # session it does not serve — and whichever collector uploads first is the
     # one the whole session gets filed under, so acting on it silently records
     # another tool's work as this one's.
     if is_foreign_runtime_payload(payload):
@@ -332,7 +332,7 @@ def main() -> None:
         api_url = resolve_api_url()
 
         # One upload per session at a time. Three different hooks can trigger an
-        # upload here, and the session-end one drains what it sent *by count* --
+        # upload here, and the session-end one drains what it sent *by count* —
         # so two overlapping uploads would each snapshot the same records, each
         # send them, and the drain would then remove records that were never
         # sent. The slot also makes eviction and upload mutually exclusive, for
@@ -374,7 +374,7 @@ def main() -> None:
             # Budget starts before the first request, not after it: the first
             # request can burn the whole socket timeout on its own, so a clock
             # started afterwards lets the worst case run past the hook's limit
-            # and be killed mid-flight -- the failure this budget exists to stop.
+            # and be killed mid-flight — the failure this budget exists to stop.
             retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
             upload_result = upload_batch(api_url, api_key, batch_payload)
 
@@ -392,7 +392,7 @@ def main() -> None:
                 upload_result = upload_batch(api_url, api_key, batch_payload)
 
             # A lone envelope the server will not accept can never be delivered,
-            # and it sits at the head of the file -- so keeping it blocks every
+            # and it sits at the head of the file — so keeping it blocks every
             # record behind it forever, which is the same permanent strand in a
             # new place. Drop exactly that one and let the rest through. Loud,
             # because it is real data loss: an envelope this large is usually one
@@ -403,8 +403,7 @@ def main() -> None:
                 # truncated write can leave a bare scalar at the head. This is
                 # the path that unblocks a stuck batch, so raising here would
                 # both escape into the hook and leave the blocker in place —
-                # the exact permanent strand it exists to prevent. The module
-                # guards the same hazard in seven other places; this was missed.
+                # the exact permanent strand it exists to prevent.
                 head_entry = pending_entries[0]
                 oversize_event = (
                     head_entry.get("hook_event_name", "?")

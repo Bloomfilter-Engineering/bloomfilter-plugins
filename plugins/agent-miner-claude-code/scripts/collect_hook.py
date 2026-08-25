@@ -70,7 +70,7 @@ def main() -> None:
 
     # Refuse a session that belongs to a different runtime. Editors discover and
     # execute each other's collectors, so this one can be handed hooks from a
-    # session it does not serve -- and whichever collector uploads first is the
+    # session it does not serve — and whichever collector uploads first is the
     # one the whole session gets filed under, so acting on it silently records
     # another tool's work as this one's.
     if is_foreign_runtime_payload(payload):
@@ -109,7 +109,7 @@ def main() -> None:
         # by sweeping first: the age threshold is weeks, and a batch that old
         # belongs to a session that ended long ago.
         #
-        # The session being started is passed so its own batch is spared -- at
+        # The session being started is passed so its own batch is spared — at
         # this point it has appended nothing, so a resumed session's file still
         # carries the previous sitting's mtime and would look stale.
         sweep_stale_batches(current_session_id=session_id)
@@ -352,7 +352,7 @@ def upload_and_drain(
         # Budget starts before the first request, not after it: the first
         # request can burn the whole socket timeout on its own, so a clock
         # started afterwards lets the worst case run past the hook's limit
-        # and be killed mid-flight -- the failure this budget exists to stop.
+        # and be killed mid-flight — the failure this budget exists to stop.
         retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
         upload_result = upload_batch(api_url, api_key, batch_payload)
 
@@ -380,8 +380,7 @@ def upload_and_drain(
             # truncated write can leave a bare scalar at the head. This is the
             # path that unblocks a stuck batch, so raising here would both
             # escape into the hook and leave the blocker in place — the exact
-            # permanent strand it exists to prevent. The module guards the same
-            # hazard in seven other places; this site was missed.
+            # permanent strand it exists to prevent.
             head_entry = pending_entries[0]
             oversize_event = (
                 head_entry.get("hook_event_name", "?")

@@ -12,7 +12,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator
 from datetime import datetime, timezone
-from typing import Optional, IO, Any
+from typing import IO, Any
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -100,8 +100,8 @@ UPLOAD_TOO_LARGE = "too-large"
 TURN_START_HOOK_EVENTS = frozenset({"UserPromptSubmit"})
 
 # Keys that identify the runtime a payload came from. Agent runtimes discover and
-# execute each other's collectors -- one editor runs another's hook scripts from
-# its plugin cache -- so a collector can be handed a session it does not serve.
+# execute each other's collectors — one editor runs another's hook scripts from
+# its plugin cache — so a collector can be handed a session it does not serve.
 # It has no way to tell from the event name alone, because the names it is given
 # are its own. These are payload keys observed in every envelope from another
 # runtime and in none from this one, so their presence identifies the sender.
@@ -377,7 +377,7 @@ def _sanitize_api_key(raw_key: str) -> str:
         or not key.isprintable()
         or not key.isascii()
     ):
-        # Never log or echo the value -- only that one was rejected, and why.
+        # Never log or echo the value — only that one was rejected, and why.
         debug_log(
             "resolve_api_key: rejected a key containing control characters "
             f"(length={len(key)})"
@@ -468,7 +468,7 @@ def _resolve_git_executable() -> str:
     git = shutil.which("git")
     # shutil.which can return a cwd-relative hit, and a process started
     # without an explicit executable path searches the current directory
-    # before PATH on some platforms -- so an opened folder shipping its own
+    # before PATH on some platforms — so an opened folder shipping its own
     # git-named binary would run instead of the real one. An absolute path
     # to a real file is the only form that cannot be redirected that way.
     if git and os.path.isabs(git) and os.path.isfile(git):
@@ -595,7 +595,7 @@ def get_batch_dir() -> str:
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
     # environment, so anything able to set that for the editor's child processes
-    # could point this at a directory of its choosing -- and the age sweep below
+    # could point this at a directory of its choosing — and the age sweep below
     # deletes files there. A real directory is the only thing safe to sweep.
     if os.path.islink(batch_dir):
         debug_log(f"get_batch_dir: refusing symlinked batch dir {batch_dir}")
@@ -696,8 +696,8 @@ def read_delivered_prefix(session_id: str) -> int:
     if not recorded:
         return 0
     # Clamped against what is actually on disk. The mark only ever rises, so
-    # anything that shortens the file without lowering it -- a truncation, a
-    # rewrite, an eviction on a build with no decrement path -- leaves a count
+    # anything that shortens the file without lowering it — a truncation, a
+    # rewrite, an eviction on a build with no decrement path — leaves a count
     # describing records that no longer exist, and the next sitting's fresh
     # records are then measured against it and read as already delivered.
     return min(recorded, _batch_record_count(session_id))
@@ -737,7 +737,7 @@ def _reduce_delivered_prefix(session_id: str, removed_record_count: int) -> None
     The count is a position, not a set of record ids, so it only means anything
     relative to the current file. Draining without lowering it leaves a count
     larger than the file holds, and eviction reads that count to decide which
-    records have already been delivered safely -- so a session that appends again
+    records have already been delivered safely — so a session that appends again
     has its fresh, unsent records treated as already sent.
 
     Args:
@@ -853,7 +853,7 @@ def _evict_batch_if_oversize(session_id: str, batch_file_size: int) -> None:
     # Read before the lock is taken. Counting the file's records
     # re-opens it, and on Windows the lock below is mandatory, so
     # doing this from inside the locked region fails and the count
-    # reads as zero -- which would bound eviction to nothing.
+    # reads as zero — which would bound eviction to nothing.
     delivered_count = read_delivered_prefix(session_id)
     with open(get_batch_file(session_id), "a+") as batch_file_handle:
         with _lock_file(batch_file_handle, exclusive=True):
@@ -1048,7 +1048,7 @@ def is_foreign_runtime_payload(payload: Any) -> bool:
     One runtime is known to discover and execute another's collector, handing it
     hooks from a session it does not serve. Nothing downstream can undo that: the
     collector stamps its own runtime on the batch, and the collector that uploads
-    first is the one the session is filed under -- so a session belonging to one
+    first is the one the session is filed under — so a session belonging to one
     tool is recorded, whole, against another.
 
     Identification is by a marker key that only one runtime puts in its payloads.
@@ -1089,14 +1089,6 @@ def _entry_size(entry: dict[str, Any]) -> int:
         return MAX_UPLOAD_BYTES + 1
 
 
-# Known limitation: a single turn larger than one request cannot be sent
-# turn-aligned, because no cut inside it lands on a terminator. The chunks after
-# the first then open mid-turn, and the collector only builds events for a turn
-# it has seen the start of, so those events are discarded even though the
-# request succeeds. Measured on real batches, a small percentage of turns are
-# individually larger than the request budget. Closing this needs the collector
-# to resolve a mid-turn request by its turn key the way it already resolves a
-# turn-end; it cannot be fixed here alone.
 def select_uploadable_prefix(
     entries: list[dict[str, Any]], max_bytes: int = MAX_UPLOAD_BYTES
 ) -> int:
@@ -1123,6 +1115,14 @@ def select_uploadable_prefix(
     half the byte-greedy count guarantees every request makes real progress, and
     still aligns on turn boundaries in the ordinary case where a turn is far
     smaller than a request.
+
+    Known limitation: a turn larger than one request cannot be sent
+    turn-aligned, because no cut inside it lands on a terminator. The chunks
+    after the first then open mid-turn, and the collector only builds events
+    for a turn it has seen the start of, so those events are discarded even
+    though the request succeeds. Closing this needs the collector to resolve a
+    mid-turn request by its turn key the way it already resolves a turn-end; it
+    cannot be fixed here alone.
 
     Args:
         entries: The batch snapshot, in file order.
@@ -1173,7 +1173,7 @@ OVERSIZE_TEXT_MARKER = "…[bloomfilter: truncated, envelope exceeded request bu
 
 # How deep the capping walk will descend. A hook payload is data of unknown
 # shape, and this runs several frames down inside an append, so an unbounded
-# walk could exhaust the stack -- which would abort the append's eviction and
+# walk could exhaust the stack — which would abort the append's eviction and
 # leave the batch growing, the very thing eviction exists to stop. Anything
 # deeper than this is replaced wholesale rather than descended into.
 MAX_CAP_DEPTH = 40
@@ -1235,7 +1235,7 @@ def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
 
     Walks nested dicts and lists so a long value buried in a tool result is
     reached as readily as one at the top level. Structure and identifiers are
-    preserved and only text length changes -- including dictionary keys, because
+    preserved and only text length changes — including dictionary keys, because
     an envelope whose bulk sits in its keys could otherwise never be made to fit.
 
     Args:
@@ -1336,7 +1336,7 @@ def _collapse_token_calls(api_calls: Any) -> list[dict[str, Any]]:
                 continue
             # Everything else the call carries is described rather than summed,
             # so the newest value wins. Enumerating the known ones instead would
-            # silently drop any the collector learns to send later -- and an
+            # silently drop any the collector learns to send later — and an
             # installed build folds against whatever server it is pointed at,
             # which is not necessarily the one it was written against.
             if value is None or isinstance(value, (int, float, bool)):
@@ -1346,7 +1346,7 @@ def _collapse_token_calls(api_calls: Any) -> list[dict[str, Any]]:
         last_index[model_name] = index
     # Ordered by where each model was LAST seen, not where it was first.
     # The turn takes its model and identifiers from the newest call the server
-    # is willing to price, and that walk skips placeholder and unnamed models --
+    # is willing to price, and that walk skips placeholder and unnamed models —
     # so when the final call is one it skips, it continues back to the newest
     # real one. Preserving only the very last position would leave the models
     # behind it in first-seen order and the walk would stop on the wrong one.
@@ -1390,7 +1390,7 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
             # The token counts stay, whatever else goes. They are what the cost
             # of the turn is computed from, and they are numbers, so keeping them
             # costs almost nothing however large the text was. Dropping them does
-            # not make the turn look incomplete -- it still finalises, still sets
+            # not make the turn look incomplete — it still finalises, still sets
             # its end time, and reads as a turn that genuinely cost nothing.
             preserved = {
                 inner_key: inner_value
@@ -1426,7 +1426,7 @@ def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
 
     Used for the envelopes that must not be dropped whatever their size. Halves
     the text budget until the envelope fits, so identifiers, event name and
-    structure survive while the bulk -- which is always long text -- is cut.
+    structure survive while the bulk — which is always long text — is cut.
     Stops early once a round stops making the envelope smaller, because each
     round is a full copy and a full measurement: an envelope made of very many
     medium-length values cannot be shrunk by capping length, and grinding
@@ -1443,8 +1443,8 @@ def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
 
     # First cap: the share of the budget each capped string can afford, counting
     # what capping *adds* as well as what it keeps. The marker is measured in
-    # encoded bytes, not characters -- it opens with an ellipsis, which JSON
-    # escapes to six bytes -- and each string also carries its quotes and
+    # encoded bytes, not characters — it opens with an ellipsis, which JSON
+    # escapes to six bytes — and each string also carries its quotes and
     # separator. Under-counting either lands the first round a few bytes over
     # budget on exactly the envelopes this exists for.
     per_string_cost = _MARKER_ENCODED_BYTES + _STRING_PUNCTUATION_BYTES
@@ -1453,7 +1453,7 @@ def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     # Never above the longest string, or the round cuts nothing; never below the
     # floor, or the text left cannot show what was cut. A zero here means every
     # string sits below the depth the capping walk descends to, where whole
-    # containers are replaced instead -- so the floor is the right starting cap.
+    # containers are replaced instead — so the floor is the right starting cap.
     character_limit = max(
         MIN_CAP_CHARS, min(affordable, longest_string or MIN_CAP_CHARS)
     )
@@ -1520,7 +1520,7 @@ def shed_undeliverable_entries(
             # Shrinking failed, so the envelope is reduced to its identifiers
             # instead. It is not dropped: on a runtime with no per-turn key a
             # boundary's position is its identity, and removing one renumbers
-            # every turn behind it. It is not kept either -- no request holding
+            # every turn behind it. It is not kept either — no request holding
             # it fits, so the batch would never advance past it.
             shrunk_entries[index] = _reduce_to_identity(entry, max_bytes)
             debug_log(
@@ -1549,7 +1549,7 @@ def shed_undeliverable_entries(
 def evict_low_value_entries(
     entries: list[dict[str, Any]],
     max_bytes: int = MAX_UPLOAD_BYTES,
-    eviction_limit: Optional[int] = None,
+    eviction_limit: int | None = None,
 ) -> list[dict[str, Any]]:
     """Drop the least valuable envelopes until the batch fits *max_bytes*.
 
@@ -1653,7 +1653,7 @@ def _evict_locked_batch(
             Passed in rather than read here: the caller holds an exclusive lock
             on this file, and on Windows that lock is mandatory, so re-opening
             the file from inside the locked region fails and the count would
-            read as zero -- bounding eviction to nothing.
+            read as zero — bounding eviction to nothing.
 
     Returns:
         How many entries were evicted. Zero leaves the file untouched.
@@ -1692,7 +1692,7 @@ def _evict_locked_batch(
         )
     # Flush while the lock is still held. truncate() takes effect at once but the
     # rewritten lines only leave Python's buffer at close, which happens after the
-    # lock is released -- so an append that legitimately takes the lock in that
+    # lock is released — so an append that legitimately takes the lock in that
     # gap would write at the truncated end and have this tail land on top of it,
     # corrupting both records.
     batch_file_handle.flush()
@@ -1715,6 +1715,8 @@ def sweep_stale_batches(
 
     Args:
         max_age_seconds: Age beyond which a batch file is removed.
+        current_session_id: Session being started, whose own batch is spared.
+            Empty to sweep every stale batch.
 
     Returns:
         How many files were deleted. Zero when the directory is absent.
@@ -1866,8 +1868,8 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
                 # Also headers, not only the body: a request refused for
                 # its size is never parsed, so the body's copy is exactly
                 # what cannot be read when the sender matters most.
-                # Version alone does not identify a build -- several
-                # share one -- so the source travels with it.
+                # Version alone does not identify a build — several
+                # share one — so the source travels with it.
                 "X-Plugin-Version": PLUGIN_VERSION,
                 "X-Plugin-Source": DEBUG_LOG_TAG,
             },
