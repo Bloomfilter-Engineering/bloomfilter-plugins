@@ -399,7 +399,18 @@ def main() -> None:
             # enormous tool result, and the alternative is losing the whole
             # session's telemetry.
             if upload_result == UPLOAD_TOO_LARGE and len(pending_entries) == 1:
-                oversize_event = pending_entries[0].get("hook_event_name", "?")
+                # A batch line only has to be valid JSON to be read back, so a
+                # truncated write can leave a bare scalar at the head. This is
+                # the path that unblocks a stuck batch, so raising here would
+                # both escape into the hook and leave the blocker in place —
+                # the exact permanent strand it exists to prevent. The module
+                # guards the same hazard in seven other places; this was missed.
+                head_entry = pending_entries[0]
+                oversize_event = (
+                    head_entry.get("hook_event_name", "?")
+                    if isinstance(head_entry, dict)
+                    else "?"
+                )
                 debug_log(
                     f"upload dropping undeliverable envelope: "
                     f"hook={hook_event_name} session_id={session_id} "

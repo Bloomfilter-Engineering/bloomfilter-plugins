@@ -40,7 +40,15 @@ def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
     Cursor uses ``message.content`` as a list of typed blocks; tolerate a bare
     string (wrapped as a single text block) and missing content (empty list).
     """
-    content = (entry.get("message") or {}).get("content")
+    # The format is undocumented and every other shape here is skipped rather
+    # than trusted, so a message that is not an object is skipped too. `or {}`
+    # only covers a falsy message; a non-empty string passes straight through
+    # and raises on .get, which escapes extract_subagent_conversation — its
+    # caller catches OSError only — and costs the whole subagentStop capture.
+    message = entry.get("message")
+    if not isinstance(message, dict):
+        return []
+    content = message.get("content")
     if isinstance(content, str):
         return [{"type": "text", "text": content}]
     if isinstance(content, list):
@@ -54,10 +62,12 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
     Joins the line's text blocks, then unwraps ``<user_query>...</user_query>``
     if present (the opening prompt carries a ``<timestamp>`` prefix we drop).
     """
+    # The text must be a string as well as present: the join below raises
+    # TypeError on anything else, and a block is only required to be a dict.
     texts = [
         block.get("text", "")
         for block in _content_blocks(entry)
-        if block.get("type") == "text" and block.get("text")
+        if block.get("type") == "text" and isinstance(block.get("text"), str)
     ]
     joined = "\n".join(text for text in texts if text).strip()
     match = _USER_QUERY_RE.search(joined)

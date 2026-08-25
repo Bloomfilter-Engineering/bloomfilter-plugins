@@ -1075,6 +1075,14 @@ _PRICED_CALL_FIELDS = (
     "cache_read_tokens",
     "cache_creation_tokens",
     "cache_creation_1h",
+    # Emitted per call by the claude-code extractor alongside the 1h split, and
+    # by codex from its rollout. Neither is read by the collector today, which is
+    # why they were missed: the list was derived from what the server sums. They
+    # are counts, so folding them as "newest call wins" would report one call's
+    # value as the turn's total the moment anything starts reading them, and only
+    # on the reduced path. Summed here regardless of who consumes them.
+    "cache_creation_5m",
+    "reasoning_output_tokens",
 )
 
 # A descriptive value is carried only while it stays small. This fold runs on
@@ -1357,21 +1365,26 @@ def evict_low_value_entries(
     total_bytes = sum(_entry_size(entry) for entry in entries)
     if total_bytes <= max_bytes:
         return entries
-    # Protected envelopes are never shed, so once they alone exceed the budget no
-    # amount of eviction can reach it. Shedding anyway would destroy the newest
-    # tool traffic — including the envelope just appended — buy nothing, and pay
-    # a full rewrite on every subsequent append. Leave the batch as it is and let
-    # the upload prefix drain it down instead.
+    # Skipped only when there is nothing left to shed. An earlier version bailed
+    # as soon as the protected envelopes alone exceeded *max_bytes*, on the
+    # grounds that eviction could no longer reach the budget — but reaching it
+    # was never the contract. This function sheds down to the protected floor
+    # and returns whatever that leaves, as the docstring says. Bailing early
+    # kept the file above MAX_BATCH_RETAINED_BYTES, which is the threshold
+    # `_append_is_refused` actually gates on, so every later unprotected record
+    # was refused for the rest of the session while sheddable bytes sat in the
+    # file. Measured on a cumulative build: 1,602,750 bytes retained with
+    # 801,840 sheddable, needing only 102,750 to come back under the cap.
     protected_bytes = sum(
         _entry_size(entry)
         for entry in entries
         if isinstance(entry, dict)
         and entry.get("hook_event_name") in PROTECTED_HOOK_EVENTS
     )
-    if protected_bytes > max_bytes:
+    if protected_bytes >= total_bytes:
         debug_log(
-            "evict_low_value_entries: skipped, protected envelopes alone "
-            f"exceed the budget protected_bytes={protected_bytes} "
+            "evict_low_value_entries: skipped, nothing unprotected to shed "
+            f"protected_bytes={protected_bytes} total_bytes={total_bytes} "
             f"max_bytes={max_bytes}"
         )
         return entries

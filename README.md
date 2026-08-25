@@ -160,11 +160,23 @@ Windows PowerShell:
 $env:BLOOMFILTER_URL = "https://bloomfilter.example.com"
 ```
 
-To make the Windows environment variable persistent:
+To make the Windows environment variables persistent:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("BLOOMFILTER_API_KEY", "YOUR_API_KEY", "User")
 ```
+
+If you set `BLOOMFILTER_URL`, persist it too — `$env:` sets it for the current
+PowerShell process only, and the plugins read the environment variable ahead of
+the config file, so an unpersisted URL silently falls back to the hosted service
+after a restart:
+
+```powershell
+[Environment]::SetEnvironmentVariable("BLOOMFILTER_URL", "https://bloomfilter.example.com", "User")
+```
+
+Alternatively, set the `url` key in the config file instead, which persists on
+its own.
 
 Restart your agent application after changing persistent environment variables.
 
