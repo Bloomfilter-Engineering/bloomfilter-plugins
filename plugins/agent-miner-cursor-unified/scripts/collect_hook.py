@@ -409,17 +409,22 @@ def main() -> None:
                 drop_leading_entries(session_id, 1)
                 return
 
-        # Record how much of the batch the collector has now seen. A runtime that
-        # re-sends everything uses this to know which records belong to turns it
-        # has already closed, and so which are safe to shed when the file grows.
-        if upload_result == UPLOAD_OK:
-            record_delivered_prefix(session_id, len(pending_entries))
+            # Record how much of the batch the collector has now seen. A runtime
+            # that re-sends everything uses this to know which records belong to
+            # turns it has already closed, and so which are safe to shed when the
+            # file grows.
+            #
+            # Inside the slot, not after it: the drain below removes by count,
+            # and a pass that shifts the head between the snapshot and the drain
+            # would redirect it onto records that were never sent.
+            if upload_result == UPLOAD_OK:
+                record_delivered_prefix(session_id, len(pending_entries))
 
-            if upload_result == UPLOAD_OK and hook_event_name == "sessionEnd":
-                # Remove only the entries we just uploaded; any hook appended
-                # concurrently during the upload is preserved for the next batch
-                # rather than truncated away.
-                drop_leading_entries(session_id, len(pending_entries))
+                if hook_event_name == "sessionEnd":
+                    # Remove only the entries we just uploaded; any hook appended
+                    # concurrently during the upload is preserved for the next
+                    # batch rather than truncated away.
+                    drop_leading_entries(session_id, len(pending_entries))
 
 
 if __name__ == "__main__":

@@ -111,7 +111,9 @@ FOREIGN_RUNTIME_MARKERS = frozenset({"cursor_version"})
 # envelope count, while tool-output envelopes dominate the bytes, so shedding by
 # size alone would discard precisely the records the upload exists to deliver.
 # Never evicted.
-PROTECTED_HOOK_EVENTS = frozenset({"UserPromptSubmit", "Stop", "SessionStart"})
+PROTECTED_HOOK_EVENTS = frozenset(
+    {"UserPromptSubmit", "Stop", "SessionStart", "PreCompact"}
+)
 
 # Evicted only after every unprotected envelope is gone: the subagent-stop
 # envelope carries a child session's token totals, but can grow to a large share
@@ -622,6 +624,61 @@ def _delivered_marker_path(session_id: str) -> str:
     return get_batch_file(session_id) + ".sent"
 
 
+def _batch_file_size(session_id: str) -> int:
+    """Return the batch file's size in bytes.
+
+    Args:
+        session_id: Session whose batch file is being measured.
+
+    Returns:
+        The size on disk, or 0 when there is no file yet.
+    """
+    try:
+        return os.path.getsize(get_batch_file(session_id))
+    except OSError:
+        return 0
+
+
+def _batch_record_count(session_id: str) -> int:
+    """Return how many records the batch file currently holds.
+
+    Counted by line rather than parsed: the caller needs a bound, and parsing
+    the whole batch on every read would cost more than the guard it feeds.
+
+    Args:
+        session_id: Session whose batch file is being counted.
+
+    Returns:
+        The number of records on disk, or 0 when there is no file yet.
+    """
+    try:
+        with open(get_batch_file(session_id), "rb") as batch_file_handle:
+            return sum(1 for line in batch_file_handle if line.strip())
+    except OSError:
+        return 0
+
+
+def _read_delivered_marker(session_id: str) -> int:
+    """Return the delivered count exactly as recorded, without clamping.
+
+    The stored number is what the decrement has to work from. Reading it back
+    through the clamp would subtract a removal twice: the clamp already lowers
+    the value to the records now on disk, and the caller then subtracts the
+    same removal again.
+
+    Args:
+        session_id: Session to read the marker for.
+
+    Returns:
+        The recorded count, or 0 when there is no usable marker.
+    """
+    try:
+        with open(_delivered_marker_path(session_id)) as marker_file:
+            return max(0, int(marker_file.read().strip() or 0))
+    except (OSError, ValueError):
+        return 0
+
+
 def read_delivered_prefix(session_id: str) -> int:
     """Return how many leading records of a batch have been delivered.
 
@@ -635,11 +692,15 @@ def read_delivered_prefix(session_id: str) -> int:
     Returns:
         The recorded count, or 0 when there is no usable marker.
     """
-    try:
-        with open(_delivered_marker_path(session_id)) as marker_file:
-            return max(0, int(marker_file.read().strip() or 0))
-    except (OSError, ValueError):
+    recorded = _read_delivered_marker(session_id)
+    if not recorded:
         return 0
+    # Clamped against what is actually on disk. The mark only ever rises, so
+    # anything that shortens the file without lowering it -- a truncation, a
+    # rewrite, an eviction on a build with no decrement path -- leaves a count
+    # describing records that no longer exist, and the next sitting's fresh
+    # records are then measured against it and read as already delivered.
+    return min(recorded, _batch_record_count(session_id))
 
 
 def record_delivered_prefix(session_id: str, record_count: int) -> None:
@@ -688,7 +749,7 @@ def _reduce_delivered_prefix(session_id: str, removed_record_count: int) -> None
     """
     if removed_record_count <= 0:
         return
-    remaining = max(read_delivered_prefix(session_id) - removed_record_count, 0)
+    remaining = max(_read_delivered_marker(session_id) - removed_record_count, 0)
     marker_path = _delivered_marker_path(session_id)
     try:
         with open(marker_path, "w") as marker_file:
@@ -789,13 +850,24 @@ def _evict_batch_if_oversize(session_id: str, batch_file_size: int) -> None:
     """
     if batch_file_size <= MAX_BATCH_RETAINED_BYTES:
         return
+    # Read before the lock is taken. Counting the file's records
+    # re-opens it, and on Windows the lock below is mandatory, so
+    # doing this from inside the locked region fails and the count
+    # reads as zero -- which would bound eviction to nothing.
+    delivered_count = read_delivered_prefix(session_id)
     with open(get_batch_file(session_id), "a+") as batch_file_handle:
         with _lock_file(batch_file_handle, exclusive=True):
             evicted_count = _evict_locked_batch(
                 batch_file_handle,
                 BATCH_EVICTION_TARGET_BYTES,
                 session_id,
+                delivered_count,
             )
+    # Eviction may only touch records the collector has already
+    # accepted, so everything it removed was inside the delivered
+    # prefix. Leaving the mark where it was would make the records
+    # that slid into those positions read as already sent.
+    _reduce_delivered_prefix(session_id, evicted_count)
     if evicted_count:
         debug_log(
             f"_evict_batch_if_oversize: evicted={evicted_count} session_id={session_id}"
@@ -853,7 +925,11 @@ def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
             f.flush()
             batch_file_size = f.tell()
     if platform.system() != "Windows":
-        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        # A batch already written must not lose its shed to a failed
+        # permission change: the record is on disk either way, and the
+        # shed below is the only thing that keeps the file appendable.
+        with contextlib.suppress(OSError):
+            os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
     _evict_batch_if_oversize(session_id, batch_file_size)
 
 
@@ -928,7 +1004,16 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
             # released, so an append in that gap would be written over.
             f.flush()
     if platform.system() != "Windows":
-        os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+        # A batch already written must not lose its shed to a failed
+        # permission change: the record is on disk either way, and the
+        # shed below is the only thing that keeps the file appendable.
+        with contextlib.suppress(OSError):
+            os.chmod(batch_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
+    # Growing the file by rewriting it bypasses the append path's
+    # size check, and on a build that refuses appends by size that
+    # leaves the batch too large to accept a record and with nothing
+    # left to shed it.
+    _evict_batch_if_oversize(session_id, _batch_file_size(session_id))
 
 
 # ---------------------------------------------------------------------------
@@ -1194,6 +1279,72 @@ _TOKEN_SOURCE_KEY = "transcript_summary"
 _TOKEN_CALLS_KEY = "api_calls"
 
 
+_PRICED_CALL_FIELDS = (
+    "input_tokens",
+    "output_tokens",
+    "cache_read_tokens",
+    "cache_creation_tokens",
+    "cache_creation_1h",
+)
+
+# A descriptive value is carried only while it stays small. This fold runs on
+# the path that exists because an envelope was too large to send, so carrying an
+# unbounded string would defeat the reduction it is part of.
+_MAX_CARRIED_SCALAR_CHARS = 256
+
+
+def _collapse_token_calls(api_calls: Any) -> list[dict[str, Any]]:
+    """Aggregate a turn's API calls into one record per model.
+
+    The collector reports every call a turn made, which on a long turn is
+    thousands of records and larger than a whole request. The server sums them
+    per model and reads a handful of scalars off the last one, so one summed
+    record per model carries the same cost and the same identifiers while
+    staying bounded by the number of models the turn used.
+
+    Args:
+        api_calls: The token source's call list, as the collector wrote it.
+
+    Returns:
+        One aggregated call per model, ordered so the last call's model is
+        still last.
+    """
+    if not isinstance(api_calls, list):
+        return []
+    per_model: dict[str, dict[str, Any]] = {}
+    last_index: dict[str, int] = {}
+    for index, call in enumerate(api_calls):
+        if not isinstance(call, dict):
+            continue
+        model_name = call.get("model") or ""
+        bucket = per_model.setdefault(model_name, {"model": model_name})
+        for field_name in _PRICED_CALL_FIELDS:
+            value = call.get(field_name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                continue
+            bucket[field_name] = bucket.get(field_name, 0) + int(value)
+        for field_name, value in call.items():
+            if field_name == "model" or field_name in _PRICED_CALL_FIELDS:
+                continue
+            # Everything else the call carries is described rather than summed,
+            # so the newest value wins. Enumerating the known ones instead would
+            # silently drop any the collector learns to send later -- and an
+            # installed build folds against whatever server it is pointed at,
+            # which is not necessarily the one it was written against.
+            if value is None or isinstance(value, (int, float, bool)):
+                bucket[field_name] = value
+            elif isinstance(value, str) and len(value) <= _MAX_CARRIED_SCALAR_CHARS:
+                bucket[field_name] = value
+        last_index[model_name] = index
+    # Ordered by where each model was LAST seen, not where it was first.
+    # The turn takes its model and identifiers from the newest call the server
+    # is willing to price, and that walk skips placeholder and unnamed models --
+    # so when the final call is one it skips, it continues back to the newest
+    # real one. Preserving only the very last position would leave the models
+    # behind it in first-seen order and the walk would stop on the wrong one.
+    return [per_model[name] for name in sorted(per_model, key=last_index.__getitem__)]
+
+
 def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
     """Return a stand-in small enough to send for an envelope nothing can carry.
 
@@ -1246,10 +1397,20 @@ def _reduce_to_identity(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]
         return reduced
     # Even the identifiers do not fit, which takes thousands of them. Keep what
     # names the envelope and nothing else, so its position is still held.
-    return {
+    minimal: dict[str, Any] = {
         "hook_event_name": entry.get("hook_event_name", ""),
         _REDUCED_MARKER_KEY: OVERSIZE_TEXT_MARKER,
     }
+    # The token counts come with it. Dropping them here reintroduces exactly
+    # what the branch above exists to prevent: the turn still finalises, still
+    # sets its end time, and reads as a turn that genuinely cost nothing.
+    # Collapsed per model so what is kept stays bounded however long the turn.
+    token_source = entry.get(_TOKEN_SOURCE_KEY)
+    if isinstance(token_source, dict):
+        collapsed_calls = _collapse_token_calls(token_source.get(_TOKEN_CALLS_KEY))
+        if collapsed_calls:
+            minimal[_TOKEN_SOURCE_KEY] = {_TOKEN_CALLS_KEY: collapsed_calls}
+    return minimal
 
 
 def _shrink_entry(entry: dict[str, Any], max_bytes: int) -> dict[str, Any]:
@@ -1458,7 +1619,10 @@ def evict_low_value_entries(
 
 
 def _evict_locked_batch(
-    batch_file_handle: IO[str], max_bytes: int, session_id: str
+    batch_file_handle: IO[str],
+    max_bytes: int,
+    session_id: str,
+    delivered_count: int,
 ) -> int:
     """Shed low-value envelopes from a batch file whose lock is already held.
 
@@ -1471,8 +1635,12 @@ def _evict_locked_batch(
     Args:
         batch_file_handle: Handle opened ``a+`` with an exclusive lock held.
         max_bytes: Byte budget the retained entries should fit within.
-        session_id: Session the batch belongs to, used to read how much of it
-            has already been delivered.
+        session_id: Session the batch belongs to, for logging.
+        delivered_count: Leading records the collector has already accepted.
+            Passed in rather than read here: the caller holds an exclusive lock
+            on this file, and on Windows that lock is mandatory, so re-opening
+            the file from inside the locked region fails and the count would
+            read as zero -- bounding eviction to nothing.
 
     Returns:
         How many entries were evicted. Zero leaves the file untouched.
@@ -1493,9 +1661,7 @@ def _evict_locked_batch(
     # retracted rather than merely forgotten.
     eviction_limit = len(deliverable_entries)
     if BATCH_IS_CUMULATIVE:
-        eviction_limit = _safe_eviction_limit(
-            deliverable_entries, read_delivered_prefix(session_id)
-        )
+        eviction_limit = _safe_eviction_limit(deliverable_entries, delivered_count)
     retained_entries = evict_low_value_entries(
         deliverable_entries, max_bytes=max_bytes, eviction_limit=eviction_limit
     )
