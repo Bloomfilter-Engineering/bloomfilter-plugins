@@ -853,6 +853,10 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
             batch_file.truncate()
             for entry in entries:
                 batch_file.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            # Flush inside the lock: truncate lands at once but the rewritten
+            # lines sit in the buffer until close, which is after the lock is
+            # released, so an append in that gap would be written over.
+            batch_file.flush()
     if platform.system() != "Windows":
         # A batch already written must not lose its shed to a failed
         # permission change: the record is on disk either way, and the

@@ -227,7 +227,14 @@ def parse_transcript(path: str) -> dict[str, Any]:
             block_type = block.get("type")
             match block_type:
                 case "text":
-                    text = _REDACTED_RE.sub(" ", block.get("text") or "").strip()
+                    # A truthy non-string reaches re.sub and raises TypeError,
+                    # which escapes to extract_subagent_conversation's blanket
+                    # except and costs the whole subagentStop capture. `or ""`
+                    # only covers the falsy case, so the type is checked here.
+                    raw_text = block.get("text")
+                    if not isinstance(raw_text, str):
+                        continue
+                    text = _REDACTED_RE.sub(" ", raw_text).strip()
                     if text:
                         # Last non-redacted assistant text wins as the response;
                         # earlier ones are intermediate narration.
