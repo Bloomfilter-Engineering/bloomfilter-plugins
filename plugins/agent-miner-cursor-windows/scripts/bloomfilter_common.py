@@ -275,7 +275,13 @@ def read_json_config(path: str, key: str, default: str = "") -> str:
     """
     try:
         with open(path, "r", encoding="utf-8-sig") as config_file:
-            return json.load(config_file).get(key, default) or default
+            value = json.load(config_file).get(key, default)
+        # A hand-edited config can hold any JSON type. A truthy non-string is
+        # not caught by `or default` and would reach .strip() in the api_key
+        # path or URL parsing in the url path, raising out of the caller.
+        if not isinstance(value, str):
+            return default
+        return value or default
     except Exception:
         return default
 
@@ -1447,12 +1453,17 @@ def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
         # marker rather than descended into, so the size still comes down.
         return OVERSIZE_TEXT_MARKER if isinstance(value, (dict, list)) else value
     if isinstance(value, dict):
-        return {
-            _cap_strings(key, character_limit, depth + 1): _cap_strings(
-                item, character_limit, depth + 1
-            )
-            for key, item in value.items()
-        }
+        capped_items: dict[Any, Any] = {}
+        for key, item in value.items():
+            capped_key = _cap_strings(key, character_limit, depth + 1)
+            # Two long keys sharing a capped prefix collapse to one, and the
+            # later value silently replaces the earlier. Keep the original key
+            # for the collider: a longer envelope is recoverable, a dropped
+            # entry is not.
+            if capped_key in capped_items and capped_key != key:
+                capped_key = key
+            capped_items[capped_key] = _cap_strings(item, character_limit, depth + 1)
+        return capped_items
     if isinstance(value, list):
         return [_cap_strings(item, character_limit, depth + 1) for item in value]
     return value
@@ -2086,7 +2097,6 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
             data=data,
             headers={
                 "Content-Type": "application/json",
-                "X-MCP-Token": api_key,
                 # Also headers, not only the body: a request refused for
                 # its size is never parsed, so the body's copy is exactly
                 # what cannot be read when the sender matters most.
@@ -2097,6 +2107,13 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
             },
             method="POST",
         )
+        # Unredirected: urlopen follows redirects with HTTPRedirectHandler,
+        # which copies every ordinary header onto the new request — including
+        # to a different host. Only Content-Length/Content-Type are dropped, so
+        # an ordinary header here would hand the API key to whatever the
+        # configured URL redirects to. add_unredirected_header keeps it on the
+        # first request only.
+        request.add_unredirected_header("X-MCP-Token", api_key)
         with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_S) as response:
             status = response.getcode()
         debug_log(f"upload_batch: response status={status} session_id={session_id}")
