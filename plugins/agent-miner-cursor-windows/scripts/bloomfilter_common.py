@@ -1453,14 +1453,21 @@ def _cap_strings(value: Any, character_limit: int, depth: int = 0) -> Any:
         # marker rather than descended into, so the size still comes down.
         return OVERSIZE_TEXT_MARKER if isinstance(value, (dict, list)) else value
     if isinstance(value, dict):
+        # Capping keys can make two distinct entries collide, and the later
+        # value would then silently replace the earlier. That happens two ways:
+        # two long keys sharing a capped prefix, and a capped key landing on a
+        # short key that is already its own capped form. Reserving the original
+        # keys up front covers both — a capped key is never allowed onto any
+        # original, and originals are unique by construction, so falling back
+        # to one always resolves the clash. A longer envelope is recoverable;
+        # a dropped entry is not.
+        original_keys = set(value)
         capped_items: dict[Any, Any] = {}
         for key, item in value.items():
             capped_key = _cap_strings(key, character_limit, depth + 1)
-            # Two long keys sharing a capped prefix collapse to one, and the
-            # later value silently replaces the earlier. Keep the original key
-            # for the collider: a longer envelope is recoverable, a dropped
-            # entry is not.
-            if capped_key in capped_items and capped_key != key:
+            if capped_key != key and (
+                capped_key in capped_items or capped_key in original_keys
+            ):
                 capped_key = key
             capped_items[capped_key] = _cap_strings(item, character_limit, depth + 1)
         return capped_items
