@@ -18,6 +18,12 @@ def _read_lines(path: str) -> list[dict[str, Any]]:
 
     Opened as UTF-8 with ``errors="replace"`` so a stray byte can't abort the
     whole parse; non-dict JSON values are filtered out.
+
+    Args:
+        path: Transcript JSONL to read.
+
+    Returns:
+        Every line that decoded to a JSON object, in file order.
     """
     entries: list[dict[str, Any]] = []
     with open(path, encoding="utf-8", errors="replace") as transcript_file:
@@ -39,6 +45,12 @@ def _content_blocks(entry: dict[str, Any]) -> list[dict[str, Any]]:
 
     Cursor uses ``message.content`` as a list of typed blocks; tolerate a bare
     string (wrapped as a single text block) and missing content (empty list).
+
+    Args:
+        entry: One decoded transcript line.
+
+    Returns:
+        The line's typed content blocks; empty when there are none to read.
     """
     # The format is undocumented and every other shape here is skipped rather
     # than trusted, so a message that is not an object is skipped too. `or {}`
@@ -61,6 +73,12 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
 
     Joins the line's text blocks, then unwraps ``<user_query>...</user_query>``
     if present (the opening prompt carries a ``<timestamp>`` prefix we drop).
+
+    Args:
+        entry: One decoded user transcript line.
+
+    Returns:
+        The prompt text, unwrapped from ``<user_query>`` when present.
     """
     # The text must be a string as well as present: the join below raises
     # TypeError on anything else, and a block is only required to be a dict.
@@ -79,6 +97,12 @@ def first_user_query(path: str) -> str:
 
     Lets the caller correlate a ``subagentStop`` hook (which knows the ``task``
     but not the child transcript path) to the right ``subagents/*.jsonl`` file.
+
+    Args:
+        path: Transcript JSONL to inspect.
+
+    Returns:
+        The opening user query, or '' when the transcript has none.
     """
     for entry in _read_lines(path):
         if entry.get("role") == "user":
@@ -92,6 +116,12 @@ def is_complete(path: str) -> bool:
     Cursor appends ``{"type": "turn_ended"}`` when the subagent finishes, so its
     presence means the final assistant response is on disk — used to bound the
     flush-race poll in ``extract_subagent_conversation``.
+
+    Args:
+        path: Transcript JSONL to inspect.
+
+    Returns:
+        True once a ``turn_ended`` line is present.
     """
     try:
         return any(entry.get("type") == "turn_ended" for entry in _read_lines(path))
@@ -100,7 +130,14 @@ def is_complete(path: str) -> bool:
 
 
 def _empty_turn(user_prompt: str | None) -> dict[str, Any]:
-    """Return a fresh child-turn accumulator seeded with ``user_prompt``."""
+    """Return a fresh child-turn accumulator seeded with ``user_prompt``.
+
+    Args:
+        user_prompt: Prompt text the new turn is seeded with.
+
+    Returns:
+        A fresh turn accumulator, including internal bookkeeping keys.
+    """
     return {
         "user_prompt": user_prompt,
         "agent_response": None,
@@ -124,6 +161,13 @@ def _finalize(turn: dict[str, Any]) -> dict[str, Any]:
     Prefers the last non-redacted assistant text; falls back to an
     ``UpdateCurrentStep.final_summary`` when the subagent produced only a
     tool-driven completion with no trailing prose.
+
+    Args:
+        turn: Turn accumulator, mutated in place.
+
+    Returns:
+        The same turn, with its final response resolved and internal keys
+        removed.
     """
     final_summary = turn.pop("_final_summary", "")
     if not turn.get("agent_response") and final_summary:
@@ -152,6 +196,12 @@ def parse_transcript(path: str) -> dict[str, Any]:
     What the transcript does not contain bounds what any caller can report:
     no token usage, no tool output (a ``tool_use`` block carries the call
     input only), and no per-message timestamps.
+
+    Args:
+        path: Transcript JSONL to parse.
+
+    Returns:
+        ``{"turns": [...]}`` in the API's child-session shape.
     """
     turns: list[dict[str, Any]] = []
     current: dict[str, Any] | None = None

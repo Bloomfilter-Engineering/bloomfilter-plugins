@@ -100,6 +100,12 @@ def _resolve_session_id(payload: dict) -> str:
 
     Cursor sends ``conversation_id``; ``session_id`` is the claude_code
     fallback so a shared payload shape resolves under either runtime.
+
+    Args:
+        payload: Raw hook payload as delivered on stdin.
+
+    Returns:
+        The session identifier, or '' when the payload carries neither key.
     """
     return payload.get("conversation_id") or payload.get("session_id") or ""
 

@@ -160,7 +160,11 @@ _debug_logger = None  # Lazy-init singleton; populated on first debug_log() call
 
 
 def get_config_dir() -> str:
-    """Return the Bloomfilter config directory for the current platform."""
+    """Return the Bloomfilter config directory for the current platform.
+
+    Returns:
+        Absolute path to the Bloomfilter config directory for this platform.
+    """
     system = platform.system()
     if system == "Windows":
         # A variable that is set but empty must fall back, not resolve to "".
@@ -270,8 +274,8 @@ def read_json_config(path: str, key: str, default: str = "") -> str:
     uses exactly that, so user-created configs land here BOM-prefixed.
     """
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f).get(key, default) or default
+        with open(path, "r", encoding="utf-8-sig") as config_file:
+            return json.load(config_file).get(key, default) or default
     except Exception:
         return default
 
@@ -371,6 +375,9 @@ def read_payload() -> Any:
     Returns the parsed JSON value — normally a dict, but any JSON type is
     possible, so callers must validate the shape (the collect hook checks
     ``isinstance(payload, dict)``). Returns ``{}`` for empty or non-JSON input.
+
+    Returns:
+        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
     """
     if platform.system() == "Windows":
         # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
@@ -391,7 +398,11 @@ def read_payload() -> Any:
 
 
 def _resolve_git_executable() -> str:
-    """Return a git executable path if available, or '' if none is found."""
+    """Return a git executable path if available, or '' if none is found.
+
+    Returns:
+        Absolute path to a usable git executable, or '' when none is found.
+    """
     git = shutil.which("git")
     # shutil.which can return a cwd-relative hit, and a process started
     # without an explicit executable path searches the current directory
@@ -451,14 +462,22 @@ def get_git_branch(project_dir: str) -> str:
 if platform.system() != "Windows":
 
     @contextlib.contextmanager
-    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
-        """Acquire an flock on an open file, release on exit."""
-        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(fp, op)
+    def _lock_file(file_handle: IO, exclusive: bool = True) -> Iterator[None]:
+        """Acquire an flock on an open file, release on exit.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
+        """
+        lock_operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(file_handle, lock_operation)
         try:
             yield
         finally:
-            fcntl.flock(fp, fcntl.LOCK_UN)
+            fcntl.flock(file_handle, fcntl.LOCK_UN)
 
     def _try_lock_exclusive(file_handle: IO) -> None:
         """Take an exclusive lock without waiting for it.
@@ -486,7 +505,7 @@ if platform.system() != "Windows":
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp: IO, exclusive: bool = True) -> Iterator[None]:
+    def _lock_file(file_handle: IO, exclusive: bool = True) -> Iterator[None]:
         """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
 
         msvcrt only supports exclusive locks — the ``exclusive`` arg is
@@ -497,46 +516,53 @@ else:
 
         File position is saved and restored so the lock's seek to offset 0
         does not disturb append-mode writes.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
         """
         try:
-            fp.flush()
+            file_handle.flush()
         except (OSError, ValueError):
             pass
         try:
-            pos = fp.tell()
+            saved_position = file_handle.tell()
         except (OSError, ValueError):
-            pos = None
+            saved_position = None
 
         try:
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
         except OSError as exc:
             print(
                 f"[bloomfilter] Could not acquire batch file lock ({exc}); "
                 "proceeding unsynchronized.",
                 file=sys.stderr,
             )
-            if pos is not None:
+            if saved_position is not None:
                 try:
-                    fp.seek(pos)
+                    file_handle.seek(saved_position)
                 except (OSError, ValueError):
                     pass
             yield
             return
 
         try:
-            if pos is not None:
-                fp.seek(pos)
+            if saved_position is not None:
+                file_handle.seek(saved_position)
             yield
         finally:
             try:
-                fp.seek(0)
-                msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                file_handle.seek(0)
+                msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
             except OSError:
                 pass
-            if pos is not None:
+            if saved_position is not None:
                 try:
-                    fp.seek(pos)
+                    file_handle.seek(saved_position)
                 except (OSError, ValueError):
                     pass
 
@@ -571,7 +597,11 @@ else:
 
 
 def get_batch_dir() -> str:
-    """Return (and create) the batch directory."""
+    """Return (and create) the batch directory.
+
+    Returns:
+        Absolute path to the batch directory, which is created if absent.
+    """
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
     # environment, so anything able to set that for the editor's child processes
@@ -585,7 +615,14 @@ def get_batch_dir() -> str:
 
 
 def get_batch_file(session_id: str) -> str:
-    """Return path to the JSONL batch file for *session_id*."""
+    """Return path to the JSONL batch file for *session_id*.
+
+    Args:
+        session_id: Session whose batch file path is built.
+
+    Returns:
+        Absolute path to that session's JSONL batch file.
+    """
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
         raise ValueError(f"Invalid session_id: {session_id!r}")
@@ -943,18 +980,26 @@ def _terminate_partial_final_line(batch_file_path: str, locked_handle: Any) -> N
 
 
 def append_to_batch(session_id: str, entry: dict) -> None:
-    """Append a single JSON line to the batch file for *session_id*."""
+    """Append a single JSON line to the batch file for *session_id*.
+
+    Args:
+        session_id: Session whose batch file the entry is appended to.
+        entry: The envelope to append, serialized as one JSON line.
+
+    Returns:
+        None.
+    """
     if _append_is_refused(session_id, entry):
         return
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     batch_file_size = 0
-    with open(batch_file, "a") as f:
-        with _lock_file(f, exclusive=True):
-            _terminate_partial_final_line(batch_file, f)
-            f.write(line)
-            f.flush()
-            batch_file_size = f.tell()
+    with open(batch_file, "a") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            _terminate_partial_final_line(batch_file, batch_file_handle)
+            batch_file_handle.write(line)
+            batch_file_handle.flush()
+            batch_file_size = batch_file_handle.tell()
     if platform.system() != "Windows":
         # A batch already written must not lose its shed to a failed
         # permission change: the record is on disk either way, and the
@@ -976,30 +1021,39 @@ def append_to_batch_deduped(
     Cursor fires some hooks (notably ``afterAgentThought``) more than once for a
     single event, microseconds apart in separate processes, so a non-atomic
     check-then-append would race. Returns True if appended, False if skipped.
+
+    Args:
+        session_id: Session whose batch file the entry is appended to.
+        entry: The envelope to append.
+        is_duplicate: Predicate over the existing records; True skips the
+            append.
+
+    Returns:
+        True when the entry was appended, False when it was skipped.
     """
     if _append_is_refused(session_id, entry):
         return False
     batch_file = get_batch_file(session_id)
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
+    with open(batch_file, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
             existing = []
-            for line in f.readlines():
+            for line in batch_file_handle.readlines():
                 is_record, value = _decode_batch_line(line)
                 if is_record:
                     existing.append(value)
             if is_duplicate(existing):
                 return False
             # 'a+' append mode writes at EOF regardless of the read seek above.
-            _terminate_partial_final_line(batch_file, f)
-            f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+            _terminate_partial_final_line(batch_file, batch_file_handle)
+            batch_file_handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
             # Flush before releasing the lock: f.write only buffers in Python,
             # and the lock is released at the end of this block while the file
             # is not closed (flushed) until the outer 'with' exits. Without this
             # the next process could take the lock, reread, miss the append, and
             # write the duplicate anyway — defeating the dedup.
-            f.flush()
-            batch_file_size = f.tell()
+            batch_file_handle.flush()
+            batch_file_size = batch_file_handle.tell()
     if platform.system() != "Windows":
         # A record already written must not lose what follows to a failed
         # permission change: the write succeeded either way, and the step
@@ -1021,6 +1075,12 @@ def _decode_batch_line(line: str) -> tuple[bool, Any]:
     Both ``read_batch`` and ``drop_leading_entries`` route through this so the
     records uploaded and the records drained can never diverge: corrupt lines
     are skipped identically on both sides.
+
+    Args:
+        line: One raw line read back from the batch file.
+
+    Returns:
+        ``(is_record, value)`` as described above.
     """
     stripped = line.strip()
     if not stripped:
@@ -1032,13 +1092,20 @@ def _decode_batch_line(line: str) -> tuple[bool, Any]:
 
 
 def read_batch(session_id: str) -> list[dict]:
-    """Read all entries from the batch file and return the list (no delete)."""
+    """Read all entries from the batch file and return the list (no delete).
+
+    Args:
+        session_id: Session whose batch is read.
+
+    Returns:
+        The decoded entries in file order; empty when there is no batch.
+    """
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
         return []
-    with open(batch_file, "r") as f:
-        with _lock_file(f, exclusive=False):
-            lines = f.readlines()
+    with open(batch_file, "r") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=False):
+            lines = batch_file_handle.readlines()
     entries = []
     for line in lines:
         is_record, value = _decode_batch_line(line)
@@ -1053,14 +1120,21 @@ def rewrite_batch(session_id: str, entries: list[dict]) -> None:
     Opens with ``a+`` so the file is not truncated until *after* the
     exclusive lock is acquired. Concurrent ``append_to_batch`` calls
     block on the same lock and never lose a line.
+
+    Args:
+        session_id: Session whose batch file is replaced.
+        entries: The entries to write, in order.
+
+    Returns:
+        None.
     """
     batch_file = get_batch_file(session_id)
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
-            f.truncate()
+    with open(batch_file, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
+            batch_file_handle.truncate()
             for entry in entries:
-                f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                batch_file_handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
     if platform.system() != "Windows":
         # A batch already written must not lose its shed to a failed
         # permission change: the record is on disk either way, and the
@@ -1080,6 +1154,12 @@ def clear_batch(session_id: str) -> None:
     Delegates to ``rewrite_batch`` so the truncation is performed while
     holding the exclusive lock. Leaves a zero-byte file rather than
     deleting; ``read_batch`` returns ``[]`` for both cases.
+
+    Args:
+        session_id: Session whose batch contents are discarded.
+
+    Returns:
+        None.
     """
     rewrite_batch(session_id, [])
     # The delivered-prefix marker counts leading records of this batch, so it
@@ -1107,16 +1187,23 @@ def drop_leading_entries(session_id: str, count: int) -> None:
     ``_decode_batch_line``), so corrupt or blank lines in the leading region are
     discarded without consuming the drop count — otherwise a corrupt line could
     leave an already-uploaded entry behind to be re-sent next batch.
+
+    Args:
+        session_id: Session whose batch file is trimmed.
+        count: How many leading entries to remove.
+
+    Returns:
+        None.
     """
     if count <= 0:
         return
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
         return
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
-            lines = f.readlines()
+    with open(batch_file, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
+            lines = batch_file_handle.readlines()
             kept = []
             dropped = 0
             for line in lines:
@@ -1126,13 +1213,13 @@ def drop_leading_entries(session_id: str, count: int) -> None:
                         dropped += 1
                     continue
                 kept.append(line)
-            f.seek(0)
-            f.truncate()
-            f.writelines(kept)
+            batch_file_handle.seek(0)
+            batch_file_handle.truncate()
+            batch_file_handle.writelines(kept)
             # Flush inside the lock: truncate lands at once but the kept lines
             # sit in the buffer until close, which is after the lock is released,
             # so an append in that gap would be written over.
-            f.flush()
+            batch_file_handle.flush()
     if platform.system() != "Windows":
         # A record already written must not lose what follows to a failed
         # permission change: the write succeeded either way, and the step
@@ -1884,6 +1971,12 @@ def _sanitize_url_for_log(url: str) -> str:
 
     debug.log is user-local but lives next to config.json; sanitization keeps
     embedded credentials or signed query params out of the rotating log.
+
+    Args:
+        url: The URL about to be written to the debug log.
+
+    Returns:
+        The URL reduced to scheme, host, optional port, and path.
     """
     parts = urllib.parse.urlsplit(url or "")
     netloc = parts.hostname or ""
@@ -1984,7 +2077,7 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
     )
 
     try:
-        req = urllib.request.Request(
+        request = urllib.request.Request(
             full_url,
             data=data,
             headers={
@@ -2000,8 +2093,8 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT_S) as resp:
-            status = resp.getcode()
+        with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_S) as response:
+            status = response.getcode()
         debug_log(f"upload_batch: response status={status} session_id={session_id}")
         if not 200 <= status < 300:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
@@ -2050,7 +2143,11 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
 
 
 def utcnow_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string."""
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        The current UTC time as an ISO 8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -2065,6 +2162,12 @@ def _cap_text(value: Any) -> Any:
     Subagent transcripts can carry very large tool inputs / responses. Cap them
     so a single batch upload stays bounded, mirroring the Codex/Claude Code
     plugins and the backend's field expectations.
+
+    Args:
+        value: Candidate field value; non-strings are returned untouched.
+
+    Returns:
+        The value, truncated with a marker when it exceeds the field cap.
     """
     if not isinstance(value, str):
         return value
@@ -2081,6 +2184,12 @@ def _cap_conversation(conversation: dict[str, Any]) -> None:
     so oversized non-string outputs are serialized and truncated to keep the
     upload bounded. ``tool_input`` is left raw (matches the main-session
     ToolCall shape).
+
+    Args:
+        conversation: Parsed child conversation, mutated in place.
+
+    Returns:
+        None.
     """
     for turn in conversation.get("turns") or []:
         if not isinstance(turn, dict):
@@ -2156,7 +2265,7 @@ def find_subagent_transcript(parent_transcript_path: str, task: str) -> str | No
 
 
 def _read_child_batch(
-    child_conv_id: str,
+    child_conversation_id: str,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """Return a subagent's tool calls and thinking from its stray batch.
 
@@ -2175,9 +2284,16 @@ def _read_child_batch(
         ``postToolUse`` seen before the thought — used to interleave it back into
         the transcript's tool sequence.
     Both empty on any error or if the batch is absent.
+
+    Args:
+        child_conversation_id: Conversation id of the subagent whose stray
+            batch is read.
+
+    Returns:
+        ``(tool_calls, thinkings)``; both empty when no stray batch exists.
     """
     try:
-        entries = read_batch(child_conv_id)
+        entries = read_batch(child_conversation_id)
     except Exception:
         return [], []
     tool_calls: list[dict[str, Any]] = []
@@ -2219,18 +2335,35 @@ def _attach_thinking(
     the tool_calls index the thought should render before (``len(tool_calls)`` =
     end of turn). Applied to the first turn that has tool calls (Cursor subagents
     are effectively single-turn).
+
+    Args:
+        conversation: Parsed child conversation, mutated in place.
+        thinkings: Thought records carrying their ``preceding_tools`` count.
+        batch_tool_names: Tool names that actually fired ``postToolUse``, used
+            to map a thought's count onto the transcript's tool sequence.
+
+    Returns:
+        None.
     """
     if not thinkings:
         return
     turns = conversation.get("turns") or []
     target = next(
-        (t for t in turns if t.get("tool_calls")), turns[0] if turns else None
+        (turn for turn in turns if turn.get("tool_calls")), turns[0] if turns else None
     )
     if target is None:
         return
     tool_calls = target.get("tool_calls") or []
 
     def _position_for(preceding: int) -> int:
+        """Return the tool index a thought with *preceding* tools belongs before.
+
+        Args:
+            preceding: How many ``postToolUse`` events preceded the thought.
+
+        Returns:
+            Index into the turn's tool calls, clamped to the sequence length.
+        """
         seen = 0
         for index, tool_call in enumerate(tool_calls):
             if tool_call.get("tool_name", "") in batch_tool_names:
@@ -2241,10 +2374,10 @@ def _attach_thinking(
 
     target["thinking"] = [
         {
-            "content": _cap_text(t["content"]),
-            "position": _position_for(t["preceding_tools"]),
+            "content": _cap_text(turn["content"]),
+            "position": _position_for(turn["preceding_tools"]),
         }
-        for t in thinkings
+        for turn in thinkings
     ]
 
 
@@ -2259,6 +2392,13 @@ def _merge_tool_outputs(
     Transcript-only tools (e.g. Glob, UpdateCurrentStep, which fire no
     ``postToolUse``) keep ``tool_output = None``; surplus batch calls with no
     transcript match are dropped.
+
+    Args:
+        conversation: Parsed child conversation, mutated in place.
+        batch_tool_calls: Tool calls from the stray batch, supplying outputs.
+
+    Returns:
+        None.
     """
     queues: dict[str, deque] = defaultdict(deque)
     for batch_call in batch_tool_calls:
@@ -2330,21 +2470,28 @@ def extract_subagent_conversation(
         # Enrich the transcript (tool inputs only, no thinking) with the outputs
         # and thinking captured in the subagent's own stray hook batch, keyed by
         # the child conversation id (the transcript's filename stem).
-        child_conv_id = os.path.splitext(os.path.basename(path))[0]
-        tool_calls, thinkings = _read_child_batch(child_conv_id)
+        child_conversation_id = os.path.splitext(os.path.basename(path))[0]
+        tool_calls, thinkings = _read_child_batch(child_conversation_id)
         _merge_tool_outputs(result, tool_calls)
         _attach_thinking(
             result, thinkings, {tc.get("tool_name", "") for tc in tool_calls}
         )
         _cap_conversation(result)
         if cleanup_child_batch:
-            _delete_child_batch(child_conv_id)
+            _delete_child_batch(child_conversation_id)
     return result
 
 
-def _delete_child_batch(child_conv_id: str) -> None:
-    """Best-effort remove a subagent's orphaned stray hook batch file."""
+def _delete_child_batch(child_conversation_id: str) -> None:
+    """Best-effort remove a subagent's orphaned stray hook batch file.
+
+    Args:
+        child_conversation_id: Conversation id whose stray batch is removed.
+
+    Returns:
+        None.
+    """
     try:
-        os.remove(get_batch_file(child_conv_id))
+        os.remove(get_batch_file(child_conversation_id))
     except (OSError, ValueError):
         pass

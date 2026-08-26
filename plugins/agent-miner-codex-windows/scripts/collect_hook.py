@@ -112,7 +112,14 @@ def _resolve_project_dir(payload: dict[str, Any]) -> str:
 
 
 def _resolve_session_id(payload: dict[str, Any]) -> str:
-    """Pick the session identifier from the payload, preferring `session_id`."""
+    """Pick the session identifier from the payload, preferring `session_id`.
+
+    Args:
+        payload: Raw hook payload as delivered on stdin.
+
+    Returns:
+        The session identifier, or '' when the payload carries neither key.
+    """
     return _first_string(
         [
             payload.get("session_id", ""),

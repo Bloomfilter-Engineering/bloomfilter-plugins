@@ -427,8 +427,6 @@ if __name__ == "__main__":
             main()
     except Exception as exc:
         try:
-            from bloomfilter_common import debug_log
-
             debug_log(
                 f"collect_hook: unhandled exception type={type(exc).__name__} "
                 f"message={exc!s}"

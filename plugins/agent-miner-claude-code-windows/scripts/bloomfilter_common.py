@@ -181,7 +181,11 @@ TRANSCRIPT_READ_BYTES = 8_000_000
 
 
 def get_config_dir():
-    """Return the Bloomfilter config directory for the current platform."""
+    """Return the Bloomfilter config directory for the current platform.
+
+    Returns:
+        Absolute path to the Bloomfilter config directory for this platform.
+    """
     system = platform.system()
     if system == "Windows":
         # A variable that is set but empty must fall back, not resolve to "".
@@ -259,8 +263,8 @@ def read_json_config(path, key, default=""):
     snippet uses exactly that, so user-created configs land here BOM-prefixed.
     """
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f).get(key, default) or default
+        with open(path, "r", encoding="utf-8-sig") as config_file:
+            return json.load(config_file).get(key, default) or default
     except Exception:
         return default
 
@@ -356,6 +360,9 @@ def read_payload():
     Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
     pipes to a native executable can prefix stdout with a UTF-8 BOM on
     Windows PowerShell 5.1, which would otherwise break json.loads.
+
+    Returns:
+        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -1031,6 +1038,9 @@ def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
     Args:
         session_id: Session the entry belongs to.
         entry: The hook envelope to persist. Must be JSON-serializable.
+
+    Returns:
+        None.
     """
     if _append_is_refused(session_id, entry):
         return
@@ -1124,6 +1134,9 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
     Args:
         session_id: Session whose batch is rewritten.
         entries: Entries to write, in order. An empty list empties the file.
+
+    Returns:
+        None.
     """
     batch_file_path = get_batch_file(session_id)
     with open(batch_file_path, "a+") as batch_file_handle:
@@ -1240,6 +1253,9 @@ def drop_leading_entries(session_id: str, record_count: int) -> None:
         record_count: How many leading records to remove, normally
             ``len(entries)`` from the snapshot that was just uploaded. Values of
             zero or less are a no-op.
+
+    Returns:
+        None.
     """
     if record_count <= 0:
         return
@@ -2127,7 +2143,11 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
 
 
 def utcnow_iso():
-    """Return the current UTC time as an ISO 8601 string."""
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        The current UTC time as an ISO 8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -2237,6 +2257,12 @@ def extract_transcript_summary(transcript_path):
     """Parse transcript JSONL and return a condensed token summary.
 
     Returns a dict with an ``api_calls`` list, or None on failure.
+
+    Args:
+        transcript_path: Path to the runtime's transcript JSONL.
+
+    Returns:
+        The summary dict, or None when the transcript cannot be parsed.
     """
     if not transcript_path or not os.path.exists(transcript_path):
         return None
@@ -2267,27 +2293,30 @@ def extract_transcript_summary(transcript_path):
         # the newest one begins; a tool result is not a prompt, so it does not
         # open a turn.
         turn_start_indexes = []
-        for i, entry in enumerate(entries):
+        for index, entry in enumerate(entries):
             if entry.get("type") != "user":
                 continue
             if entry.get("toolUseResult"):
                 continue
-            msg = entry.get("message", {})
-            content = msg.get("content", "")
+            message = entry.get("message", {})
+            content = message.get("content", "")
             if isinstance(content, list) and all(
-                isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
             ):
                 continue
-            turn_start_indexes.append(i)
+            turn_start_indexes.append(index)
 
-        last_user_idx = turn_start_indexes[-1] if turn_start_indexes else -1
+        last_user_index = turn_start_indexes[-1] if turn_start_indexes else -1
 
         # Entries of the newest turn. When the window holds no prompt at all the
         # turn began before it: the calls are still reported on the legacy field
         # so nothing is lost, but they are NOT grouped, because attributing them
         # to a turn we cannot name is what made one message id ship under two
         # different prompt ids across consecutive hooks.
-        turn_entries = entries[last_user_idx + 1 :] if last_user_idx >= 0 else entries
+        turn_entries = (
+            entries[last_user_index + 1 :] if last_user_index >= 0 else entries
+        )
 
         api_calls = _extract_api_calls(turn_entries)
         session_title = _extract_session_title(entries)
@@ -2311,11 +2340,11 @@ def extract_transcript_summary(transcript_path):
         tool_use_count = 0
         # Seed with the turn's user-prompt timestamp (it sits just before
         # turn_entries) so the FIRST thought's duration spans from the prompt.
-        prev_ts = (
-            entries[last_user_idx].get("timestamp") if last_user_idx >= 0 else None
+        previous_timestamp = (
+            entries[last_user_index].get("timestamp") if last_user_index >= 0 else None
         )
         for entry in turn_entries:
-            ts = entry.get("timestamp")
+            timestamp = entry.get("timestamp")
             is_assistant = (
                 entry.get("type") == "assistant"
                 or entry.get("message", {}).get("role") == "assistant"
@@ -2332,8 +2361,8 @@ def extract_transcript_summary(transcript_path):
                             thinking.append(
                                 _thinking_entry(
                                     tool_use_count,
-                                    prev_ts,
-                                    ts,
+                                    previous_timestamp,
+                                    timestamp,
                                     content=_cap_text(text),
                                 )
                             )
@@ -2344,20 +2373,28 @@ def extract_transcript_summary(transcript_path):
                             # the model reasoned (mirrors the Codex case).
                             thinking.append(
                                 _thinking_entry(
-                                    tool_use_count, prev_ts, ts, encrypted=True
+                                    tool_use_count,
+                                    previous_timestamp,
+                                    timestamp,
+                                    encrypted=True,
                                 )
                             )
                     elif block_type == "redacted_thinking":
                         thinking.append(
-                            _thinking_entry(tool_use_count, prev_ts, ts, encrypted=True)
+                            _thinking_entry(
+                                tool_use_count,
+                                previous_timestamp,
+                                timestamp,
+                                encrypted=True,
+                            )
                         )
                     elif block_type == "tool_use":
                         tool_use_count += 1
             # Track the previous entry's timestamp (from ANY entry, incl. tool
             # results) so a thinking block's duration spans from the real prior
             # event, not just the prior assistant line.
-            if ts:
-                prev_ts = ts
+            if timestamp:
+                previous_timestamp = timestamp
 
         # Everything here is the newest turn only. A turn whose own end hook
         # never fired is recovered by the next prompt instead, which reports the
@@ -2418,7 +2455,7 @@ def _parse_iso_ts(value: Any) -> datetime | None:
         return None
 
 
-def _duration_ms(start_ts: str | None, end_ts: str | None) -> int | None:
+def _duration_ms(start_timestamp: str | None, end_timestamp: str | None) -> int | None:
     """Best-effort elapsed milliseconds between two ISO timestamps.
 
     Args:
@@ -2429,8 +2466,8 @@ def _duration_ms(start_ts: str | None, end_ts: str | None) -> int | None:
         int | None: Non-negative milliseconds, or None if either timestamp is
             missing/unparseable or the span is negative (clock skew).
     """
-    start = _parse_iso_ts(start_ts)
-    end = _parse_iso_ts(end_ts)
+    start = _parse_iso_ts(start_timestamp)
+    end = _parse_iso_ts(end_timestamp)
     if not start or not end:
         return None
     ms = int((end - start).total_seconds() * 1000)
@@ -2439,8 +2476,8 @@ def _duration_ms(start_ts: str | None, end_ts: str | None) -> int | None:
 
 def _thinking_entry(
     position: int,
-    prev_ts: str | None,
-    ts: str | None,
+    previous_timestamp: str | None,
+    timestamp: str | None,
     content: str | None = None,
     encrypted: bool = False,
 ) -> dict:
@@ -2466,11 +2503,11 @@ def _thinking_entry(
         entry["content"] = content
     if encrypted:
         entry["encrypted"] = True
-    if ts:
+    if timestamp:
         # The block's own timestamp — lets the backend order thinking
         # chronologically among the turn's tool calls (true interleave).
-        entry["started_at"] = ts
-    duration = _duration_ms(prev_ts, ts)
+        entry["started_at"] = timestamp
+    duration = _duration_ms(previous_timestamp, timestamp)
     if duration:  # omit missing (None) and meaningless zero-length spans
         entry["duration_ms"] = duration
     return entry
@@ -2572,7 +2609,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 return False
             content = entry.get("message", {}).get("content", "")
             if isinstance(content, list) and all(
-                isinstance(c, dict) and c.get("type") == "tool_result" for c in content
+                isinstance(block, dict) and block.get("type") == "tool_result"
+                for block in content
             ):
                 return False
             return True
@@ -2583,11 +2621,11 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 return content
             if isinstance(content, list):
                 parts = [
-                    c.get("text", "")
-                    for c in content
-                    if isinstance(c, dict) and c.get("type") == "text"
+                    block.get("text", "")
+                    for block in content
+                    if isinstance(block, dict) and block.get("type") == "text"
                 ]
-                return "\n".join(p for p in parts if p)
+                return "\n".join(part for part in parts if part)
             return ""
 
         turns = []
@@ -2614,16 +2652,16 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             turn["thinking"] = turn.pop("_thinking", [])
             return turn
 
-        prev_ts = None
+        previous_timestamp = None
         for entry in entries:
             entry_type = entry.get("type")
-            msg = entry.get("message", {})
-            ts = entry.get("timestamp")
+            message = entry.get("message", {})
+            timestamp = entry.get("timestamp")
             # Previous entry's timestamp (duration start for a thinking block),
             # captured before advancing prev_ts to this entry.
-            entry_prev_ts = prev_ts
-            if ts:
-                prev_ts = ts
+            entry_previous_timestamp = previous_timestamp
+            if timestamp:
+                previous_timestamp = timestamp
 
             if _is_real_user_prompt(entry):
                 if current is not None:
@@ -2633,8 +2671,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                     "agent_response": None,
                     "model": "",
                     "response_id": "",
-                    "started_at": ts,
-                    "ended_at": ts,
+                    "started_at": timestamp,
+                    "ended_at": timestamp,
                     "_usage_by_id": {},
                     "_tool_calls_by_id": {},
                     "_thinking": [],
@@ -2648,26 +2686,28 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                     "agent_response": None,
                     "model": "",
                     "response_id": "",
-                    "started_at": ts,
-                    "ended_at": ts,
+                    "started_at": timestamp,
+                    "ended_at": timestamp,
                     "_usage_by_id": {},
                     "_tool_calls_by_id": {},
                     "_thinking": [],
                 }
 
-            if ts:
-                current["ended_at"] = ts
+            if timestamp:
+                current["ended_at"] = timestamp
 
-            is_assistant = entry_type == "assistant" or msg.get("role") == "assistant"
+            is_assistant = (
+                entry_type == "assistant" or message.get("role") == "assistant"
+            )
             if is_assistant:
-                if msg.get("usage"):
-                    message_id = msg.get("id", "")
-                    current["_usage_by_id"][message_id] = msg["usage"]
-                    if msg.get("model"):
-                        current["model"] = msg["model"]
+                if message.get("usage"):
+                    message_id = message.get("id", "")
+                    current["_usage_by_id"][message_id] = message["usage"]
+                    if message.get("model"):
+                        current["model"] = message["model"]
                     if message_id:
                         current["response_id"] = message_id
-                content = msg.get("content", "")
+                content = message.get("content", "")
                 if isinstance(content, list):
                     for block in content:
                         if not isinstance(block, dict):
@@ -2683,8 +2723,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                                 current["_thinking"].append(
                                     _thinking_entry(
                                         len(current["_tool_calls_by_id"]),
-                                        entry_prev_ts,
-                                        ts,
+                                        entry_previous_timestamp,
+                                        timestamp,
                                         content=_cap_text(block["thinking"]),
                                     )
                                 )
@@ -2693,8 +2733,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                                 current["_thinking"].append(
                                     _thinking_entry(
                                         len(current["_tool_calls_by_id"]),
-                                        entry_prev_ts,
-                                        ts,
+                                        entry_previous_timestamp,
+                                        timestamp,
                                         encrypted=True,
                                     )
                                 )
@@ -2702,8 +2742,8 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                             current["_thinking"].append(
                                 _thinking_entry(
                                     len(current["_tool_calls_by_id"]),
-                                    entry_prev_ts,
-                                    ts,
+                                    entry_previous_timestamp,
+                                    timestamp,
                                     encrypted=True,
                                 )
                             )
@@ -2715,13 +2755,13 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                                 ),
                                 "tool_output": None,
                                 "tool_call_id": block.get("id", ""),
-                                "started_at": ts,
+                                "started_at": timestamp,
                             }
                 elif isinstance(content, str) and content:
                     current["agent_response"] = _cap_text(content)
             else:
                 # user tool_result entries — attach output to the matching call.
-                content = msg.get("content", "")
+                content = message.get("content", "")
                 if isinstance(content, list):
                     for block in content:
                         if (
@@ -2767,5 +2807,5 @@ def _stringify_tool_result(content: str | list | None) -> str:
                 parts.append(block.get("text", "") or "")
             elif isinstance(block, str):
                 parts.append(block)
-        return "\n".join(p for p in parts if p)
+        return "\n".join(part for part in parts if part)
     return ""

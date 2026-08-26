@@ -20,6 +20,10 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
+# codex_rollout sits beside this module; every entrypoint puts the scripts dir on
+# sys.path before importing either, so a module-level import resolves.
+from codex_rollout import parse_transcript
+
 PLUGIN_VERSION: str = "0.3.0"
 _SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
@@ -164,7 +168,11 @@ def debug_log(message: str) -> None:
 
 
 def get_config_dir() -> str:
-    """Return the Bloomfilter config directory for the current platform."""
+    """Return the Bloomfilter config directory for the current platform.
+
+    Returns:
+        Absolute path to the Bloomfilter config directory for this platform.
+    """
     system_name = platform.system()
     if system_name == "Windows":
         # A variable that is set but empty must fall back, not resolve to "".
@@ -299,6 +307,9 @@ def read_payload() -> dict[str, Any]:
     Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell pipes to
     a native executable can prefix stdin with a UTF-8 BOM on Windows PowerShell
     5.1, which would otherwise break json.loads.
+
+    Returns:
+        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -307,7 +318,11 @@ def read_payload() -> dict[str, Any]:
 
 
 def _resolve_git_executable() -> str:
-    """Return a git executable path if available, or '' if none is found."""
+    """Return a git executable path if available, or '' if none is found.
+
+    Returns:
+        Absolute path to a usable git executable, or '' when none is found.
+    """
     git = shutil.which("git")
     # shutil.which can return a cwd-relative hit, and a process started
     # without an explicit executable path searches the current directory
@@ -363,7 +378,15 @@ if platform.system() != "Windows":
 
     @contextlib.contextmanager
     def _lock_file(file_handle: TextIO, exclusive: bool = True) -> Iterator[None]:
-        """Acquire an flock on an open file, release on exit."""
+        """Acquire an flock on an open file, release on exit.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
+        """
         lock_operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
         fcntl.flock(file_handle, lock_operation)
         try:
@@ -375,7 +398,15 @@ else:
 
     @contextlib.contextmanager
     def _lock_file(file_handle: TextIO, exclusive: bool = True) -> Iterator[None]:
-        """Cross-process byte-range lock on Windows via msvcrt.locking."""
+        """Cross-process byte-range lock on Windows via msvcrt.locking.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
+        """
         try:
             file_handle.flush()
         except (OSError, ValueError):
@@ -420,7 +451,11 @@ else:
 
 
 def get_batch_dir() -> str:
-    """Return and create the Bloomfilter hook batch directory."""
+    """Return and create the Bloomfilter hook batch directory.
+
+    Returns:
+        Absolute path to the batch directory, which is created if absent.
+    """
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
     # environment, so anything able to set that for the editor's child processes
@@ -434,7 +469,14 @@ def get_batch_dir() -> str:
 
 
 def get_batch_file(session_id: str) -> str:
-    """Return path to the JSONL batch file for session_id."""
+    """Return path to the JSONL batch file for session_id.
+
+    Args:
+        session_id: Session whose batch file path is built.
+
+    Returns:
+        Absolute path to that session's JSONL batch file.
+    """
     safe_session_id = os.path.basename(session_id)
     if not safe_session_id or safe_session_id != session_id or ".." in session_id:
         raise ValueError(f"Invalid session_id: {session_id!r}")
@@ -741,7 +783,15 @@ def _terminate_partial_final_line(batch_file_path: str, locked_handle: Any) -> N
 
 
 def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
-    """Append one JSON object to the session batch file."""
+    """Append one JSON object to the session batch file.
+
+    Args:
+        session_id: Session whose batch file the entry is appended to.
+        entry: The envelope to append, serialized as one JSON line.
+
+    Returns:
+        None.
+    """
     if _append_is_refused(session_id, entry):
         return
     batch_file_path = get_batch_file(session_id)
@@ -763,7 +813,14 @@ def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
 
 
 def read_batch(session_id: str) -> list[dict[str, Any]]:
-    """Read all valid JSON entries from a session batch file."""
+    """Read all valid JSON entries from a session batch file.
+
+    Args:
+        session_id: Session whose batch is read.
+
+    Returns:
+        The decoded entries in file order; empty when there is no batch.
+    """
     batch_file_path = get_batch_file(session_id)
     if not os.path.isfile(batch_file_path):
         return []
@@ -783,7 +840,15 @@ def read_batch(session_id: str) -> list[dict[str, Any]]:
 
 
 def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
-    """Rewrite a session batch while holding an exclusive lock."""
+    """Rewrite a session batch while holding an exclusive lock.
+
+    Args:
+        session_id: Session whose batch file is replaced.
+        entries: The entries to write, in order.
+
+    Returns:
+        None.
+    """
     batch_file_path = get_batch_file(session_id)
     with open(batch_file_path, "a+") as batch_file:
         with _lock_file(batch_file, exclusive=True):
@@ -805,7 +870,14 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
 
 
 def clear_batch(session_id: str) -> None:
-    """Clear a session batch without deleting the coordination file."""
+    """Clear a session batch without deleting the coordination file.
+
+    Args:
+        session_id: Session whose batch contents are discarded.
+
+    Returns:
+        None.
+    """
     rewrite_batch(session_id, [])
     # The delivered-prefix marker counts leading records of this batch, so it
     # goes with them. A count left standing over an emptied file describes
@@ -826,6 +898,12 @@ def _decode_batch_line(line: str) -> tuple[bool, Any]:
     Both ``read_batch`` and ``drop_leading_entries`` route through this so the
     records uploaded and the records drained can never diverge: corrupt lines
     are skipped identically on both sides.
+
+    Args:
+        line: One raw line read back from the batch file.
+
+    Returns:
+        ``(is_record, value)`` as described above.
     """
     stripped = line.strip()
     if not stripped:
@@ -1731,7 +1809,11 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
 
 
 def utcnow_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string."""
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        The current UTC time as an ISO 8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -1741,6 +1823,12 @@ def _cap_text(value: Any) -> Any:
     Subagent transcripts can carry very large tool outputs / responses. Cap
     them so a single batch upload stays bounded, mirroring the Claude Code
     plugin's behavior and the backend's field expectations.
+
+    Args:
+        value: Candidate field value; non-strings are returned untouched.
+
+    Returns:
+        The value, truncated with a marker when it exceeds the field cap.
     """
     if not isinstance(value, str):
         return value
@@ -1755,6 +1843,12 @@ def _cap_conversation(conversation: dict[str, Any]) -> None:
     Caps ``user_prompt``, ``agent_response``, and each tool call's
     ``tool_output``. ``tool_input`` is left raw (matches the main-session
     ToolCall shape and the Claude Code plugin).
+
+    Args:
+        conversation: Parsed child conversation, mutated in place.
+
+    Returns:
+        None.
     """
     for turn in conversation.get("turns") or []:
         if not isinstance(turn, dict):
@@ -1789,10 +1883,6 @@ def extract_subagent_conversation(
     """
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
         return None
-
-    # Local import: codex_rollout lives beside this module on sys.path (the
-    # hook entrypoint inserts the scripts dir before importing).
-    from codex_rollout import parse_transcript
 
     expected = (expected_last_message or "").strip()
     expected_capped = (_cap_text(expected) or "").strip()

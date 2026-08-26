@@ -178,7 +178,14 @@ TAIL_WINDOW_BYTES = 200_000
 
 
 def _cap_text(value: Any) -> Any:
-    """Truncate a string to the subagent field cap; return it unchanged otherwise."""
+    """Truncate a string to the subagent field cap; return it unchanged otherwise.
+
+    Args:
+        value: Candidate field value; non-strings are returned untouched.
+
+    Returns:
+        The value, truncated with a marker when it exceeds the field cap.
+    """
     # Anything that is not text is returned as it came: a transcript block
     # whose field is a container must not raise out of extraction.
     if not isinstance(value, str):
@@ -249,7 +256,11 @@ def detect_runtime(payload: dict[str, Any]) -> str:
 
 
 def get_config_dir() -> str:
-    """Return the Bloomfilter config directory for the current platform."""
+    """Return the Bloomfilter config directory for the current platform.
+
+    Returns:
+        Absolute path to the Bloomfilter config directory for this platform.
+    """
     system = platform.system()
     if system == "Windows":
         # A variable that is set but empty must fall back, not resolve to "".
@@ -327,8 +338,8 @@ def read_json_config(path: str, key: str, default: str = "") -> str:
     snippet uses exactly that, so user-created configs land here BOM-prefixed.
     """
     try:
-        with open(path, "r", encoding="utf-8-sig") as f:
-            return json.load(f).get(key, default) or default
+        with open(path, "r", encoding="utf-8-sig") as config_file:
+            return json.load(config_file).get(key, default) or default
     except Exception:
         return default
 
@@ -421,6 +432,9 @@ def read_payload() -> Any:
     Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
     pipes to a native executable can prefix stdout with a UTF-8 BOM on
     Windows PowerShell 5.1, which would otherwise break json.loads.
+
+    Returns:
+        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -464,7 +478,11 @@ def spawn_detached(args: list[str]) -> bool:
 
 
 def _resolve_git_executable() -> str:
-    """Return a git executable path if available, or '' if none is found."""
+    """Return a git executable path if available, or '' if none is found.
+
+    Returns:
+        Absolute path to a usable git executable, or '' when none is found.
+    """
     git = shutil.which("git")
     # shutil.which can return a cwd-relative hit, and a process started
     # without an explicit executable path searches the current directory
@@ -524,19 +542,27 @@ def get_git_branch(project_dir: str) -> str:
 if platform.system() != "Windows":
 
     @contextlib.contextmanager
-    def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
-        """Acquire an flock on an open file, release on exit."""
-        op = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
-        fcntl.flock(fp, op)
+    def _lock_file(file_handle: Any, exclusive: bool = True) -> Iterator[None]:
+        """Acquire an flock on an open file, release on exit.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
+        """
+        lock_operation = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
+        fcntl.flock(file_handle, lock_operation)
         try:
             yield
         finally:
-            fcntl.flock(fp, fcntl.LOCK_UN)
+            fcntl.flock(file_handle, fcntl.LOCK_UN)
 
 else:
 
     @contextlib.contextmanager
-    def _lock_file(fp: Any, exclusive: bool = True) -> Iterator[None]:
+    def _lock_file(file_handle: Any, exclusive: bool = True) -> Iterator[None]:
         """Cross-process byte-range lock on Windows via ``msvcrt.locking``.
 
         msvcrt only supports exclusive locks — the ``exclusive`` arg is
@@ -547,51 +573,62 @@ else:
 
         File position is saved and restored so the lock's seek to offset 0
         does not disturb append-mode writes.
+
+        Args:
+            file_handle: An open file object whose descriptor is locked.
+            exclusive: Request an exclusive lock rather than a shared one.
+
+        Yields:
+            None. The lock is released on exit.
         """
         try:
-            fp.flush()
+            file_handle.flush()
         except (OSError, ValueError):
             pass
         try:
-            pos = fp.tell()
+            saved_position = file_handle.tell()
         except (OSError, ValueError):
-            pos = None
+            saved_position = None
 
         try:
-            fp.seek(0)
-            msvcrt.locking(fp.fileno(), msvcrt.LK_LOCK, 1)
+            file_handle.seek(0)
+            msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
         except OSError as exc:
             print(
                 f"[bloomfilter] Could not acquire batch file lock ({exc}); "
                 "proceeding unsynchronized.",
                 file=sys.stderr,
             )
-            if pos is not None:
+            if saved_position is not None:
                 try:
-                    fp.seek(pos)
+                    file_handle.seek(saved_position)
                 except (OSError, ValueError):
                     pass
             yield
         else:
             try:
-                if pos is not None:
-                    fp.seek(pos)
+                if saved_position is not None:
+                    file_handle.seek(saved_position)
                 yield
             finally:
                 try:
-                    fp.seek(0)
-                    msvcrt.locking(fp.fileno(), msvcrt.LK_UNLCK, 1)
+                    file_handle.seek(0)
+                    msvcrt.locking(file_handle.fileno(), msvcrt.LK_UNLCK, 1)
                 except OSError:
                     pass
-                if pos is not None:
+                if saved_position is not None:
                     try:
-                        fp.seek(pos)
+                        file_handle.seek(saved_position)
                     except (OSError, ValueError):
                         pass
 
 
 def get_batch_dir() -> str:
-    """Return (and create) the batch directory."""
+    """Return (and create) the batch directory.
+
+    Returns:
+        Absolute path to the batch directory, which is created if absent.
+    """
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
     # environment, so anything able to set that for the editor's child processes
@@ -605,7 +642,14 @@ def get_batch_dir() -> str:
 
 
 def get_batch_file(session_id: str) -> str:
-    """Return path to the JSONL batch file for *session_id*."""
+    """Return path to the JSONL batch file for *session_id*.
+
+    Args:
+        session_id: Session whose batch file path is built.
+
+    Returns:
+        Absolute path to that session's JSONL batch file.
+    """
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
         raise ValueError(f"Invalid session_id: {session_id!r}")
@@ -912,18 +956,26 @@ def _terminate_partial_final_line(batch_file_path: str, locked_handle: Any) -> N
 
 
 def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
-    """Append a single JSON line to the batch file for *session_id*."""
+    """Append a single JSON line to the batch file for *session_id*.
+
+    Args:
+        session_id: Session whose batch file the entry is appended to.
+        entry: The envelope to append, serialized as one JSON line.
+
+    Returns:
+        None.
+    """
     if _append_is_refused(session_id, entry):
         return
     batch_file = get_batch_file(session_id)
     line = json.dumps(entry, separators=(",", ":")) + "\n"
     batch_file_size = 0
-    with open(batch_file, "a") as f:
-        with _lock_file(f, exclusive=True):
-            _terminate_partial_final_line(batch_file, f)
-            f.write(line)
-            f.flush()
-            batch_file_size = f.tell()
+    with open(batch_file, "a") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            _terminate_partial_final_line(batch_file, batch_file_handle)
+            batch_file_handle.write(line)
+            batch_file_handle.flush()
+            batch_file_size = batch_file_handle.tell()
     if platform.system() != "Windows":
         # A batch already written must not lose its shed to a failed
         # permission change: the record is on disk either way, and the
@@ -934,13 +986,20 @@ def append_to_batch(session_id: str, entry: dict[str, Any]) -> None:
 
 
 def read_batch(session_id: str) -> list[dict[str, Any]]:
-    """Read all entries from the batch file and return the list (no delete)."""
+    """Read all entries from the batch file and return the list (no delete).
+
+    Args:
+        session_id: Session whose batch is read.
+
+    Returns:
+        The decoded entries in file order; empty when there is no batch.
+    """
     batch_file = get_batch_file(session_id)
     if not os.path.isfile(batch_file):
         return []
-    with open(batch_file, "r") as f:
-        with _lock_file(f, exclusive=False):
-            lines = f.readlines()
+    with open(batch_file, "r") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=False):
+            lines = batch_file_handle.readlines()
     entries = []
     for line in lines:
         line = line.strip()
@@ -993,16 +1052,16 @@ def rewrite_batch(session_id: str, entries: list[dict[str, Any]]) -> None:
         None.
     """
     batch_file = get_batch_file(session_id)
-    with open(batch_file, "a+") as f:
-        with _lock_file(f, exclusive=True):
-            f.seek(0)
-            f.truncate()
+    with open(batch_file, "a+") as batch_file_handle:
+        with _lock_file(batch_file_handle, exclusive=True):
+            batch_file_handle.seek(0)
+            batch_file_handle.truncate()
             for entry in entries:
-                f.write(json.dumps(entry, separators=(",", ":")) + "\n")
+                batch_file_handle.write(json.dumps(entry, separators=(",", ":")) + "\n")
             # Flush inside the lock: truncate lands at once but the rewritten
             # lines sit in the buffer until close, which is after the lock is
             # released, so an append in that gap would be written over.
-            f.flush()
+            batch_file_handle.flush()
     if platform.system() != "Windows":
         # A batch already written must not lose its shed to a failed
         # permission change: the record is on disk either way, and the
@@ -1032,6 +1091,12 @@ def _decode_batch_line(line: str) -> tuple[bool, Any]:
     Both ``read_batch`` and ``drop_leading_entries`` route through this so the
     records uploaded and the records drained can never diverge: corrupt lines
     are skipped identically on both sides.
+
+    Args:
+        line: One raw line read back from the batch file.
+
+    Returns:
+        ``(is_record, value)`` as described above.
     """
     stripped = line.strip()
     if not stripped:
@@ -1868,7 +1933,7 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
     )
 
     try:
-        req = urllib.request.Request(
+        request = urllib.request.Request(
             url,
             data=data,
             headers={
@@ -1884,9 +1949,9 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
             },
             method="POST",
         )
-        with urllib.request.urlopen(req, timeout=UPLOAD_TIMEOUT_S) as resp:
-            status = resp.getcode()
-            body = resp.read().decode("utf-8", errors="replace")
+        with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_S) as response:
+            status = response.getcode()
+            body = response.read().decode("utf-8", errors="replace")
         debug_log(
             f"upload_batch: response status={status} session_id={session_id} "
             f"body={body[:500]!r}"
@@ -1896,13 +1961,13 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
         return UPLOAD_OK if 200 <= status < 300 else UPLOAD_FAILED
     except urllib.error.HTTPError as exc:
         try:
-            err_body = exc.read().decode("utf-8", errors="replace").strip()
+            error_body = exc.read().decode("utf-8", errors="replace").strip()
         except Exception:
-            err_body = ""
+            error_body = ""
         reason = getattr(exc, "reason", "")
         debug_log(
             f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
-            f"session_id={session_id} body={err_body[:500]!r}"
+            f"session_id={session_id} body={error_body[:500]!r}"
         )
         # A 413 is expected control flow now, not an error to report: the
         # caller answers it by sending a smaller prefix. Printing it would put
@@ -1914,9 +1979,10 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
         if reason:
             message += f" {reason}"
         print(message, file=sys.stderr)
-        if err_body:
+        if error_body:
             print(
-                f"[bloomfilter] Upload response body: {err_body[:500]}", file=sys.stderr
+                f"[bloomfilter] Upload response body: {error_body[:500]}",
+                file=sys.stderr,
             )
         return UPLOAD_FAILED
     except urllib.error.URLError as exc:
@@ -1940,7 +2006,11 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
 
 
 def utcnow_iso() -> str:
-    """Return the current UTC time as an ISO 8601 string."""
+    """Return the current UTC time as an ISO 8601 string.
+
+    Returns:
+        The current UTC time as an ISO 8601 string.
+    """
     return datetime.now(timezone.utc).isoformat()
 
 
@@ -2056,22 +2126,22 @@ def find_copilot_transcript(session_id: str, chat_sessions_only: bool = False) -
 
     # Search most recently modified files first
     candidates = []
-    for d in search_dirs:
-        for fname in os.listdir(d):
-            if fname.endswith(".jsonl"):
-                fpath = os.path.join(d, fname)
-                candidates.append((os.path.getmtime(fpath), fpath))
+    for search_dir in search_dirs:
+        for file_name in os.listdir(search_dir):
+            if file_name.endswith(".jsonl"):
+                file_path = os.path.join(search_dir, file_name)
+                candidates.append((os.path.getmtime(file_path), file_path))
 
     candidates.sort(reverse=True)  # newest first
 
-    for _, fpath in candidates:
+    for _, file_path in candidates:
         try:
             # Quick check: scan file for session_id string
-            with open(fpath, "rb") as f:
-                chunk = f.read(200_000)
+            with open(file_path, "rb") as transcript_file:
+                chunk = transcript_file.read(200_000)
             if session_id.encode() in chunk:
-                _transcript_cache[cache_key] = fpath
-                return fpath
+                _transcript_cache[cache_key] = file_path
+                return file_path
         except Exception:
             continue
 
@@ -2190,30 +2260,32 @@ def parse_copilot_transcript(transcript_path: str) -> dict[str, Any]:
         return empty
 
 
-def _set_nested(obj: Any, key_path: list[str | int], value: Any) -> None:
+def _set_nested(container: Any, key_path: list[str | int], value: Any) -> None:
     """Set *value* at *key_path* inside a nested dict/list structure.
 
     Each segment in *key_path* is either a ``str`` (dict key) or ``int``
     (list index).  Missing intermediate containers are created automatically.
     """
-    for i, segment in enumerate(key_path[:-1]):
-        next_segment = key_path[i + 1]
-        if isinstance(obj, dict):
-            obj = obj.setdefault(segment, [] if isinstance(next_segment, int) else {})
-        elif isinstance(obj, list) and isinstance(segment, int):
-            while len(obj) <= segment:
-                obj.append({})
-            obj = obj[segment]
+    for index, segment in enumerate(key_path[:-1]):
+        next_segment = key_path[index + 1]
+        if isinstance(container, dict):
+            container = container.setdefault(
+                segment, [] if isinstance(next_segment, int) else {}
+            )
+        elif isinstance(container, list) and isinstance(segment, int):
+            while len(container) <= segment:
+                container.append({})
+            container = container[segment]
         else:
             return  # can't navigate further
 
     last = key_path[-1]
-    if isinstance(obj, dict):
-        obj[last] = value
-    elif isinstance(obj, list) and isinstance(last, int):
-        while len(obj) <= last:
-            obj.append(None)
-        obj[last] = value
+    if isinstance(container, dict):
+        container[last] = value
+    elif isinstance(container, list) and isinstance(last, int):
+        while len(container) <= last:
+            container.append(None)
+        container[last] = value
 
 
 def _reconstruct_session_state(entries: list[dict[str, Any]]) -> list[Any]:
@@ -2236,45 +2308,49 @@ def _reconstruct_session_state(entries: list[dict[str, Any]]) -> list[Any]:
         if kind == 0:
             state = entry.get("v", {})
         elif kind in (1, 2):
-            k = entry.get("k", [])
-            v = entry.get("v")
-            if not k:
+            key_path = entry.get("k", [])
+            value = entry.get("v")
+            if not key_path:
                 continue
             # kind=2 k=["requests"] — merge new requests, don't replace
-            if kind == 2 and k == ["requests"] and isinstance(v, list):
+            if kind == 2 and key_path == ["requests"] and isinstance(value, list):
                 existing = state.setdefault("requests", [])
                 existing_ids = {
-                    r.get("requestId")
-                    for r in existing
-                    if isinstance(r, dict) and r.get("requestId")
+                    existing_request.get("requestId")
+                    for existing_request in existing
+                    if isinstance(existing_request, dict)
+                    and existing_request.get("requestId")
                 }
-                for req in v:
-                    if not isinstance(req, dict):
+                for request in value:
+                    if not isinstance(request, dict):
                         continue
-                    rid = req.get("requestId", "")
-                    if rid and rid in existing_ids:
+                    request_id = request.get("requestId", "")
+                    if request_id and request_id in existing_ids:
                         # Update in place
-                        for i, er in enumerate(existing):
-                            if isinstance(er, dict) and er.get("requestId") == rid:
-                                existing[i] = req
+                        for index, existing_request in enumerate(existing):
+                            if (
+                                isinstance(existing_request, dict)
+                                and existing_request.get("requestId") == request_id
+                            ):
+                                existing[index] = request
                                 break
                     else:
-                        existing.append(req)
+                        existing.append(request)
             else:
-                _set_nested(state, k, v)
+                _set_nested(state, key_path, value)
     return state.get("requests", [])
 
 
-def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
+def _extract_request_record(request: dict[str, Any]) -> dict[str, Any]:
     """Extract a structured record from a single materialised Copilot request.
 
     Returns a dict with per-request metadata, user message, response
     content, ordered reasoning parts, and token counts.
     """
     record = {
-        "requestId": req.get("requestId", ""),
-        "responseId": req.get("responseId", ""),
-        "modelId": (req.get("modelId") or "").removeprefix("copilot/"),
+        "requestId": request.get("requestId", ""),
+        "responseId": request.get("responseId", ""),
+        "modelId": (request.get("modelId") or "").removeprefix("copilot/"),
         "resolvedModel": "",
         "userMessage": "",
         "response_content": "",
@@ -2282,19 +2358,19 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
         "reasoning_parts": [],
         "input_tokens": 0,
         "output_tokens": 0,
-        "timestamp": req.get("timestamp", 0),
+        "timestamp": request.get("timestamp", 0),
         # agent_id -> {model, credits, prompt, result, description} for any
         # runSubagent call made during this turn.
         "subagents": {},
     }
 
     # User message
-    message = req.get("message")
+    message = request.get("message")
     if isinstance(message, dict):
         record["userMessage"] = message.get("text", "")
 
     # --- Response parts (content + fallback reasoning) ---
-    response_parts = req.get("response", [])
+    response_parts = request.get("response", [])
     content_parts = []
     fallback_reasoning = []
     if isinstance(response_parts, list):
@@ -2340,9 +2416,9 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
             }
 
     # --- Token counts, model, and ordered reasoning from result metadata ---
-    result_obj = req.get("result")
-    if isinstance(result_obj, dict):
-        metadata = result_obj.get("metadata")
+    result_object = request.get("result")
+    if isinstance(result_object, dict):
+        metadata = result_object.get("metadata")
         if isinstance(metadata, dict):
             record["resolvedModel"] = metadata.get("resolvedModel", "")
             record["input_tokens"] = metadata.get("promptTokens", 0) or 0
@@ -2380,7 +2456,7 @@ def _extract_request_record(req: dict[str, Any]) -> dict[str, Any]:
             )
 
     # Flat reasoning_text for backward compat
-    all_thinking = [p["content"] for p in record["reasoning_parts"]]
+    all_thinking = [part["content"] for part in record["reasoning_parts"]]
     if all_thinking:
         record["reasoning_text"] = "\n".join(all_thinking)
 
@@ -2396,7 +2472,11 @@ def _parse_new_format(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
     Returns ``list[dict]`` of per-request records.
     """
     requests = _reconstruct_session_state(entries)
-    return [_extract_request_record(r) for r in requests if isinstance(r, dict)]
+    return [
+        _extract_request_record(request)
+        for request in requests
+        if isinstance(request, dict)
+    ]
 
 
 def _parse_old_format(entries: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2493,7 +2573,7 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
     if not entries:
         return empty
 
-    def new_record(user_text: str, model: str, ts: int) -> dict[str, Any]:
+    def new_record(user_text: str, model: str, timestamp: int) -> dict[str, Any]:
         return {
             "requestId": "",
             "responseId": "",
@@ -2505,7 +2585,7 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
             "reasoning_parts": [],
             "input_tokens": 0,
             "output_tokens": 0,
-            "timestamp": ts or 0,
+            "timestamp": timestamp or 0,
         }
 
     def is_empty(rec: dict[str, Any]) -> bool:
@@ -2524,7 +2604,7 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
     for entry in entries:
         evt_type = entry.get("type", "")
         data = entry.get("data") if isinstance(entry.get("data"), dict) else {}
-        ts = entry.get("timestamp", 0)
+        timestamp = entry.get("timestamp", 0)
 
         match evt_type:
             case "session.model_change":
@@ -2544,21 +2624,21 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
                 # Skip if we already have an open turn (turn_start firing twice
                 # around an abort) — keep the existing record, ignore the dupe.
                 if current is None:
-                    current = new_record(pending_user, current_model, ts)
+                    current = new_record(pending_user, current_model, timestamp)
                     pending_user = ""
 
             case "assistant.message":
                 if current is None:
                     # Some sessions emit assistant.message without an explicit
                     # turn_start; create the record opportunistically.
-                    current = new_record(pending_user, current_model, ts)
+                    current = new_record(pending_user, current_model, timestamp)
                     pending_user = ""
 
-                msg_model = data.get("model")
-                if msg_model:
-                    current["resolvedModel"] = msg_model
-                    current["modelId"] = msg_model
-                    current_model = msg_model
+                message_model = data.get("model")
+                if message_model:
+                    current["resolvedModel"] = message_model
+                    current["modelId"] = message_model
+                    current_model = message_model
 
                 tok = data.get("outputTokens", 0) or 0
                 current["output_tokens"] += tok
@@ -2585,7 +2665,7 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
                             "type": "thinking",
                             "content": content,
                             "thinking_id": data.get("reasoningId", ""),
-                            "timestamp": ts,
+                            "timestamp": timestamp,
                         }
                     )
                     if current["reasoning_text"]:
