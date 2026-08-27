@@ -144,11 +144,39 @@ Windows PowerShell:
 $env:BLOOMFILTER_API_KEY = "YOUR_API_KEY"
 ```
 
-To make the Windows environment variable persistent:
+If you run a self-hosted Bloomfilter instance, point the plugins at it with `BLOOMFILTER_URL`,
+either as an environment variable or as the `url` key in the same config file. Leave it unset to
+use the hosted service.
+
+macOS:
+
+```bash
+export BLOOMFILTER_URL="https://bloomfilter.example.com"
+```
+
+Windows PowerShell:
+
+```powershell
+$env:BLOOMFILTER_URL = "https://bloomfilter.example.com"
+```
+
+To make the Windows environment variables persistent:
 
 ```powershell
 [Environment]::SetEnvironmentVariable("BLOOMFILTER_API_KEY", "YOUR_API_KEY", "User")
 ```
+
+If you set `BLOOMFILTER_URL`, persist it too — `$env:` sets it for the current
+PowerShell process only, and the plugins read the environment variable ahead of
+the config file, so an unpersisted URL silently falls back to the hosted service
+after a restart:
+
+```powershell
+[Environment]::SetEnvironmentVariable("BLOOMFILTER_URL", "https://bloomfilter.example.com", "User")
+```
+
+Alternatively, set the `url` key in the config file instead, which persists on
+its own.
 
 Restart your agent application after changing persistent environment variables.
 
@@ -191,22 +219,32 @@ Open any project in Claude Code. The plugin creates the config file automaticall
 Install the single cross-platform plugin **`agent-miner-codex`** — it runs on Windows, macOS,
 Linux, and WSL. The `-windows` plugin is deprecated; keep it only if you already have it installed.
 
-Codex hooks are behind feature flags. Enable them before installing the plugin:
+Codex hooks are behind a feature flag. Check yours before installing the plugin:
 
 ```bash
-codex features enable codex_hooks
-codex features enable plugin_hooks
+codex features list
 ```
 
-These commands update `~/.codex/config.toml`. You can also edit the file manually:
+Recent Codex versions ship hooks as a stable feature that is already on, and the plugin needs
+nothing further. If `hooks` shows as `false`, enable it:
+
+```bash
+codex features enable hooks
+```
+
+This updates `~/.codex/config.toml`. You can also edit the file manually:
 
 ```toml
 [features]
-codex_hooks = true
-plugin_hooks = true
+hooks = true
 ```
 
-If your config already has a `[features]` table, add only the two keys inside the existing table when editing manually.
+If your config already has a `[features]` table, add the key inside the existing table.
+
+Older Codex releases named this flag `codex_hooks` and had a second `plugin_hooks` flag. Both are
+superseded — `codex_hooks` is accepted but reports itself as deprecated, and `plugin_hooks` no
+longer exists. If your `config.toml` still sets either one, replace them with `hooks = true`;
+leaving `codex_hooks` in place makes Codex print a deprecation notice on every run.
 
 Add the Bloomfilter plugin marketplace with the Codex CLI:
 
@@ -214,8 +252,15 @@ Add the Bloomfilter plugin marketplace with the Codex CLI:
 codex plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
 ```
 
-Open Codex and install **Bloomfilter Agent Miner for Codex** (`agent-miner-codex`) from the
-marketplace — the same plugin on every OS.
+Then install the plugin. Qualify the name with the marketplace it comes from — Codex refuses a
+bare plugin name when more than one marketplace is configured:
+
+```bash
+codex plugin add agent-miner-codex@bloomfilter-plugins
+```
+
+`codex plugin list` shows what is installed and which version is active. The same plugin covers
+every OS.
 
 Restart Codex after enabling the feature flags or installing the plugin so hook registration is reloaded.
 

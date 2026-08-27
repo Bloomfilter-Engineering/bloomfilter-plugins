@@ -6,6 +6,10 @@ param(
 $ErrorActionPreference = "Stop"
 $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 [Console]::OutputEncoding = $utf8NoBom
+# Best-effort: decode the inherited hook payload (stdin) as UTF-8. Wrapped in
+# try/catch because setting InputEncoding can throw when stdin is a redirected
+# pipe with no real console attached.
+try { [Console]::InputEncoding = $utf8NoBom } catch {}
 $OutputEncoding = $utf8NoBom
 
 # Fail soft: any unexpected terminating error answers with an empty JSON response
@@ -74,11 +78,19 @@ if (-not $python) {
 
 $pluginRoot = $env:CLAUDE_PLUGIN_ROOT
 if (-not $pluginRoot) {
-    $pluginRoot = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+    # $PSScriptRoot is the directory holding this script — the plugin's
+    # hooks/ directory — so one parent is the plugin root. Two was one too
+    # many: it landed on the directory holding every plugin, and the
+    # collector path built from it does not exist, so the hook answered {}
+    # and captured nothing. The POSIX sibling takes one level.
+    $pluginRoot = Split-Path -Parent $PSScriptRoot
 }
 
 $script = Join-Path $pluginRoot "scripts\collect_hook.py"
-$stdin = [Console]::In.ReadToEnd()
+# Windows PowerShell 5.1 prepends a UTF-8 BOM when piping to a native process,
+# and the InputEncoding set above stops the reader from stripping it. Drop it
+# here so the payload handed to Python stays valid JSON.
+$stdin = [Console]::In.ReadToEnd().TrimStart([char]0xFEFF)
 $pythonExecutable = $python["Executable"]
 $pythonArguments = $python["Arguments"]
 
@@ -91,10 +103,25 @@ $startInfo.UseShellExecute = $false
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
+# Force UTF-8 (no BOM) on the child's redirected streams so non-ASCII payload
+# and the JSON response round-trip correctly regardless of the Windows code page.
+# StandardInputEncoding only exists on .NET Core 2.1+ (PowerShell 7+); Windows
+# PowerShell 5.1 runs on .NET Framework, where assigning it throws. Set it when
+# present and rely on the raw-byte stdin write below everywhere else.
+if ($startInfo.PSObject.Properties.Name -contains "StandardInputEncoding") {
+    $startInfo.StandardInputEncoding = $utf8NoBom
+}
+$startInfo.StandardOutputEncoding = $utf8NoBom
+$startInfo.StandardErrorEncoding = $utf8NoBom
 $process.StartInfo = $startInfo
 
 $null = $process.Start()
-$process.StandardInput.Write($stdin)
+# Write raw UTF-8 bytes rather than going through the StreamWriter, whose
+# encoding is host-dependent on 5.1 and can prepend a BOM the child would
+# choke on.
+$stdinBytes = [System.Text.Encoding]::UTF8.GetBytes($stdin)
+$process.StandardInput.BaseStream.Write($stdinBytes, 0, $stdinBytes.Length)
+$process.StandardInput.BaseStream.Flush()
 $process.StandardInput.Close()
 $stdout = $process.StandardOutput.ReadToEnd()
 $stderr = $process.StandardError.ReadToEnd()

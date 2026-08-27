@@ -54,7 +54,7 @@
       {
         "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStop",
         "type": "command",
-        "timeout": 10
+        "timeout": 30
       }
     ],
     "afterShellExecution": [

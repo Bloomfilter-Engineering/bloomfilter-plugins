@@ -1,23 +1,32 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
+import time
 from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    UPLOAD_OK,
+    UPLOAD_RETRY_BUDGET_S,
+    UPLOAD_TOO_LARGE,
     append_to_batch,
     bootstrap_config,
     clear_batch,
     debug_log,
     extract_subagent_conversation,
     get_git_branch,
+    is_foreign_runtime_payload,
     read_batch,
     read_payload,
+    record_delivered_prefix,
     resolve_api_key,
     resolve_api_url,
+    select_uploadable_prefix,
+    sweep_stale_batches,
     upload_batch,
     utcnow_iso,
 )
@@ -32,20 +41,44 @@ SUPPORTED_HOOKS: set[str] = {
     "SubagentStart",
     "SubagentStop",
     "Stop",
+    "SessionEnd",
 }
 # Upload on Stop (turn end) AND SubagentStop: a subagent can outlive the parent
 # turn (Codex doesn't always `wait` on it), so its SubagentStop may fire after
 # the parent's final Stop. Uploading on SubagentStop ships the captured
-# subagent_transcript regardless. Safe because the BE rebuilds an unfinalized
-# turn's events on the later Stop upload (see _handle_turn_start) — the
+# subagent_transcript regardless. Safe because the API rebuilds an unfinalized
+# turn's events on the later Stop upload — the
 # SubagentStop upload only materializes the turn's start + subagent anchor.
-UPLOAD_HOOKS: set[str] = {"Stop", "SubagentStop"}
+UPLOAD_HOOKS: set[str] = {"SessionEnd", "Stop", "SubagentStop"}
+# Events whose upload is handed to a detached child instead of run inline.
+#
+# Both are events whose deadline is shorter than one upload can take. A POST can
+# spend the whole socket timeout on its own and the oversize-retry budget on top,
+# so an inline upload on either is killed mid-request rather than timing out
+# inside this process — which loses the batch and logs nothing, because the kill
+# lands before the code that would record it. Detaching lets the hook return at
+# once and the upload finish independently.
+#
+# SessionEnd runs during teardown, so this runtime defaults it to 1s and refuses
+# to honour more than 3s, clamping anything larger. SubagentStop is given longer
+# but still less than the upload's worst case, and it blocks the parent agent
+# from collecting the subagent's result while it runs.
+#
+# Raising the manifest timeout is not the fix, even for SubagentStop where this
+# runtime would allow it: the timeout is part of the identity this runtime hashes
+# to record hook trust, so editing it marks every already-installed hook as
+# modified and silently stops all capture until each user re-approves it. That
+# makes the collector the only side that can change.
+DETACHED_UPLOAD_HOOKS: set[str] = {"SessionEnd", "SubagentStop"}
+# argv[1] sentinel marking a re-invocation of this script as the detached
+# uploader. Chosen so it can never collide with a real hook event name.
+DETACHED_UPLOAD_ARG: str = "__bloomfilter_detached_upload__"
 GIT_BRANCH_HOOKS: set[str] = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_EXTRACT_HOOKS: set[str] = {"Stop"}
 SESSION_META_HOOKS: set[str] = {"SessionStart"}
 # SubagentStop fires under the PARENT session_id and carries the subagent's own
 # rollout path (agent_transcript_path); we parse that into a child conversation
-# and attach it so the backend builds a linked child AgentSession.
+# and attach it so the API builds a linked child session.
 SUBAGENT_STOP_HOOK: str = "SubagentStop"
 
 
@@ -79,7 +112,14 @@ def _resolve_project_dir(payload: dict[str, Any]) -> str:
 
 
 def _resolve_session_id(payload: dict[str, Any]) -> str:
-    """Pick the session identifier from the payload, preferring `session_id`."""
+    """Pick the session identifier from the payload, preferring `session_id`.
+
+    Args:
+        payload: Raw hook payload as delivered on stdin.
+
+    Returns:
+        The session identifier, or '' when the payload carries neither key.
+    """
     return _first_string(
         [
             payload.get("session_id", ""),
@@ -89,12 +129,92 @@ def _resolve_session_id(payload: dict[str, Any]) -> str:
     )
 
 
+def _spawn_detached_upload(session_id: str) -> bool:
+    """Launch a detached child to upload *session_id*'s batch, then return at once.
+
+    The child re-invokes this script with :data:`DETACHED_UPLOAD_ARG` and runs
+    :func:`_upload_session_batch`. It is started in its own session / process
+    group with its standard streams detached, so the runtime quitting — and the
+    signals teardown delivers to the hook's process group — cannot reach it.
+
+    The hook's envelope is already appended to the batch before this is called,
+    so the child's snapshot includes it.
+
+    Args:
+        session_id: Session whose batch the detached child uploads.
+
+    Returns:
+        True if the child was launched; False if spawning is unavailable or
+        raised, so the caller can fall back to an inline upload rather than
+        leave the batch unsent.
+    """
+    interpreter = sys.executable
+    # Only ever an absolute interpreter path, never a bare name: a process
+    # started without an explicit executable path searches the current directory
+    # before PATH on some platforms, and the current directory here is whatever
+    # project the user has open — so a repository shipping its own
+    # python-named binary would run instead.
+    if not interpreter or not os.path.isabs(interpreter):
+        debug_log(
+            f"detached upload not spawned: session_id={session_id} "
+            "reason=no-absolute-interpreter-path"
+        )
+        return False
+
+    command = [
+        interpreter,
+        os.path.abspath(__file__),
+        DETACHED_UPLOAD_ARG,
+        session_id,
+    ]
+    popen_kwargs: dict[str, Any] = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "close_fds": True,
+    }
+    if os.name == "nt":
+        # Detach from the console and the parent's process group so closing the
+        # host window does not take the uploader down with it.
+        popen_kwargs["creationflags"] = (
+            subprocess.DETACHED_PROCESS
+            | subprocess.CREATE_NEW_PROCESS_GROUP
+            | subprocess.CREATE_NO_WINDOW
+        )
+    else:
+        # New session leader: detaches from the controlling terminal so the
+        # runtime's shutdown signals to its own process group are not delivered.
+        popen_kwargs["start_new_session"] = True
+
+    try:
+        subprocess.Popen(command, **popen_kwargs)
+        return True
+    except Exception as exc:
+        debug_log(
+            f"detached upload spawn failed: session_id={session_id} "
+            f"type={type(exc).__name__} message={exc!s}"
+        )
+        return False
+
+
 def main() -> None:
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if hook_event_name not in SUPPORTED_HOOKS:
         return
 
     payload = read_payload()
+
+    # Refuse a session that belongs to a different runtime. Editors discover and
+    # execute each other's collectors, so this one can be handed hooks from a
+    # session it does not serve — and whichever collector uploads first is the
+    # one the whole session gets filed under, so acting on it silently records
+    # another tool's work as this one's.
+    if is_foreign_runtime_payload(payload):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} "
+            "reason=payload-belongs-to-another-runtime"
+        )
+        return
     session_id = _resolve_session_id(payload)
     if not session_id:
         return
@@ -104,6 +224,26 @@ def main() -> None:
 
     if hook_event_name == "SessionStart":
         bootstrap_config(plugin_root)
+        # Expire batches whose session died before draining them. Swept here and
+        # nowhere else: a directory scan costs about a millisecond, fine once per
+        # session but not on a per-tool hook that fires thousands of times. A
+        # batch is only removed once fully uploaded, so without this the
+        # directory grows without limit.
+        #
+        # Deliberately runs whether or not an API key is configured. Batching
+        # happens either way, so gating the only garbage collector behind a key
+        # means an install without one keeps every prompt, tool input and tool
+        # output on disk in cleartext forever. Nothing recoverable is lost: the
+        # age threshold is weeks, and a batch that old belongs to a session that
+        # ended long ago.
+        #
+        # The session being started is passed so its own batch is never treated
+        # as stale: at this point it has appended nothing, so a resumed
+        # session's file still carries the previous sitting's mtime. Note this
+        # runtime then starts the session from an empty batch anyway (below), so
+        # here the argument only guarantees the sweep cannot race that reset.
+        sweep_stale_batches(current_session_id=session_id)
+
         clear_batch(session_id)
 
     envelope: dict[str, Any] = {
@@ -138,7 +278,7 @@ def main() -> None:
                 payload[metadata_key] = metadata_value
 
     # On Stop, parse the rollout for the just-finished turn and inject the
-    # data the BE config can't get from raw hook payloads (assistant_text,
+    # data the API cannot derive from raw hook payloads (assistant_text,
     # token usage, thinking, tool calls).
     if (
         hook_event_name in TRANSCRIPT_EXTRACT_HOOKS
@@ -155,7 +295,7 @@ def main() -> None:
             # turn's final response (agent_response, rendered at turn end); the
             # earlier segments are intermediate narration ("I'll spin up a
             # subagent…") emitted below as timestamped AgentMessage events so the
-            # BE interleaves them around the tool/subagent calls that follow.
+            # API interleaves them around the tool/subagent calls that follow.
             assistant_messages = parsed_turn.get("assistant_messages") or []
             if assistant_messages:
                 envelope["agent_response"] = assistant_messages[-1].get("text") or ""
@@ -273,8 +413,8 @@ def main() -> None:
     # On SubagentStop, parse the subagent's own rollout (agent_transcript_path)
     # into a normalized child conversation and attach it. Codex fires this hook
     # under the PARENT session_id, so it lands in the parent batch and uploads
-    # with the parent on Stop; the backend turns it into a linked child
-    # AgentSession. Read NOW — the subagent's rollout may be GC'd later.
+    # with the parent on Stop; the API turns it into a linked child
+    # session. Read NOW — the subagent's rollout may be GC'd later.
     if hook_event_name == SUBAGENT_STOP_HOOK:
         conversation = extract_subagent_conversation(
             payload.get("agent_transcript_path", ""),
@@ -299,38 +439,109 @@ def main() -> None:
             clear_batch(session_id)
             return
 
-        api_key = resolve_api_key()
-        if not api_key:
-            debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
-            return
+        # SessionEnd cannot afford a blocking POST (see DETACHED_UPLOAD_HOOKS),
+        # so it hands the upload to a detached child and returns. Falling back to
+        # an inline upload when the spawn fails risks the runtime killing this
+        # process mid-request, but losing the batch outright is worse.
+        if hook_event_name in DETACHED_UPLOAD_HOOKS:
+            if _spawn_detached_upload(session_id):
+                return
+            debug_log(
+                f"detached upload unavailable, uploading inline: "
+                f"session_id={session_id} hook={hook_event_name}"
+            )
 
-        # Cumulative read — never truncate mid-session. The BE assumes each
-        # upload contains the full session history (turn_number resets to 0
-        # and increments through the batch); truncating after upload would
-        # cause subsequent uploads to overwrite earlier turns at turn 0.
-        # Idempotency is handled BE-side via update_or_create on
-        # (session, turn_number).
-        batch_entries = read_batch(session_id)
-        if not batch_entries:
-            debug_log(f"upload skipped: session_id={session_id} reason=empty-batch")
-            return
+        _upload_session_batch(session_id)
 
-        api_url = resolve_api_url()
-        upload_batch(
-            api_url,
-            api_key,
-            {
-                "session_id": session_id,
-                "source": "codex",
-                "plugin_version": PLUGIN_VERSION,
-                "hooks": batch_entries,
-            },
+
+def _upload_session_batch(session_id: str) -> None:
+    """Ship as much of one session's batch as fits, and record what landed.
+
+    Shared by the inline path and by the detached child, so both drive the
+    identical sequence. Takes no payload: everything it needs is already in the
+    batch file, which is what lets the detached child run without stdin.
+
+    Args:
+        session_id: Session whose batch is uploaded.
+
+    Returns:
+        None.
+    """
+    api_key = resolve_api_key()
+    if not api_key:
+        debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
+        return
+
+    # Cumulative read — never truncate mid-session. This runtime supplies no
+    # stable per-turn identity of its own, so a turn is identified by its
+    # position in the upload: every upload has to start from the first record
+    # or the positions shift under everything already sent. Re-sending is
+    # safe; truncating is not.
+    batch_entries = read_batch(session_id)
+    if not batch_entries:
+        debug_log(f"upload skipped: session_id={session_id} reason=empty-batch")
+        return
+
+    api_url = resolve_api_url()
+
+    # Send only as much of the batch as fits in one request. Posting the
+    # whole file made an oversize batch permanent: the server refuses it,
+    # nothing is delivered, later hooks append, and the next attempt is
+    # larger still. A prefix is safe here precisely because this runtime
+    # never truncates: every upload starts at the first record, so the
+    # position of each turn is identical every time and a prefix simply stops
+    # short of the newest turns, which the next upload then carries.
+    upload_count = select_uploadable_prefix(batch_entries)
+    pending_entries = batch_entries[:upload_count]
+    batch_payload = {
+        "session_id": session_id,
+        "source": "codex",
+        "plugin_version": PLUGIN_VERSION,
+        "hooks": pending_entries,
+    }
+
+    # Budget starts before the first request, not after it: the first
+    # request can burn the whole socket timeout on its own, so a clock
+    # started afterwards lets the worst case run past the hook's limit
+    # and be killed mid-flight — the failure this budget exists to stop.
+    retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
+    upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    while (
+        upload_result == UPLOAD_TOO_LARGE
+        and len(pending_entries) > 1
+        and time.monotonic() < retry_deadline
+    ):
+        pending_entries = pending_entries[: len(pending_entries) // 2]
+        debug_log(
+            f"upload retry after too-large: session_id={session_id} "
+            f"hooks={len(pending_entries)}"
+        )
+        batch_payload["hooks"] = pending_entries
+        upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    # Record how much of the batch the collector has now seen. A runtime that
+    # re-sends everything uses this to know which records belong to turns it
+    # has already closed, and so which are safe to shed when the file grows.
+    if upload_result == UPLOAD_OK:
+        record_delivered_prefix(session_id, len(pending_entries))
+
+    if upload_result != UPLOAD_OK:
+        debug_log(
+            f"upload incomplete: session_id={session_id} "
+            f"result={upload_result} hooks={len(pending_entries)}"
         )
 
 
 if __name__ == "__main__":
     try:
-        main()
+        # Detached uploader: re-invoked by _spawn_detached_upload with the
+        # sentinel and a session id, it skips hook parsing (there is no stdin
+        # payload) and only runs the upload. Anything else is a normal hook.
+        if len(sys.argv) > 2 and sys.argv[1] == DETACHED_UPLOAD_ARG:
+            _upload_session_batch(sys.argv[2])
+        else:
+            main()
     except Exception:
         pass
     sys.exit(0)

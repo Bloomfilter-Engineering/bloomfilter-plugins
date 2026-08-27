@@ -85,7 +85,7 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
                                           tool_call_id, exit_code, duration_ms} pairs.
         file_edits             — list of apply_patch-derived per-file ops.
         api_calls              — list of token-usage dicts ready for
-                                 transcript_summary.api_calls (BE-schema field names).
+                                 transcript_summary.api_calls, using the API's field names.
         model                  — the model recorded for this turn's turn_context.
         time_to_first_token_ms — captured from event_msg.task_complete.
     """
@@ -288,54 +288,56 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
 
             case "response_item":
                 response_subtype = payload.get("type")
-                if response_subtype == "message":
-                    content_blocks = payload.get("content") or []
-                    message_texts = [
-                        content_block["text"]
-                        for content_block in content_blocks
-                        if isinstance(content_block, dict)
-                        and content_block.get("type") == "output_text"
-                        and content_block.get("text")
-                    ]
-                    if message_texts:
-                        assistant_chunks.extend(message_texts)
-                        # Record the whole message as one narration segment with its
-                        # timestamp so the caller can interleave intermediate
-                        # narration around tool/subagent calls instead of merging it
-                        # all into the final response.
-                        assistant_messages.append(
-                            {
-                                "timestamp": _to_iso(entry_timestamp),
-                                "text": "\n".join(message_texts),
-                            }
+                match response_subtype:
+                    case "message":
+                        content_blocks = payload.get("content") or []
+                        message_texts = [
+                            content_block["text"]
+                            for content_block in content_blocks
+                            if isinstance(content_block, dict)
+                            and content_block.get("type") == "output_text"
+                            and content_block.get("text")
+                        ]
+                        if message_texts:
+                            assistant_chunks.extend(message_texts)
+                            # Record the whole message as one narration segment with
+                            # its timestamp so the caller can interleave intermediate
+                            # narration around tool/subagent calls instead of merging
+                            # it all into the final response.
+                            assistant_messages.append(
+                                {
+                                    "timestamp": _to_iso(entry_timestamp),
+                                    "text": "\n".join(message_texts),
+                                }
+                            )
+                    case "reasoning":
+                        reasoning_starts.append(
+                            (
+                                entry_timestamp,
+                                last_event_timestamp,
+                                pending_api_call_seq,
+                            )
                         )
-                elif response_subtype == "reasoning":
-                    reasoning_starts.append(
-                        (entry_timestamp, last_event_timestamp, pending_api_call_seq)
-                    )
-                elif response_subtype in ("function_call", "custom_tool_call"):
-                    call_id = payload.get("call_id")
-                    if not call_id:
-                        continue
-                    raw_input = (
-                        payload.get("arguments")
-                        if "arguments" in payload
-                        else payload.get("input")
-                    )
-                    function_calls[call_id] = {
-                        "timestamp": entry_timestamp,
-                        "tool_name": payload.get("name") or response_subtype,
-                        "tool_input": _decode_arguments(raw_input),
-                    }
-                elif response_subtype in (
-                    "function_call_output",
-                    "custom_tool_call_output",
-                ):
-                    call_id = payload.get("call_id")
-                    if call_id:
-                        function_outputs[call_id] = (
-                            payload.get("output") or payload.get("result") or ""
+                    case "function_call" | "custom_tool_call":
+                        call_id = payload.get("call_id")
+                        if not call_id:
+                            continue
+                        raw_input = (
+                            payload.get("arguments")
+                            if "arguments" in payload
+                            else payload.get("input")
                         )
+                        function_calls[call_id] = {
+                            "timestamp": entry_timestamp,
+                            "tool_name": payload.get("name") or response_subtype,
+                            "tool_input": _decode_arguments(raw_input),
+                        }
+                    case "function_call_output" | "custom_tool_call_output":
+                        call_id = payload.get("call_id")
+                        if call_id:
+                            function_outputs[call_id] = (
+                                payload.get("output") or payload.get("result") or ""
+                            )
                 last_event_timestamp = entry_timestamp
 
     # Build paired tool_calls
@@ -467,7 +469,7 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
           ],
         }
 
-    `structured_patch` matches the BE-native shape consumed by
+    `structured_patch` matches the shape consumed by
     FileEditExtractor.count_added_lines / count_removed_lines.
     """
     if not isinstance(patch_text, str) or "*** Begin Patch" not in patch_text:

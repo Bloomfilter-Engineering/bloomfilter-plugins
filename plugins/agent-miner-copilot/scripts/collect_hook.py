@@ -1,9 +1,4 @@
 #!/usr/bin/env python3
-"""Universal hook handler for Bloomfilter agent mining (VS Code Copilot).
-
-Collects raw hook payloads, batches them in a JSONL file, and uploads
-the batch to the Bloomfilter API on Stop events.
-"""
 
 import json
 import os
@@ -17,29 +12,36 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
-    _cap_text,
+    UPLOAD_OK,
+    UPLOAD_RETRY_BUDGET_S,
+    UPLOAD_TOO_LARGE,
     append_to_batch,
     bootstrap_config,
+    _cap_text,
     clear_batch,
     debug_log,
     derive_chat_sessions_path,
     detect_runtime,
     find_copilot_transcript,
     get_git_branch,
+    is_foreign_runtime_payload,
     normalize_hook_payload,
     parse_cli_transcript,
     parse_copilot_transcript,
     read_batch,
     read_payload,
+    record_delivered_prefix,
     resolve_api_key,
     resolve_api_url,
     rewrite_batch,
+    select_uploadable_prefix,
     spawn_detached,
+    sweep_stale_batches,
     upload_batch,
     utcnow_iso,
 )
 
-# Hooks that trigger an upload to the BE. SubagentStop is included because a
+# Hooks that trigger an upload to the API. SubagentStop is included because a
 # subagent can finish after the parent turn's final Stop, which would otherwise
 # strand its entry in the batch until the next turn. The batch is cumulative and
 # the backend is idempotent, so the extra upload is safe (same rationale as the
@@ -257,14 +259,14 @@ def _overlay_chat_onto_stops(
     Returns True if any entry changed.
     """
     updated = False
-    rec_idx = 0
-    for idx, entry in enumerate(batch_entries):
+    record_index = 0
+    for index, entry in enumerate(batch_entries):
         if entry.get("hook_event_name") != "Stop":
             continue
-        if rec_idx >= len(chat_requests):
+        if record_index >= len(chat_requests):
             break
-        rec = chat_requests[rec_idx]
-        rec_idx += 1
+        rec = chat_requests[record_index]
+        record_index += 1
 
         changed = False
         if rec.get("response_content") and not entry.get("agent_response"):
@@ -290,7 +292,7 @@ def _overlay_chat_onto_stops(
             }
             changed = True
         if changed:
-            batch_entries[idx] = entry
+            batch_entries[index] = entry
             updated = True
     return updated
 
@@ -300,7 +302,7 @@ def run_reupload_worker(session_id: str) -> None:
     metadata, then overlay exact data onto every turn and re-upload.
 
     Runs in its own process (see spawn_detached) so it never blocks the Stop
-    hook. The backend's update_or_create makes the re-upload idempotent, and
+    hook. Re-sending a session is safe by design here, and
     exact token counts clear any earlier estimate.
     """
     api_key = resolve_api_key()
@@ -309,7 +311,9 @@ def run_reupload_worker(session_id: str) -> None:
         return
 
     batch_entries = read_batch(session_id)
-    n_stops = sum(1 for e in batch_entries if e.get("hook_event_name") == "Stop")
+    n_stops = sum(
+        1 for entry in batch_entries if entry.get("hook_event_name") == "Stop"
+    )
     if n_stops == 0:
         debug_log(
             f"reupload_worker: aborted session_id={session_id} reason=no-stops "
@@ -406,13 +410,80 @@ def run_reupload_worker(session_id: str) -> None:
         rewrite_batch(session_id, batch_entries)
 
     api_url = resolve_api_url()
+    _upload_with_size_backoff(
+        api_url, api_key, session_id, batch_entries, "reupload_worker"
+    )
+
+
+def _upload_with_size_backoff(
+    api_url: str,
+    api_key: str,
+    session_id: str,
+    entries: list,
+    context: str,
+) -> str:
+    """Send as much of a batch as one request can carry, shrinking on refusal.
+
+    Shared by both upload sites so they cannot drift apart: this runtime uploads
+    the batch cumulatively and never removes what it has delivered, so a body the
+    collector refuses would otherwise be refused again on every later hook and
+    the session's telemetry would stop there for good.
+
+    A prefix is safe here precisely because nothing is ever removed: every upload
+    starts at the first record, so the position of each turn is identical every
+    time and a prefix simply stops short of the newest turns, which the next
+    upload then carries.
+
+    Args:
+        api_url: Collector base URL.
+        api_key: Key for the collector, already resolved.
+        session_id: Session the batch belongs to, for logging.
+        entries: The batch snapshot, in file order.
+        context: Which caller this is, for logging.
+
+    Returns:
+        The final upload outcome, so a caller can branch on it if it needs to.
+    """
+    upload_count = select_uploadable_prefix(entries)
+    pending_entries = entries[:upload_count]
     batch_payload = {
         "session_id": session_id,
         "source": "copilot",
         "plugin_version": PLUGIN_VERSION,
-        "hooks": batch_entries,
+        "hooks": pending_entries,
     }
-    upload_batch(api_url, api_key, batch_payload)
+    # Budget starts before the first request, not after it: the first
+    # request can burn the whole socket timeout on its own, so a clock
+    # started afterwards lets the worst case run past the hook's limit
+    # and be killed mid-flight — the failure this budget exists to stop.
+    retry_deadline = time.monotonic() + UPLOAD_RETRY_BUDGET_S
+    upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    while (
+        upload_result == UPLOAD_TOO_LARGE
+        and len(pending_entries) > 1
+        and time.monotonic() < retry_deadline
+    ):
+        pending_entries = pending_entries[: len(pending_entries) // 2]
+        debug_log(
+            f"upload retry after too-large: context={context} "
+            f"session_id={session_id} hooks={len(pending_entries)}"
+        )
+        batch_payload["hooks"] = pending_entries
+        upload_result = upload_batch(api_url, api_key, batch_payload)
+
+    # Record how much of the batch the collector has now seen. A runtime that
+    # re-sends everything uses this to know which records belong to turns it has
+    # already closed, and so which are safe to shed when the file grows.
+    if upload_result == UPLOAD_OK:
+        record_delivered_prefix(session_id, len(pending_entries))
+
+    if upload_result != UPLOAD_OK:
+        debug_log(
+            f"upload incomplete: context={context} session_id={session_id} "
+            f"result={upload_result} hooks={len(pending_entries)}"
+        )
+    return upload_result
 
 
 def main() -> None:
@@ -431,6 +502,18 @@ def main() -> None:
         return
 
     payload = read_payload()
+
+    # Refuse a session that belongs to a different runtime. Editors discover and
+    # execute each other's collectors, so this one can be handed hooks from a
+    # session it does not serve — and whichever collector uploads first is the
+    # one the whole session gets filed under, so acting on it silently records
+    # another tool's work as this one's.
+    if is_foreign_runtime_payload(payload):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} "
+            "reason=payload-belongs-to-another-runtime"
+        )
+        return
     if not isinstance(payload, dict):
         debug_log(
             f"hook skipped: hook={hook_event_name} reason=non-object-payload "
@@ -489,10 +572,10 @@ def main() -> None:
         current_prompt = (payload.get("prompt") or "").strip()
         if current_prompt:
             for prior in reversed(read_batch(session_id)):
-                ev = prior.get("hook_event_name")
-                if ev == "Stop":
+                event_name = prior.get("hook_event_name")
+                if event_name == "Stop":
                     break  # a Stop closed the prior turn; this UPS is new
-                if ev == "UserPromptSubmit":
+                if event_name == "UserPromptSubmit":
                     prior_prompt = (
                         (prior.get("payload") or {}).get("prompt") or ""
                     ).strip()
@@ -508,14 +591,14 @@ def main() -> None:
 
     if runtime == "copilot-cli" and hook_event_name == "Stop":
         existing = read_batch(session_id)
-        last_idx = -1
-        for i in range(len(existing) - 1, -1, -1):
-            ev = existing[i].get("hook_event_name")
-            if ev in ("UserPromptSubmit", "Stop"):
-                last_idx = i
+        last_index = -1
+        for index in range(len(existing) - 1, -1, -1):
+            event_name = existing[index].get("hook_event_name")
+            if event_name in ("UserPromptSubmit", "Stop"):
+                last_index = index
                 break
-        if last_idx >= 0 and existing[last_idx].get("hook_event_name") == "Stop":
-            existing.pop(last_idx)
+        if last_index >= 0 and existing[last_index].get("hook_event_name") == "Stop":
+            existing.pop(last_index)
             rewrite_batch(session_id, existing)
             debug_log(
                 f"replaced prior Stop session_id={session_id} "
@@ -532,6 +615,27 @@ def main() -> None:
     # Bootstrap config on SessionStart or first UserPromptSubmit
     if hook_event_name in BOOTSTRAP_HOOKS:
         bootstrap_config(plugin_root)
+        # Expire batches whose session died before draining them. Swept on the
+        # session-start hook and nowhere else: a directory scan costs about a
+        # millisecond, fine once per session but not on a per-tool hook that
+        # fires thousands of times. A batch is only removed once fully
+        # uploaded, so without this the directory grows without limit.
+        #
+        # Deliberately BEFORE the key check below. Batching happens whether or
+        # not a key is configured, so gating the only garbage collector behind
+        # one means an install without a key keeps every prompt, tool input and
+        # tool output on disk in cleartext forever. Nothing recoverable is lost:
+        # the age threshold is weeks, and a batch that old belongs to a session
+        # that ended long ago.
+        #
+        # The session being started is passed so its own batch is never treated
+        # as stale: at this point it has appended nothing, so a resumed
+        # session's file still carries the previous sitting's mtime. Note this
+        # runtime then starts the session from an empty batch anyway (below), so
+        # here the argument only guarantees the sweep cannot race that reset.
+        if hook_event_name == "SessionStart":
+            sweep_stale_batches(current_session_id=session_id)
+
         api_key = resolve_api_key()
         if not api_key:
             debug_log(
@@ -566,7 +670,7 @@ def main() -> None:
     # envelope (_process_subagents iterates stop hooks), so we build it here and
     # write it back onto the SubagentStop entry already in the batch rather than
     # attaching it to this one. Attaching it here would create an empty child
-    # session: the BE would find no transcript and fall through to its
+    # session: the API would find no transcript and fall through to its
     # last_assistant_message summary fallback, which Copilot never sends.
     if hook_event_name == "PostToolUse" and payload.get("tool_name") == "runSubagent":
         entries = read_batch(session_id)
@@ -586,7 +690,9 @@ def main() -> None:
         # previous turn whose transcript entry hasn't been superseded yet.
         batch_entries = read_batch(session_id)
         expected_turns = sum(
-            1 for e in batch_entries if e.get("hook_event_name") == "UserPromptSubmit"
+            1
+            for entry in batch_entries
+            if entry.get("hook_event_name") == "UserPromptSubmit"
         )
 
         # Two runtimes, two transcript layouts:
@@ -609,31 +715,32 @@ def main() -> None:
         if runtime == "copilot-cli":
             parsed = parse_cli_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
-            current_req = (
+            current_request = (
                 requests[-1] if requests and len(requests) >= expected_turns else None
             )
-            have_current_turn = current_req is not None and (
-                current_req.get("response_content") or current_req.get("output_tokens")
+            have_current_turn = current_request is not None and (
+                current_request.get("response_content")
+                or current_request.get("output_tokens")
             )
             # CLI has no separate chatSessions file — the same parsed feed
             # is the authoritative source for the earlier-turn backfill.
             chat_requests = requests
         else:
-            # --- Phase 1: old transcript for messages (single parse) ---
+            # --- Step 1: old transcript for messages (single parse) ---
             # No retry-wait: the background re-upload worker below polls
             # chatSessions and overlays any missing response_content /
             # reasoning_text onto every Stop entry idempotently within
             # ~10-22 s, so blocking the Stop hook here is wasteful.
             parsed = parse_copilot_transcript(payload_path) if payload_path else None
             requests = parsed.get("requests", []) if parsed else []
-            have_current_turn = len(requests) >= expected_turns and requests[-1].get(
-                "response_content"
-            )
-            current_req = (
+            current_request = (
                 requests[-1] if requests and len(requests) >= expected_turns else None
             )
+            have_current_turn = current_request is not None and current_request.get(
+                "response_content"
+            )
 
-            # --- Phase 2: chatSessions for tokens/model/IDs (best effort) ---
+            # --- Step 2: chatSessions for tokens/model/IDs (best effort) ---
             chat_path = (
                 derive_chat_sessions_path(payload_path)
                 or find_copilot_transcript(session_id, chat_sessions_only=True)
@@ -646,46 +753,52 @@ def main() -> None:
 
             # Overlay token/model/ID data from chatSessions onto current
             # turn when available.
-            if current_req:
-                turn_idx = len(requests) - 1
-                if turn_idx < len(chat_requests):
-                    chat_req = chat_requests[turn_idx]
-                    if chat_req.get("input_tokens") or chat_req.get("output_tokens"):
-                        current_req["input_tokens"] = chat_req["input_tokens"]
-                        current_req["output_tokens"] = chat_req["output_tokens"]
-                    if chat_req.get("resolvedModel"):
-                        current_req["resolvedModel"] = chat_req["resolvedModel"]
-                    if chat_req.get("requestId"):
-                        current_req["requestId"] = chat_req["requestId"]
-                    if chat_req.get("responseId"):
-                        current_req["responseId"] = chat_req["responseId"]
+            if current_request:
+                turn_index = len(requests) - 1
+                if turn_index < len(chat_requests):
+                    chat_request = chat_requests[turn_index]
+                    if chat_request.get("input_tokens") or chat_request.get(
+                        "output_tokens"
+                    ):
+                        current_request["input_tokens"] = chat_request["input_tokens"]
+                        current_request["output_tokens"] = chat_request["output_tokens"]
+                    if chat_request.get("resolvedModel"):
+                        current_request["resolvedModel"] = chat_request["resolvedModel"]
+                    if chat_request.get("requestId"):
+                        current_request["requestId"] = chat_request["requestId"]
+                    if chat_request.get("responseId"):
+                        current_request["responseId"] = chat_request["responseId"]
                     # Prefer chatSessions reasoning_parts (has thinking_id
                     # and timestamps from toolCallRounds).
-                    if chat_req.get("reasoning_parts"):
-                        current_req["reasoning_parts"] = chat_req["reasoning_parts"]
-                        if chat_req.get("reasoning_text"):
-                            current_req["reasoning_text"] = chat_req["reasoning_text"]
+                    if chat_request.get("reasoning_parts"):
+                        current_request["reasoning_parts"] = chat_request[
+                            "reasoning_parts"
+                        ]
+                        if chat_request.get("reasoning_text"):
+                            current_request["reasoning_text"] = chat_request[
+                                "reasoning_text"
+                            ]
 
         # Build envelope fields from the combined data.
-        if current_req:
-            if current_req.get("response_content"):
-                envelope["agent_response"] = current_req["response_content"]
-            if current_req.get("reasoning_text"):
-                envelope["reasoning_text"] = current_req["reasoning_text"]
-            if current_req.get("userMessage"):
-                envelope["user_message"] = current_req["userMessage"]
+        if current_request:
+            if current_request.get("response_content"):
+                envelope["agent_response"] = current_request["response_content"]
+            if current_request.get("reasoning_text"):
+                envelope["reasoning_text"] = current_request["reasoning_text"]
+            if current_request.get("userMessage"):
+                envelope["user_message"] = current_request["userMessage"]
 
             envelope["transcript_summary"] = {
                 "api_calls": [
                     {
-                        "input_tokens": current_req.get("input_tokens", 0),
-                        "output_tokens": current_req.get("output_tokens", 0),
+                        "input_tokens": current_request.get("input_tokens", 0),
+                        "output_tokens": current_request.get("output_tokens", 0),
                         "model": (
-                            current_req.get("resolvedModel")
-                            or current_req.get("modelId", "")
+                            current_request.get("resolvedModel")
+                            or current_request.get("modelId", "")
                         ),
-                        "request_id": current_req.get("requestId", ""),
-                        "response_id": current_req.get("responseId", ""),
+                        "request_id": current_request.get("requestId", ""),
+                        "response_id": current_request.get("responseId", ""),
                     }
                 ]
             }
@@ -701,33 +814,34 @@ def main() -> None:
             # Walk Stop entries and transcript records in lockstep so
             # the Nth Stop always matches the Nth record — even when
             # some Stops already have tokens from a prior backfill.
-            rec_idx = 0
+            record_index = 0
             updated = False
-            for idx, e in enumerate(batch_entries):
-                if e.get("hook_event_name") != "Stop":
+            for index, entry in enumerate(batch_entries):
+                if entry.get("hook_event_name") != "Stop":
                     continue
-                if rec_idx >= len(earlier):
+                if record_index >= len(earlier):
                     break
-                rec = earlier[rec_idx]
-                rec_idx += 1
+                rec = earlier[record_index]
+                record_index += 1
 
                 # Check if this entry needs backfill
-                summary = e.get("transcript_summary", {})
+                summary = entry.get("transcript_summary", {})
                 calls = summary.get("api_calls", [{}])
                 has_tokens = any(
-                    c.get("input_tokens") or c.get("output_tokens") for c in calls
+                    block.get("input_tokens") or block.get("output_tokens")
+                    for block in calls
                 )
-                if e.get("agent_response") and has_tokens:
+                if entry.get("agent_response") and has_tokens:
                     continue  # already complete
 
-                if rec.get("response_content") and not e.get("agent_response"):
-                    e["agent_response"] = rec["response_content"]
-                if rec.get("reasoning_text") and not e.get("reasoning_text"):
-                    e["reasoning_text"] = rec["reasoning_text"]
-                if rec.get("userMessage") and not e.get("user_message"):
-                    e["user_message"] = rec["userMessage"]
+                if rec.get("response_content") and not entry.get("agent_response"):
+                    entry["agent_response"] = rec["response_content"]
+                if rec.get("reasoning_text") and not entry.get("reasoning_text"):
+                    entry["reasoning_text"] = rec["reasoning_text"]
+                if rec.get("userMessage") and not entry.get("user_message"):
+                    entry["user_message"] = rec["userMessage"]
                 if rec.get("input_tokens") or rec.get("output_tokens"):
-                    e["transcript_summary"] = {
+                    entry["transcript_summary"] = {
                         "api_calls": [
                             {
                                 "input_tokens": rec.get("input_tokens", 0),
@@ -740,20 +854,22 @@ def main() -> None:
                             }
                         ]
                     }
-                batch_entries[idx] = e
+                batch_entries[index] = entry
                 updated = True
             if updated:
                 rewrite_batch(session_id, batch_entries)
 
         # Inject synthetic Thinking hooks for the current turn only.
-        if current_req:
-            for part in current_req.get("reasoning_parts", []):
-                ts = part.get("timestamp", 0)
+        if current_request:
+            for part in current_request.get("reasoning_parts", []):
+                timestamp = part.get("timestamp", 0)
                 thinking_hook = {
                     "hook_event_name": "Thinking",
                     "received_at": (
-                        datetime.fromtimestamp(ts / 1000, tz=timezone.utc).isoformat()
-                        if isinstance(ts, (int, float)) and ts
+                        datetime.fromtimestamp(
+                            timestamp / 1000, tz=timezone.utc
+                        ).isoformat()
+                        if isinstance(timestamp, (int, float)) and timestamp
                         else envelope["received_at"]
                     ),
                     "plugin_version": PLUGIN_VERSION,
@@ -761,7 +877,7 @@ def main() -> None:
                         "session_id": session_id,
                         "content": part.get("content", ""),
                         "thinking_id": part.get("thinking_id", ""),
-                        "request_id": current_req.get("requestId", ""),
+                        "request_id": current_request.get("requestId", ""),
                     },
                 }
                 append_to_batch(session_id, thinking_hook)
@@ -770,8 +886,8 @@ def main() -> None:
     append_to_batch(session_id, envelope)
 
     # Upload on Stop — batch is NOT cleared so it accumulates the full
-    # session history.  The backend's update_or_create handles idempotency
-    # for existing turns.  Earlier Stop entries that were missing their
+    # session history. Re-sending records already delivered is safe by design
+    # on this runtime.  Earlier Stop entries that were missing their
     # agent_response (transcript not flushed in time) are backfilled above
     # from the now-complete transcript.
     if hook_event_name in UPLOAD_HOOKS:
@@ -792,14 +908,9 @@ def main() -> None:
             )
             return
 
-        batch_payload = {
-            "session_id": session_id,
-            "source": "copilot",
-            "plugin_version": PLUGIN_VERSION,
-            "hooks": entries,
-        }
-
-        upload_batch(api_url, api_key, batch_payload)
+        _upload_with_size_backoff(
+            api_url, api_key, session_id, entries, hook_event_name
+        )
 
         # On VS Code, chatSessions metadata is flushed ~10-22 s after Stop,
         # so if this turn shipped without exact tokens we hand off to a
@@ -817,23 +928,43 @@ def main() -> None:
         )
         needs_subagent_data = any(
             not turn.get("model")
-            for e in entries
-            for turn in (e.get("subagent_transcript") or {}).get("turns") or []
+            for entry in entries
+            for turn in (entry.get("subagent_transcript") or {}).get("turns") or []
         )
         # The worker matches chatSessions requests to Stop entries, so it has
         # nothing to do until the turn has actually stopped. Without this an
         # upload triggered by SubagentStop — which precedes the parent's Stop —
         # spawns a process that immediately aborts with reason=no-stops.
-        has_stop_event = any(e.get("hook_event_name") == "Stop" for e in entries)
+        has_stop_event = any(
+            entry.get("hook_event_name") == "Stop" for entry in entries
+        )
         if (
             has_stop_event
             and (not parent_has_tokens or needs_subagent_data)
             and runtime == "copilot-vscode"
         ):
-            python_exe = sys.executable or "python3"
-            spawned = spawn_detached(
-                [python_exe, os.path.abspath(__file__), "__reupload", session_id]
-            )
+            # Only ever an absolute interpreter path, never a bare name: a
+            # process started without an explicit executable path searches the
+            # current directory before PATH on some platforms, and the current
+            # directory here is whatever project the editor has open — so a
+            # repository shipping its own python-named binary would run instead.
+            # Skipping the refresh is the safe outcome when no path is known.
+            python_executable = sys.executable
+            spawned = False
+            if python_executable and os.path.isabs(python_executable):
+                spawned = spawn_detached(
+                    [
+                        python_executable,
+                        os.path.abspath(__file__),
+                        "__reupload",
+                        session_id,
+                    ]
+                )
+            else:
+                debug_log(
+                    f"reupload_worker: not spawned session_id={session_id} "
+                    "reason=no-absolute-interpreter-path"
+                )
             if not spawned:
                 debug_log(
                     f"reupload_worker: spawn failed session_id={session_id} "
@@ -846,8 +977,6 @@ if __name__ == "__main__":
         main()
     except Exception as exc:
         try:
-            from bloomfilter_common import debug_log
-
             debug_log(
                 f"collect_hook: unhandled exception type={type(exc).__name__} "
                 f"message={exc!s}"

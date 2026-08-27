@@ -64,7 +64,47 @@ _bf_find_python() {
     done
     IFS=:
   done
-  IFS="$_bf_oldifs"; return 1
+  IFS="$_bf_oldifs"
+
+  # PATH is not the whole machine. A hook host need not pass the user's
+  # interactive PATH, and on a stock macOS the only interpreter on a minimal one
+  # is /usr/bin/python3 -- which is 3.9, below the floor -- while the 3.10+ the
+  # user actually installed sits in Homebrew, asdf, or the python.org framework.
+  # Searching PATH alone therefore finds nothing usable and the hook captures
+  # nothing at all, on a machine that is perfectly well provisioned.
+  #
+  # Absolute paths only, same rule as above, and the framework glob is expanded
+  # newest-first so a current interpreter is preferred over an old one.
+  for _bf_cand in \
+    /opt/homebrew/bin/python3 \
+    /usr/local/bin/python3 \
+    "$HOME/.asdf/shims/python3" \
+    "$HOME/.pyenv/shims/python3" \
+    "$HOME/.local/bin/python3" \
+    /opt/local/bin/python3
+  do
+    case "$_bf_cand" in /*) ;; *) continue ;; esac
+    [ -x "$_bf_cand" ] || continue
+    _bf_probe "$_bf_cand" && { printf '%s\n' "$_bf_cand"; return 0; }
+  done
+  for _bf_cand in $(ls -d /Library/Frameworks/Python.framework/Versions/3.* 2>/dev/null | sort -r)
+  do
+    [ -x "$_bf_cand/bin/python3" ] || continue
+    _bf_probe "$_bf_cand/bin/python3" && {
+      printf '%s\n' "$_bf_cand/bin/python3"; return 0; }
+  done
+  return 1
+}
+
+# With no interpreter there is no collector, and the collector is what writes
+# debug.log -- so this failure is otherwise completely silent: no data, and
+# nothing anywhere to say why. Leave the one line from the shell instead.
+_bf_note_no_python() {
+  _bf_note_dir="${XDG_CONFIG_HOME:-$HOME/.config}/bloomfilter"
+  mkdir -p "$_bf_note_dir" 2>/dev/null || return 0
+  printf '%sZ [%s] hook skipped: reason=no-python-3.10-found event=%s\n' \
+    "$(date -u +%Y-%m-%dT%H:%M:%S 2>/dev/null || printf 'unknown-time')" \
+    "$(basename "$root")" "$event" >> "$_bf_note_dir/debug.log" 2>/dev/null || true
 }
 
 # `|| true` keeps the graceful {} contract intrinsic even under an inherited
@@ -73,7 +113,10 @@ _bf_find_python() {
 python="$(_bf_find_python)" || true
 if [ -z "$python" ]; then
   # No usable Python: return a valid empty hook response instead of failing the
-  # host hook, matching run-hook.ps1's graceful behavior.
+  # host hook, matching run-hook.ps1's graceful behavior. Record why first —
+  # otherwise the only symptom is an absence of data with nothing to explain it,
+  # because the thing that writes debug.log is the collector we cannot start.
+  _bf_note_no_python
   printf '%s\n' '{}'
   exit 0
 fi
