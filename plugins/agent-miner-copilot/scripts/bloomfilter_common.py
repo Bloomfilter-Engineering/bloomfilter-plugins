@@ -420,7 +420,8 @@ def bootstrap_config(plugin_root: str) -> str:
         if platform.system() != "Windows":
             os.chmod(config_file, stat.S_IRUSR | stat.S_IWUSR)  # 0o600
         print(
-            f"[bloomfilter] Created config at {config_file} — add your API key to get started."
+            f"[bloomfilter] Created config at {config_file} — add your API key to get started.",
+            file=sys.stderr,
         )
 
     return config_file

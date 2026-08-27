@@ -1980,11 +1980,11 @@ def extract_subagent_conversation(
 
     Returns:
         ``{"turns": [...]}`` — the backend's child-session shape — or None when
-        the transcript path is empty or absent from disk. NOTE that a rollout
-        which parses to no turns yields a TRUTHY ``{"turns": []}`` rather than
-        None, so a caller gating on ``if conversation:`` will attach an empty
-        child conversation. The cursor, claude-code and copilot collectors
-        guard against that; this one does not.
+        the transcript path is empty, absent from disk, or parses to no turns.
+        The no-turns case returns None rather than a truthy ``{"turns": []}``
+        precisely so a caller gating on ``if conversation:`` skips it instead of
+        attaching an empty child conversation, matching the cursor, claude-code
+        and copilot collectors.
     """
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
         return None
@@ -2017,4 +2017,12 @@ def extract_subagent_conversation(
     # partially flushed. Replace it with the authoritative message.
     if result and expected and not matched and result.get("turns"):
         result.get("turns")[-1]["agent_response"] = _cap_text(expected_last_message)
+
+    if isinstance(result, dict) and not result.get("turns"):
+        # Empty/corrupt rollout parsed to zero turns — treat as absent so the
+        # caller's `if conversation:` guard skips it instead of uploading an
+        # empty subagent_transcript. ``{"turns": []}`` is truthy, so returning
+        # it would materialize a child session with nothing in it.
+        return None
+
     return result
