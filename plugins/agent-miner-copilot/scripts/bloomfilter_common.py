@@ -331,7 +331,8 @@ def _resolve_debug_log_dir() -> str:
     Copilot. The DEBUG_LOG_TAG prefix on each line disambiguates the source.
 
     Returns:
-        Absolute path to the directory debug.log is written in.
+        Path to the directory debug.log is written in — absolute on the same
+        condition as :func:`get_config_dir`.
     """
     return get_config_dir()
 
@@ -405,8 +406,9 @@ def bootstrap_config(plugin_root: str) -> str:
             template that seeds a first-run config.
 
     Returns:
-        Absolute path to the user config file, whether it already existed or
-        was created by this call.
+        Path to the user config file, whether it already existed or was created
+        by this call — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
@@ -508,8 +510,8 @@ def read_payload() -> Any:
     Returns:
         The parsed JSON value. ``{}`` ONLY when stdin is empty or blank:
         malformed JSON is not swallowed here, ``json.loads`` raises
-        JSONDecodeError, which the entrypoint's blanket guard turns into a
-        silent no-op.
+        JSONDecodeError, which the entrypoint catches and records in debug.log
+        before exiting 0.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -538,8 +540,10 @@ def spawn_detached(args: list[str]) -> bool:
             would run instead.
 
     Returns:
-        True when the child was spawned. False on any failure, so the caller
-        can fall back to doing the work inline rather than losing it.
+        True when the child was spawned. False on any failure — the caller
+        decides what that costs. The one caller in this plugin does NOT fall
+        back to running the work inline: it logs that exact token counts will
+        not be backfilled, and the re-upload is simply skipped.
     """
     try:
         kwargs = {
@@ -723,7 +727,8 @@ def get_batch_dir() -> str:
     """Return (and create) the batch directory.
 
     Returns:
-        Absolute path to the batch directory, which is created if absent.
+        Path to the batch directory, which is created if absent — absolute on
+        the same condition as :func:`get_config_dir`.
     """
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
@@ -744,7 +749,8 @@ def get_batch_file(session_id: str) -> str:
         session_id: Session whose batch file path is built.
 
     Returns:
-        Absolute path to that session's JSONL batch file.
+        Path to that session's JSONL batch file — absolute on the same
+        condition as :func:`get_config_dir`.
     """
     safe_id = os.path.basename(session_id)
     if not safe_id or safe_id != session_id or ".." in session_id:
@@ -759,7 +765,8 @@ def _delivered_marker_path(session_id: str) -> str:
         session_id: Session the batch belongs to.
 
     Returns:
-        Absolute path to the marker file.
+        Path to the marker file — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     return get_batch_file(session_id) + ".sent"
 
@@ -2458,8 +2465,10 @@ def _reconstruct_session_state(entries: list[dict[str, Any]]) -> list[Any]:
             that order, so a shuffled list yields the wrong state.
 
     Returns:
-        The fully materialised list of request objects. Entries that are not
-        dicts are left in place for the caller to filter.
+        The fully materialised list of request objects. Non-dict members of
+        that OUTPUT list are left in place for the caller to filter. Note the
+        input is not equally tolerant: a non-dict *entry* raises AttributeError
+        out of this function, which the caller degrades to the empty shape.
     """
     state = {}
     for entry in entries:
@@ -2722,7 +2731,10 @@ def parse_cli_transcript(events_path: str) -> dict[str, Any]:
             yields the empty shape rather than raising.
 
     Returns:
-        The same dict shape as :func:`parse_copilot_transcript`.
+        The same dict shape as :func:`parse_copilot_transcript` EXCEPT that
+        ``subagents`` is never present — the CLI feed carries no subagent
+        records — so read it with ``.get("subagents", {})`` rather than
+        indexing.
     """
     empty = {
         "requests": [],

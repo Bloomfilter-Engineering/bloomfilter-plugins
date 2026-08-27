@@ -242,7 +242,8 @@ def _resolve_debug_log_dir() -> str:
     across all plugins.
 
     Returns:
-        str: Absolute path to the directory debug.log is written in.
+        str: Path to the directory debug.log is written in — absolute on the same
+        condition as :func:`get_config_dir`.
     """
     return get_config_dir()
 
@@ -316,8 +317,9 @@ def bootstrap_config(plugin_root: str) -> str:
             ``bloomfilter.config.json`` template that seeds a first-run config.
 
     Returns:
-        str: Absolute path to the user config file, whether it already existed
-            or was created by this call.
+        str: Path to the user config file, whether it already existed or was
+            created by this call — absolute on the same condition as
+            :func:`get_config_dir`.
     """
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
@@ -423,7 +425,8 @@ def read_payload() -> Any:
         Any: The parsed JSON value — normally a dict, but any JSON type the
             runtime sends. ``{}`` ONLY when stdin is empty or blank: malformed
             JSON is not swallowed here, ``json.loads`` raises JSONDecodeError,
-            which the entrypoint's blanket guard turns into a silent no-op.
+            which the entrypoint catches and records in debug.log before
+            exiting 0.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -643,7 +646,8 @@ def get_batch_dir() -> str:
     """Return the directory holding per-session batch files, creating it.
 
     Returns:
-        Absolute path to ``<config-dir>/batches``.
+        Path to ``<config-dir>/batches`` — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     batch_dir_path = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
@@ -665,7 +669,8 @@ def get_batch_file(session_id: str) -> str:
             the file stem verbatim, so it must be a bare filename component.
 
     Returns:
-        Absolute path to ``<batch-dir>/<session_id>.jsonl``.
+        Path to ``<batch-dir>/<session_id>.jsonl`` — absolute on the same
+        condition as :func:`get_config_dir`.
 
     Raises:
         ValueError: If *session_id* is empty, contains a path separator, or
@@ -803,7 +808,8 @@ def _delivered_marker_path(session_id: str) -> str:
         session_id: Session the batch belongs to.
 
     Returns:
-        Absolute path to the marker file.
+        Path to the marker file — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     return get_batch_file(session_id) + ".sent"
 

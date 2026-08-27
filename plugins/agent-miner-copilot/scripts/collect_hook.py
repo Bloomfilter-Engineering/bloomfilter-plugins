@@ -359,9 +359,12 @@ def run_reupload_worker(session_id: str) -> None:
 
     Args:
         session_id: The session whose batch is polled, overlaid and re-sent.
-            The worker aborts without re-uploading when no API key is
+            The worker returns without re-uploading when no API key is
             configured, when the batch holds no Stop entry to match against,
-            or when the flush does not arrive inside its budget.
+            when no chatSessions path is found, when that file parses to no
+            requests, or when the batch is empty after polling. Exhausting the
+            poll budget is NOT one of those: it is logged and the worker
+            continues, overlaying whatever partial data has flushed so far.
     """
     api_key = resolve_api_key()
     if not api_key:
@@ -549,11 +552,14 @@ def main() -> None:
     """Run one hook, or the detached re-upload worker.
 
     An argv of ``__reupload <session_id>`` runs the worker; anything else is
-    treated as a hook event name. This runtime keeps no allow-list, so any
-    non-empty event name is enveloped and appended — only an empty argv, a
-    payload belonging to another runtime, or a missing session id returns
-    early. Every failure is swallowed by the caller's guard, so this must
-    never raise into the host.
+    treated as a hook event name. This runtime keeps no allow-list, so an
+    event name is never rejected for being unrecognised. It still returns
+    early without recording anything on: an empty argv; a payload belonging
+    to another runtime; a payload that is not a JSON object; a missing
+    session id; a UserPromptSubmit carrying an in-flight subagent's own
+    prompt; a duplicate UserPromptSubmit from the CLI's new-session quirk;
+    and a CLI Stop with no API key configured. Every failure is swallowed by
+    the caller's guard, so this must never raise into the host.
     """
     # Detached background re-upload worker entrypoint.
     if len(sys.argv) > 1 and sys.argv[1] == "__reupload":
@@ -828,12 +834,8 @@ def main() -> None:
                     if chat_request.get("input_tokens") or chat_request.get(
                         "output_tokens"
                     ):
-                        current_request["input_tokens"] = chat_request.get(
-                            "input_tokens"
-                        )
-                        current_request["output_tokens"] = chat_request.get(
-                            "output_tokens"
-                        )
+                        current_request["input_tokens"] = chat_request["input_tokens"]
+                        current_request["output_tokens"] = chat_request["output_tokens"]
                     if chat_request.get("resolvedModel"):
                         current_request["resolvedModel"] = chat_request.get(
                             "resolvedModel"

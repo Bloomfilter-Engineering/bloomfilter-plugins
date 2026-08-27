@@ -458,7 +458,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
         # apply_patch is Codex's primary file-edit mechanism. Its input is a
         # raw patch text covering one or more files; split it so each file
         # gets its own AgentFileEdit downstream.
-        if call_data.get("tool_name") == "apply_patch":
+        if call_data["tool_name"] == "apply_patch":
             patch_text = tool_input if isinstance(tool_input, str) else ""
             for file_operation in parse_apply_patch(patch_text):
                 file_edits.append(

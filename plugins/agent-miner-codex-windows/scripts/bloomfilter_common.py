@@ -142,7 +142,8 @@ def _resolve_debug_log_dir() -> str:
     config.json and batches/ — one well-known place to look for diagnostics.
 
     Returns:
-        Absolute path to the directory debug.log is written in.
+        Path to the directory debug.log is written in — absolute on the same
+        condition as :func:`get_config_dir`.
     """
     return get_config_dir()
 
@@ -254,8 +255,9 @@ def bootstrap_config(plugin_root: str) -> str:
             template that seeds a first-run config.
 
     Returns:
-        Absolute path to the user config file, whether it already existed or
-        was created by this call.
+        Path to the user config file, whether it already existed or was created
+        by this call — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     config_dir = get_config_dir()
     config_file_path = os.path.join(config_dir, "config.json")
@@ -354,8 +356,9 @@ def read_payload() -> Any:
     Returns:
         The parsed JSON value. ``{}`` ONLY when stdin is empty or blank:
         malformed JSON is not swallowed here, ``json.loads`` raises
-        JSONDecodeError, which the entrypoint's blanket guard turns into a
-        silent no-op.
+        JSONDecodeError. This runtime's entrypoint catches it WITHOUT logging,
+        so a malformed payload is an invisible no-op — unlike the other
+        collectors, which record it in debug.log.
     """
     if platform.system() == "Windows":
         # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
@@ -510,7 +513,8 @@ def get_batch_dir() -> str:
     """Return and create the Bloomfilter hook batch directory.
 
     Returns:
-        Absolute path to the batch directory, which is created if absent.
+        Path to the batch directory, which is created if absent — absolute on
+        the same condition as :func:`get_config_dir`.
     """
     batch_dir = os.path.join(get_config_dir(), "batches")
     # Refuse a symlinked batch directory. The config root is taken from the
@@ -531,7 +535,8 @@ def get_batch_file(session_id: str) -> str:
         session_id: Session whose batch file path is built.
 
     Returns:
-        Absolute path to that session's JSONL batch file.
+        Path to that session's JSONL batch file — absolute on the same
+        condition as :func:`get_config_dir`.
     """
     safe_session_id = os.path.basename(session_id)
     if not safe_session_id or safe_session_id != session_id or ".." in session_id:
@@ -546,7 +551,8 @@ def _delivered_marker_path(session_id: str) -> str:
         session_id: Session the batch belongs to.
 
     Returns:
-        Absolute path to the marker file.
+        Path to the marker file — absolute on the same condition as
+        :func:`get_config_dir`.
     """
     return get_batch_file(session_id) + ".sent"
 
