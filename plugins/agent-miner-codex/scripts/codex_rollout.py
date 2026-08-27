@@ -574,8 +574,10 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
     FileEditExtractor.count_added_lines / count_removed_lines.
 
     Args:
-        patch_text: The raw ``apply_patch`` body. The outer ``*** Begin Patch``
-            / ``*** End Patch`` markers are optional.
+        patch_text: A full ``apply_patch`` payload. The opening
+            ``*** Begin Patch`` marker is REQUIRED — an unwrapped body is
+            rejected rather than parsed, so callers must not strip it. The
+            closing ``*** End Patch`` marker is optional.
 
     Returns:
         One dict per file touched, in patch order. An empty list when
@@ -584,7 +586,9 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
     if not isinstance(patch_text, str) or "*** Begin Patch" not in patch_text:
         return []
 
-    # Strip the outer markers if present; tolerate inputs without them.
+    # Strip the outer markers. Only the closing one can legitimately be absent
+    # here — the guard above already rejected anything lacking an opening
+    # ``*** Begin Patch``.
     body = patch_text
     begin_index = body.find("*** Begin Patch")
     if begin_index >= 0:
