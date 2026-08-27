@@ -14,6 +14,13 @@ def _read_lines(path: str) -> Iterator[dict[str, Any]]:
     affected lines just fail JSON decoding (caught below) and are skipped.
     Non-object JSON values (arrays/scalars) are filtered out so callers can
     rely on dict-shaped entries.
+
+    Args:
+        path: Rollout JSONL file to read.
+
+    Yields:
+        Each line that decodes to a JSON object, in file order. Blank lines,
+        undecodable lines and non-object JSON values are skipped silently.
     """
     with open(path, encoding="utf-8", errors="replace") as rollout_file:
         for raw_line in rollout_file:
@@ -29,7 +36,15 @@ def _read_lines(path: str) -> Iterator[dict[str, Any]]:
 
 
 def _parse_iso(timestamp_string: str | None) -> datetime | None:
-    """Parse an ISO 8601 timestamp string (with optional trailing Z) to datetime."""
+    """Parse an ISO 8601 timestamp string (with optional trailing Z) to datetime.
+
+    Args:
+        timestamp_string: Timestamp to parse. A trailing ``Z`` is rewritten to
+            ``+00:00`` first, which :func:`datetime.fromisoformat` accepts.
+
+    Returns:
+        The parsed datetime, or None when the input is empty or unparseable.
+    """
     if not timestamp_string:
         return None
     try:
@@ -42,14 +57,35 @@ def _parse_iso(timestamp_string: str | None) -> datetime | None:
 
 
 def _ms_between(start: datetime | None, end: datetime | None) -> int | None:
-    """Return milliseconds between two datetimes, or None if either is missing."""
+    """Return milliseconds between two datetimes, or None if either is missing.
+
+    Args:
+        start: Start of the span.
+        end: End of the span.
+
+    Returns:
+        Whole milliseconds from *start* to *end*, or None when either bound is
+        missing. A negative span is returned as-is rather than clamped.
+    """
     if not start or not end:
         return None
     return int((end - start).total_seconds() * 1000)
 
 
 def _decode_arguments(raw_arguments: Any) -> Any:
-    """Codex ships function_call.arguments as a JSON string; decode if possible."""
+    """Codex ships function_call.arguments as a JSON string; decode if possible.
+
+    Args:
+        raw_arguments: The recorded ``function_call.arguments`` value, normally
+            a JSON string but tolerated as any type.
+
+    Returns:
+        The decoded object when *raw_arguments* is a string holding valid JSON,
+        otherwise the value unchanged — an undecodable string is passed through
+        so the tool call is still reported. Only JSONDecodeError and ValueError
+        are caught, so pathologically nested input can still raise
+        RecursionError.
+    """
     if isinstance(raw_arguments, (dict, list)):
         return raw_arguments
     if not isinstance(raw_arguments, str):
@@ -61,7 +97,16 @@ def _decode_arguments(raw_arguments: Any) -> Any:
 
 
 def parse_session_meta(path: str) -> dict[str, str]:
-    """Return session-level metadata fields from the rollout's session_meta line."""
+    """Return session-level metadata fields from the rollout's session_meta line.
+
+    Args:
+        path: Rollout JSONL file to read.
+
+    Returns:
+        ``cli_version``, ``originator`` and ``model_provider`` from the first
+        ``session_meta`` entry, each defaulting to ''. An empty dict when the
+        rollout has no such entry.
+    """
     for entry in _read_lines(path):
         if entry.get("type") != "session_meta":
             continue
@@ -88,6 +133,14 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
                                  transcript_summary.api_calls, using the API's field names.
         model                  — the model recorded for this turn's turn_context.
         time_to_first_token_ms — captured from event_msg.task_complete.
+
+    Args:
+        path: Rollout JSONL file to read.
+        turn_id: The ``turn_context`` turn to extract. An empty value yields
+            the empty-turn shape rather than scanning the file.
+
+    Returns:
+        The per-turn dict described above, with every key always present.
     """
     if not turn_id:
         return _empty_turn()
@@ -103,6 +156,13 @@ def parse_transcript(path: str) -> dict[str, Any]:
     ``tool_calls``). Per-turn token totals are summed from the turn's
     ``token_count`` events, matching how the main-session path aggregates
     ``api_calls``. The rollout is read once and reused across all turns.
+
+    Args:
+        path: Rollout JSONL file to read.
+
+    Returns:
+        ``{"turns": [...]}`` — one turn per ``turn_context`` turn_id, in
+        first-seen order. The list is empty when the rollout records no turns.
     """
     entries = list(_read_lines(path))
     turns = [
@@ -113,7 +173,14 @@ def parse_transcript(path: str) -> dict[str, Any]:
 
 
 def _iter_turn_ids(entries: list[dict[str, Any]]) -> list[str]:
-    """Return turn_context turn_ids in first-seen order."""
+    """Return turn_context turn_ids in first-seen order.
+
+    Args:
+        entries: Rollout entries already read into memory.
+
+    Returns:
+        Each distinct ``turn_context`` turn_id, in the order it first appears.
+    """
     seen: list[str] = []
     for entry in entries:
         if entry.get("type") != "turn_context":
@@ -130,6 +197,13 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
     Token totals sum the turn's ``api_calls`` (each already
     input-minus-cached) so accounting matches the main-session path. Codex
     exposes no cache-creation figure, so ``cache_creation_tokens`` is 0.
+
+    Args:
+        turn: A :func:`_build_turn` result for one turn.
+
+    Returns:
+        The same turn in the backend's child-turn shape: prompt, response,
+        per-turn token totals and tool calls.
     """
     api_calls = turn.get("api_calls") or []
     input_tokens = sum(
@@ -166,7 +240,18 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
-    """Extract per-turn data for ``turn_id`` from pre-read rollout entries."""
+    """Extract per-turn data for ``turn_id`` from pre-read rollout entries.
+
+    Args:
+        entries: Rollout entries already read into memory, in file order. The
+            walk tracks turn boundaries itself, so the whole rollout is passed
+            rather than a pre-filtered slice.
+        turn_id: The ``turn_context`` turn to extract.
+
+    Returns:
+        The same shape as :func:`parse_turn`, with every key always present so
+        callers never have to test for absence.
+    """
     # First pass: track turn_id boundaries, collect raw events.
     current_turn_id: str | None = None
     turn_model: str = ""
@@ -175,17 +260,25 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     turn_started_at: datetime | None = None
     turn_ended_at: datetime | None = None
     user_prompt_text: str = ""
-    # list of (reasoning_timestamp, previous_event_timestamp, api_call_seq_at_emit)
+    # Each item is (reasoning_timestamp, previous_event_timestamp,
+    # api_call_sequence_at_emit).
     reasoning_starts: list[tuple[datetime | None, datetime | None, int]] = []
     function_calls: dict[str, dict[str, Any]] = {}
     function_outputs: dict[str, str] = {}
     execution_metadata: dict[str, dict[str, Any]] = {}
     api_calls: list[dict[str, Any]] = []
     last_event_timestamp: datetime | None = None
-    pending_api_call_seq: int = 0
+    pending_api_call_sequence: int = 0
     time_to_first_token_ms: int | None = None
 
     def in_turn() -> bool:
+        """Report whether the walk is currently inside the requested turn.
+
+        Returns:
+            True while the most recent ``turn_context`` entry named *turn_id*.
+            Entries that carry no turn of their own are attributed to whichever
+            turn is open, so this is the gate for collecting them.
+        """
         return current_turn_id == turn_id
 
     for entry in entries:
@@ -268,11 +361,13 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                             }
                         )
                         # token_count closes the current API-call window.
-                        pending_api_call_seq += 1
+                        pending_api_call_sequence += 1
                     case "task_complete":
-                        raw_ttft = payload.get("time_to_first_token_ms")
-                        if isinstance(raw_ttft, (int, float)):
-                            time_to_first_token_ms = int(raw_ttft)
+                        raw_time_to_first_token_ms = payload.get(
+                            "time_to_first_token_ms"
+                        )
+                        if isinstance(raw_time_to_first_token_ms, (int, float)):
+                            time_to_first_token_ms = int(raw_time_to_first_token_ms)
                     case "user_message":
                         # The turn's user prompt (subagent transcript needs it).
                         # First non-empty wins so an inherited/forked turn keeps
@@ -292,7 +387,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                     case "message":
                         content_blocks = payload.get("content") or []
                         message_texts = [
-                            content_block["text"]
+                            content_block.get("text")
                             for content_block in content_blocks
                             if isinstance(content_block, dict)
                             and content_block.get("type") == "output_text"
@@ -315,7 +410,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                             (
                                 entry_timestamp,
                                 last_event_timestamp,
-                                pending_api_call_seq,
+                                pending_api_call_sequence,
                             )
                         )
                     case "function_call" | "custom_tool_call":
@@ -363,7 +458,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
         # apply_patch is Codex's primary file-edit mechanism. Its input is a
         # raw patch text covering one or more files; split it so each file
         # gets its own AgentFileEdit downstream.
-        if call_data["tool_name"] == "apply_patch":
+        if call_data.get("tool_name") == "apply_patch":
             patch_text = tool_input if isinstance(tool_input, str) else ""
             for file_operation in parse_apply_patch(patch_text):
                 file_edits.append(
@@ -380,7 +475,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     # reasoning's preceding event and the reasoning timestamp itself.
     # reasoning_output_tokens is the call-level total for the API call this
     # block belongs to; multiple blocks in the same call share that total —
-    # use api_call_seq to dedupe at aggregation time.
+    # use the api_call_seq field to de-duplicate at aggregation time.
     thinking_blocks: list[dict[str, Any]] = []
     for (
         reasoning_timestamp,
@@ -426,6 +521,12 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
 
 
 def _empty_turn() -> dict[str, Any]:
+    """Return the turn shape with every field at its empty value.
+
+    Returns:
+        A turn dict carrying no data. Used when there is no turn to parse, so
+        callers can read every key without testing for absence first.
+    """
     return {
         "assistant_text": "",
         "thinking_blocks": [],
@@ -471,6 +572,14 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
 
     `structured_patch` matches the shape consumed by
     FileEditExtractor.count_added_lines / count_removed_lines.
+
+    Args:
+        patch_text: The raw ``apply_patch`` body. The outer ``*** Begin Patch``
+            / ``*** End Patch`` markers are optional.
+
+    Returns:
+        One dict per file touched, in patch order. An empty list when
+        *patch_text* is not a string or carries no ``*** Begin Patch`` marker.
     """
     if not isinstance(patch_text, str) or "*** Begin Patch" not in patch_text:
         return []
@@ -492,6 +601,12 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
     current_hunk_lines: list[str] | None = None
 
     def flush_current_operation() -> None:
+        """Close the operation being built and append it to *operations*.
+
+        Finalizes any hunk still open, then resets the operation, hunk list and
+        hunk-line accumulators. A no-op when no operation is open, so it is
+        safe to call before every file header and once at the end.
+        """
         nonlocal current_operation, current_hunks, current_hunk_lines
         if current_operation is None:
             return
@@ -538,32 +653,42 @@ def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
             # Pre-amble or noise between markers.
             continue
 
-        if current_operation["file_action"] == "MODIFY":
-            if line.startswith("@@"):
-                if current_hunk_lines is not None:
-                    current_hunks.append(_finalize_hunk(current_hunk_lines))
-                current_hunk_lines = []
-                continue
-            if current_hunk_lines is None:
-                # Update body without an explicit @@ — start an implicit hunk.
-                current_hunk_lines = []
-            if line.startswith(("+", "-", " ")):
-                current_hunk_lines.append(line)
-            elif line == "":
-                current_hunk_lines.append(" ")  # blank context line
-        elif current_operation["file_action"] == "CREATE":
-            if line.startswith("+"):
-                current_hunk_lines.append(line)
-            elif line == "":
-                current_hunk_lines.append("+")
-        # DELETE has no body lines
+        match current_operation["file_action"]:
+            case "MODIFY":
+                if line.startswith("@@"):
+                    if current_hunk_lines is not None:
+                        current_hunks.append(_finalize_hunk(current_hunk_lines))
+                    current_hunk_lines = []
+                    continue
+                if current_hunk_lines is None:
+                    # Update body without an explicit @@ — start an implicit hunk.
+                    current_hunk_lines = []
+                if line.startswith(("+", "-", " ")):
+                    current_hunk_lines.append(line)
+                elif line == "":
+                    current_hunk_lines.append(" ")  # blank context line
+            case "CREATE":
+                if line.startswith("+"):
+                    current_hunk_lines.append(line)
+                elif line == "":
+                    current_hunk_lines.append("+")
+            # DELETE has no body lines
 
     flush_current_operation()
     return operations
 
 
 def _finalize_hunk(hunk_lines: list[str]) -> dict[str, Any]:
-    """Wrap a list of patch lines in the structured_patch hunk shape."""
+    """Wrap a list of patch lines in the structured_patch hunk shape.
+
+    Args:
+        hunk_lines: Patch lines for one hunk, each prefixed '+', '-' or ' '.
+
+    Returns:
+        The hunk in ``structured_patch`` shape. ``old_start`` and ``new_start``
+        are always 1: Codex's grammar carries no line numbers, and the consumer
+        counts added and removed lines rather than locating them.
+    """
     old_lines_count = sum(1 for line in hunk_lines if line.startswith(("-", " ")))
     new_lines_count = sum(1 for line in hunk_lines if line.startswith(("+", " ")))
     return {
@@ -576,7 +701,15 @@ def _finalize_hunk(hunk_lines: list[str]) -> dict[str, Any]:
 
 
 def _to_iso(datetime_value: datetime | None) -> str:
-    """Serialize a datetime to a UTC ISO 8601 string, or '' if missing."""
+    """Serialize a datetime to a UTC ISO 8601 string, or '' if missing.
+
+    Args:
+        datetime_value: The datetime to serialize. A naive value is read as
+            already being UTC rather than local time.
+
+    Returns:
+        The UTC ISO 8601 representation, or '' when *datetime_value* is None.
+    """
     if not datetime_value:
         return ""
     if datetime_value.tzinfo is None:

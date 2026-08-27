@@ -14,7 +14,7 @@ from bloomfilter_common import (
     UPLOAD_RETRY_BUDGET_S,
     UPLOAD_TOO_LARGE,
     append_to_batch,
-    append_to_batch_deduped,
+    append_to_batch_deduplicated,
     bootstrap_config,
     clear_batch,
     debug_log,
@@ -57,8 +57,22 @@ def _thought_already_batched(records: list, payload: dict) -> bool:
     Matches on ``(text, duration_ms)`` — which catches both the same-id and the
     suffixed-id copies — and scans back only to the current turn's
     ``beforeSubmitPrompt`` boundary. Genuinely distinct thoughts recur across
-    turns (and legitimately share a ``generation_id`` within one), so the dedup
-    must stay turn-scoped rather than span the whole session.
+    turns (and legitimately share a ``generation_id`` within one), so the
+    de-duplication must stay turn-scoped rather than span the whole session.
+
+    Args:
+        records: Envelopes already in this session's batch, oldest first. The
+            scan walks them in reverse and stops at the current turn's opening
+            ``beforeSubmitPrompt``.
+        payload: The incoming ``afterAgentThought`` payload, compared on its
+            ``text`` and ``duration_ms``.
+
+    Returns:
+        True when an identical thought is already recorded in this turn, so the
+        caller drops the incoming copy. False otherwise — including when the
+        payload carries no text, which is reported as NOT a duplicate and so is
+        still appended. Do not "simplify" that branch to True: it would start
+        discarding text-less thoughts, which is a behaviour change.
     """
     text = payload.get("text")
     if not text:
@@ -80,6 +94,14 @@ def _resolve_project_dir(payload: dict) -> str:
     Prefers the first non-empty of: payload cwd, the Cursor/Claude project-dir
     env vars, then the first ``workspace_roots`` entry. Falls back to the
     process working directory when none is set.
+
+    Args:
+        payload: The hook payload, read for ``cwd`` and ``workspace_roots``.
+
+    Returns:
+        The resolved directory. In practice never '', since the final fallback
+        is the process's own cwd — though ``os.getcwd()`` raises OSError if
+        that directory has been unlinked.
     """
     candidates = [
         payload.get("cwd", ""),
@@ -296,11 +318,12 @@ def main() -> None:
     # child conversation and attach it. Cursor fires this hook under the PARENT
     # conversation_id (so it lands in the parent batch) but leaves
     # agent_transcript_path null — the transcript lives at
-    # <parent_conv_dir>/subagents/<child_conv>.jsonl, discovered by matching the
-    # task. The backend turns subagent_transcript into a linked child
+    # <parent-conversation-dir>/subagents/<child-conversation>.jsonl, discovered
+    # by matching the task. The backend turns subagent_transcript into a linked
     # child session keyed on payload.subagent_id. Read NOW — before the file is
-    # GC'd. The subagent_id carries an embedded newline (tool_call_id + gen id);
-    # leave it as-is, it is stable across start/stop so backend keying holds.
+    # garbage-collected. The subagent_id carries an embedded newline (the tool
+    # call id plus a generation id); leave it as-is, it is stable across
+    # start/stop so the backend's keying holds.
     if hook_event_name == "subagentStop":
         parent_transcript = payload.get("transcript_path") or os.environ.get(
             "CURSOR_TRANSCRIPT_PATH", ""
@@ -313,7 +336,7 @@ def main() -> None:
             envelope["subagent_transcript"] = conversation
 
     if hook_event_name == "afterAgentThought":
-        appended = append_to_batch_deduped(
+        appended = append_to_batch_deduplicated(
             session_id,
             envelope,
             lambda records: _thought_already_batched(records, payload),
@@ -446,12 +469,12 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
+    except Exception as exception:
         debug_log(
-            f"collect_hook: unhandled exception type={type(exc).__name__} "
-            f"message={exc!s}"
+            f"collect_hook: unhandled exception type={type(exception).__name__} "
+            f"message={exception!s}"
         )
-        print(f"[bloomfilter] collect_hook failed: {exc}", file=sys.stderr)
+        print(f"[bloomfilter] collect_hook failed: {exception}", file=sys.stderr)
     # Empty JSON on stdout — signals Cursor to proceed without modification.
     print("{}")
     sys.exit(0)

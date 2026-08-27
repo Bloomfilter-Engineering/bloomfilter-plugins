@@ -21,7 +21,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.3.0"
+PLUGIN_VERSION = "0.3.1"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -180,11 +180,19 @@ TRANSCRIPT_READ_BYTES = 8_000_000
 # ---------------------------------------------------------------------------
 
 
-def get_config_dir():
+def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform.
 
     Returns:
-        Absolute path to the Bloomfilter config directory for this platform.
+        str: The Bloomfilter config directory for this platform. Absolute
+            whenever the home directory resolves — which covers every case
+            observed in practice, including a relative
+            ``XDG_CONFIG_HOME``/``APPDATA``, since the fallback discards the
+            env var and rebuilds from the home directory. NOT guaranteed
+            absolute in one residual case: if ``expanduser`` itself returns
+            ``~`` unchanged (no HOME and no passwd entry, as in a container
+            running an unmapped UID) the fallback rebuilds from that same
+            ``~`` and cannot recover.
     """
     system = platform.system()
     if system == "Windows":
@@ -205,8 +213,15 @@ def get_config_dir():
     return os.path.join(xdg, "bloomfilter")
 
 
-def secure_makedirs(path):
-    """Create directories with owner-only permissions on Unix."""
+def secure_makedirs(path: str) -> None:
+    """Create directories with owner-only permissions on Unix.
+
+    Args:
+        path (str): Directory to create. Missing parents are created too. An
+            existing directory is reused rather than raising — but its mode is
+            still narrowed to 0700 on Unix, so calling this on a directory that
+            was deliberately left group- or world-readable will tighten it.
+    """
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
         os.chmod(path, stat.S_IRWXU)  # 0o700
@@ -217,7 +232,7 @@ def secure_makedirs(path):
 # ---------------------------------------------------------------------------
 
 
-def _resolve_debug_log_dir():
+def _resolve_debug_log_dir() -> str:
     """Return the directory for debug.log.
 
     Always the bloomfilter config dir (~/.config/bloomfilter on macOS/Linux,
@@ -225,14 +240,21 @@ def _resolve_debug_log_dir():
     pointing at a plugin-scoped cache dir, but we deliberately ignore it so
     debug.log lives next to the user's config.json and batches/ — one
     well-known place to look for diagnostics across all plugins.
+
+    Returns:
+        str: Absolute path to the directory debug.log is written in.
     """
     return get_config_dir()
 
 
-def debug_log(message):
+def debug_log(message: str) -> None:
     """Append a timestamped line to <bloomfilter-config>/debug.log.
 
     Silent on failure — the logger must never crash a hook.
+
+    Args:
+        message (str): Text to record. Written verbatim after the timestamp and
+            the plugin tag, so it must never contain the API key or any secret.
     """
     try:
         log_dir = _resolve_debug_log_dir()
@@ -255,12 +277,23 @@ def debug_log(message):
 # ---------------------------------------------------------------------------
 
 
-def read_json_config(path, key, default=""):
+def read_json_config(path: str, key: str, default: str = "") -> str:
     """Safely read a single key from a JSON config file.
 
     Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
     UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
     snippet uses exactly that, so user-created configs land here BOM-prefixed.
+
+    Args:
+        path (str): Config file to read.
+        key (str): Top-level key to look up.
+        default (str): Value returned when the file is missing or unreadable,
+            the key is absent, or the stored value is not a non-empty string.
+
+    Returns:
+        str: The stored string, or *default* when there is no usable value.
+            Never raises: a malformed config degrades to the default rather
+            than failing the hook that is reading it.
     """
     try:
         with open(path, "r", encoding="utf-8-sig") as config_file:
@@ -275,8 +308,17 @@ def read_json_config(path, key, default=""):
         return default
 
 
-def bootstrap_config(plugin_root):
-    """Copy the template config if the user config does not exist yet."""
+def bootstrap_config(plugin_root: str) -> str:
+    """Copy the template config if the user config does not exist yet.
+
+    Args:
+        plugin_root (str): Directory holding the packaged
+            ``bloomfilter.config.json`` template that seeds a first-run config.
+
+    Returns:
+        str: Absolute path to the user config file, whether it already existed
+            or was created by this call.
+    """
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
     template = os.path.join(plugin_root, "bloomfilter.config.json")
@@ -331,8 +373,13 @@ def _sanitize_api_key(raw_key: str) -> str:
     return key
 
 
-def resolve_api_key():
-    """Resolve the API key: env var > user config."""
+def resolve_api_key() -> str:
+    """Resolve the API key: env var > user config.
+
+    Returns:
+        str: The sanitized key, or '' when none is configured or the configured
+            one cannot safely go in a header.
+    """
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
         return _sanitize_api_key(key)
@@ -341,8 +388,13 @@ def resolve_api_key():
     return _sanitize_api_key(read_json_config(user_config, "api_key"))
 
 
-def resolve_api_url():
-    """Resolve the API URL: env var > user config > default."""
+def resolve_api_url() -> str:
+    """Resolve the API URL: env var > user config > default.
+
+    Returns:
+        str: The configured base URL, or :data:`DEFAULT_API_URL` when neither
+            the environment nor the user config supplies one.
+    """
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
         return env_url
@@ -360,7 +412,7 @@ def resolve_api_url():
 # ---------------------------------------------------------------------------
 
 
-def read_payload():
+def read_payload() -> Any:
     """Read JSON payload from stdin.
 
     Uses utf-8-sig on Windows so a leading BOM is stripped — PowerShell
@@ -368,7 +420,10 @@ def read_payload():
     Windows PowerShell 5.1, which would otherwise break json.loads.
 
     Returns:
-        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
+        Any: The parsed JSON value — normally a dict, but any JSON type the
+            runtime sends. ``{}`` ONLY when stdin is empty or blank: malformed
+            JSON is not swallowed here, ``json.loads`` raises JSONDecodeError,
+            which the entrypoint's blanket guard turns into a silent no-op.
     """
     if platform.system() == "Windows":
         sys.stdin.reconfigure(encoding="utf-8-sig")
@@ -400,8 +455,17 @@ def _resolve_git_executable() -> str:
     return ""
 
 
-def get_git_branch(project_dir):
-    """Return the current git branch, or '' on failure."""
+def get_git_branch(project_dir: str) -> str:
+    """Return the current git branch, or '' on failure.
+
+    Args:
+        project_dir (str): Working directory the branch is read from. Passed to
+            git with ``-C``, so it need not be the process's own cwd.
+
+    Returns:
+        str: The branch name, or '' when git is unavailable, the directory is
+            not a repository, or the command fails or times out.
+    """
     git_executable = _resolve_git_executable()
     if not git_executable:
         return ""
@@ -505,6 +569,11 @@ else:
             saved_position = None
 
         def restore_saved_position() -> None:
+            """Return the handle to where it was before the lock seek, if known.
+
+            The lock has to seek to offset 0, which would otherwise move an append
+            handle's position out from under the caller.
+            """
             if saved_position is not None:
                 try:
                     file_handle.seek(saved_position)
@@ -2170,11 +2239,11 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
 # ---------------------------------------------------------------------------
 
 
-def utcnow_iso():
+def utcnow_iso() -> str:
     """Return the current UTC time as an ISO 8601 string.
 
     Returns:
-        The current UTC time as an ISO 8601 string.
+        str: The current UTC time as an ISO 8601 string.
     """
     return datetime.now(timezone.utc).isoformat()
 
@@ -2214,8 +2283,8 @@ def _extract_api_calls(scoped_entries: list[dict[str, Any]]) -> list[dict[str, A
     deduplicated = {}
     for position, entry in enumerate(usage_entries):
         message = entry.get("message", {})
-        dedup_key = message.get("id", "") or entry.get("requestId", "")
-        deduplicated[dedup_key or ("__no_key__", position)] = entry
+        deduplication_key = message.get("id", "") or entry.get("requestId", "")
+        deduplicated[deduplication_key or ("__no_key__", position)] = entry
 
     api_calls = []
     for entry in deduplicated.values():
@@ -2281,16 +2350,17 @@ def _extract_session_title(entries: list[dict[str, Any]]) -> str:
     return ""
 
 
-def extract_transcript_summary(transcript_path):
+def extract_transcript_summary(transcript_path: str) -> dict[str, Any] | None:
     """Parse transcript JSONL and return a condensed token summary.
 
     Returns a dict with an ``api_calls`` list, or None on failure.
 
     Args:
-        transcript_path: Path to the runtime's transcript JSONL.
+        transcript_path (str): Path to the runtime's transcript JSONL.
 
     Returns:
-        The summary dict, or None when the transcript cannot be parsed.
+        dict[str, Any] | None: The summary dict, or None when the transcript
+            cannot be parsed.
     """
     if not transcript_path or not os.path.exists(transcript_path):
         return None
@@ -2360,7 +2430,7 @@ def extract_transcript_summary(transcript_path):
         # a hook payload (last_assistant_message is final text only). Claude Code
         # writes each content block on its own assistant line and SHARES one
         # message id across a response's thinking/text/tool_use lines, so we walk
-        # the raw turn entries here: deduping by id (as the token logic above
+        # the raw turn entries here: de-duplicating by id (as the token logic above
         # must, to avoid triple-counting usage) would drop the thinking and text
         # lines and keep only the last block. position = number of tool_use blocks
         # preceding the thought, matching the backend's interleave scheme.
@@ -2383,22 +2453,32 @@ def extract_transcript_summary(transcript_path):
                     if not isinstance(block, dict):
                         continue
                     block_type = block.get("type")
-                    if block_type == "thinking":
-                        text = block.get("thinking", "")
-                        if text:
-                            thinking.append(
-                                _thinking_entry(
-                                    tool_use_count,
-                                    previous_timestamp,
-                                    timestamp,
-                                    content=_cap_text(text),
+                    match block_type:
+                        case "thinking":
+                            text = block.get("thinking", "")
+                            if text:
+                                thinking.append(
+                                    _thinking_entry(
+                                        tool_use_count,
+                                        previous_timestamp,
+                                        timestamp,
+                                        content=_cap_text(text),
+                                    )
                                 )
-                            )
-                        elif block.get("signature"):
-                            # Opus extended-thinking text is encrypted — Claude
-                            # Code persists only the signature, never plaintext.
-                            # Emit an encrypted marker so the timeline still shows
-                            # the model reasoned (mirrors the Codex case).
+                            elif block.get("signature"):
+                                # Opus extended-thinking text is encrypted — Claude
+                                # Code persists only the signature, never plaintext.
+                                # Emit an encrypted marker so the timeline still shows
+                                # the model reasoned (mirrors the Codex case).
+                                thinking.append(
+                                    _thinking_entry(
+                                        tool_use_count,
+                                        previous_timestamp,
+                                        timestamp,
+                                        encrypted=True,
+                                    )
+                                )
+                        case "redacted_thinking":
                             thinking.append(
                                 _thinking_entry(
                                     tool_use_count,
@@ -2407,18 +2487,9 @@ def extract_transcript_summary(transcript_path):
                                     encrypted=True,
                                 )
                             )
-                    elif block_type == "redacted_thinking":
-                        thinking.append(
-                            _thinking_entry(
-                                tool_use_count,
-                                previous_timestamp,
-                                timestamp,
-                                encrypted=True,
-                            )
-                        )
-                    elif block_type == "tool_use":
-                        tool_use_count += 1
-            # Track the previous entry's timestamp (from ANY entry, incl. tool
+                        case "tool_use":
+                            tool_use_count += 1
+            # Track the previous entry's timestamp (from ANY entry, including tool
             # results) so a thinking block's duration spans from the real prior
             # event, not just the prior assistant line.
             if timestamp:
@@ -2431,7 +2502,7 @@ def extract_transcript_summary(transcript_path):
         # is the binding constraint on delivery. thinking in particular must stay
         # scoped to one turn: it is reasoning plaintext, capped per block but not
         # in count, and every block is filed against the single turn handed over.
-        summary = {"api_calls": api_calls}
+        summary: dict[str, Any] = {"api_calls": api_calls}
         if thinking:
             summary["thinking"] = thinking
         if session_title:
@@ -2487,8 +2558,8 @@ def _duration_ms(start_timestamp: str | None, end_timestamp: str | None) -> int 
     """Best-effort elapsed milliseconds between two ISO timestamps.
 
     Args:
-        start_ts: The earlier ISO timestamp string.
-        end_ts: The later ISO timestamp string.
+        start_timestamp: The earlier ISO timestamp string.
+        end_timestamp: The later ISO timestamp string.
 
     Returns:
         int | None: Non-negative milliseconds, or None if either timestamp is
@@ -2498,8 +2569,8 @@ def _duration_ms(start_timestamp: str | None, end_timestamp: str | None) -> int 
     end = _parse_iso_ts(end_timestamp)
     if not start or not end:
         return None
-    ms = int((end - start).total_seconds() * 1000)
-    return ms if ms >= 0 else None
+    milliseconds = int((end - start).total_seconds() * 1000)
+    return milliseconds if milliseconds >= 0 else None
 
 
 def _thinking_entry(
@@ -2518,8 +2589,9 @@ def _thinking_entry(
 
     Args:
         position: Number of tool_use blocks preceding this thought in the turn.
-        prev_ts: Timestamp of the previous transcript entry (duration start).
-        ts: This thinking entry's timestamp (duration end).
+        previous_timestamp: Timestamp of the previous transcript entry, used as
+            the duration's start.
+        timestamp: This thinking entry's timestamp, used as the duration's end.
         content: Readable reasoning text, or None when encrypted/unavailable.
         encrypted: True when only an encrypted signature exists (no text).
 
@@ -2578,11 +2650,13 @@ def extract_subagent_conversation(
         result = _parse_subagent_transcript(agent_transcript_path)
         if not expected:
             break
-        last_ar = ""
+        last_agent_response = ""
         if result and result.get("turns"):
-            last_ar = (result["turns"][-1].get("agent_response") or "").strip()
+            last_agent_response = (
+                result.get("turns")[-1].get("agent_response") or ""
+            ).strip()
         # Caught up only on a complete match against the capped expected message.
-        matched = bool(last_ar) and last_ar == expected_capped
+        matched = bool(last_agent_response) and last_agent_response == expected_capped
         if matched or time.monotonic() >= deadline:
             break
         time.sleep(poll_s)
@@ -2591,7 +2665,7 @@ def extract_subagent_conversation(
     # missing OR partially flushed — replace it with the authoritative message so
     # a partial (non-empty) capture can't survive.
     if result and expected and not matched and result.get("turns"):
-        result["turns"][-1]["agent_response"] = _cap_text(expected_last_message)
+        result.get("turns")[-1]["agent_response"] = _cap_text(expected_last_message)
     return result
 
 
@@ -2608,9 +2682,14 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
     user prompt (one turn with many tool calls), but this splits on every real
     user prompt to stay faithful if a subagent had multiple.
 
-    Returns ``{"turns": [ {user_prompt, agent_response, tool_calls, model,
-    response_id, input_tokens, output_tokens, cache_read_tokens,
-    cache_creation_tokens, started_at, ended_at} ]}`` or None on failure/empty.
+    Args:
+        agent_transcript_path: Path to the subagent (sidechain) transcript.
+
+    Returns:
+        ``{"turns": [ {user_prompt, agent_response, tool_calls, model,
+        response_id, input_tokens, output_tokens, cache_read_tokens,
+        cache_creation_tokens, started_at, ended_at} ]}``, or None when the
+        transcript is missing, unreadable, or holds no turns.
     """
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
         return None
@@ -2630,7 +2709,19 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             except json.JSONDecodeError:
                 continue
 
-        def _is_real_user_prompt(entry):
+        def _is_real_user_prompt(entry: dict[str, Any]) -> bool:
+            """Whether a transcript entry is a genuine user prompt.
+
+            Tool results are also recorded as ``user`` entries, so type alone does not
+            separate them; an entry whose content is nothing but tool_result blocks is
+            the model's own loop, not a new instruction.
+
+            Args:
+                entry (dict[str, Any]): One decoded transcript entry.
+
+            Returns:
+                bool: True when the entry opens a new turn.
+            """
             if entry.get("type") != "user":
                 return False
             if entry.get("toolUseResult"):
@@ -2643,7 +2734,16 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 return False
             return True
 
-        def _user_text(entry):
+        def _user_text(entry: dict[str, Any]) -> str:
+            """Flatten a user entry's content to plain prompt text.
+
+            Args:
+                entry (dict[str, Any]): One decoded transcript entry.
+
+            Returns:
+                str: The entry's text, joined across blocks when the content is
+                    a list. Empty when it carries no text.
+            """
             content = entry.get("message", {}).get("content", "")
             if isinstance(content, str):
                 return content
@@ -2659,8 +2759,21 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
         turns = []
         current = None
 
-        def _finalize(turn):
-            # Dedup assistant usage by response_id (streaming emits duplicates).
+        def _finalize(turn: dict[str, Any]) -> dict[str, Any]:
+            """Total a turn's usage and strip its internal bookkeeping keys.
+
+            Assistant usage is deduplicated by response id first: streaming emits one
+            line per content block sharing a single id, so summing the raw entries
+            would multiply a turn's tokens by its block count.
+
+            Args:
+                turn (dict[str, Any]): The turn accumulator, mutated in place.
+
+            Returns:
+                dict[str, Any]: The same turn, with token totals summed and the
+                    private ``_``-prefixed keys replaced by their public
+                    equivalents.
+            """
             usage_by_id = turn.pop("_usage_by_id", {})
             totals = {
                 "input_tokens": 0,
@@ -2686,7 +2799,7 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             message = entry.get("message", {})
             timestamp = entry.get("timestamp")
             # Previous entry's timestamp (duration start for a thinking block),
-            # captured before advancing prev_ts to this entry.
+            # captured before advancing previous_timestamp to this entry.
             entry_previous_timestamp = previous_timestamp
             if timestamp:
                 previous_timestamp = timestamp
@@ -2730,9 +2843,9 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             if is_assistant:
                 if message.get("usage"):
                     message_id = message.get("id", "")
-                    current["_usage_by_id"][message_id] = message["usage"]
+                    current["_usage_by_id"][message_id] = message.get("usage")
                     if message.get("model"):
-                        current["model"] = message["model"]
+                        current["model"] = message.get("model")
                     if message_id:
                         current["response_id"] = message_id
                 content = message.get("content", "")
@@ -2741,23 +2854,33 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                         if not isinstance(block, dict):
                             continue
                         block_type = block.get("type")
-                        if block_type == "text" and block.get("text"):
-                            current["agent_response"] = _cap_text(block["text"])
-                        elif block_type == "thinking":
-                            # position = tool calls seen so far, so the backend
-                            # renders this thought before that tool (trailing
-                            # thinking when it equals the final tool count).
-                            if block.get("thinking"):
-                                current["_thinking"].append(
-                                    _thinking_entry(
-                                        len(current["_tool_calls_by_id"]),
-                                        entry_previous_timestamp,
-                                        timestamp,
-                                        content=_cap_text(block["thinking"]),
+                        match block_type:
+                            case "text" if block.get("text"):
+                                current["agent_response"] = _cap_text(block.get("text"))
+                            case "thinking":
+                                # position = tool calls seen so far, so the backend
+                                # renders this thought before that tool (trailing
+                                # thinking when it equals the final tool count).
+                                if block.get("thinking"):
+                                    current["_thinking"].append(
+                                        _thinking_entry(
+                                            len(current["_tool_calls_by_id"]),
+                                            entry_previous_timestamp,
+                                            timestamp,
+                                            content=_cap_text(block.get("thinking")),
+                                        )
                                     )
-                                )
-                            elif block.get("signature"):
-                                # Encrypted thinking — only a signature persists.
+                                elif block.get("signature"):
+                                    # Encrypted thinking — only a signature persists.
+                                    current["_thinking"].append(
+                                        _thinking_entry(
+                                            len(current["_tool_calls_by_id"]),
+                                            entry_previous_timestamp,
+                                            timestamp,
+                                            encrypted=True,
+                                        )
+                                    )
+                            case "redacted_thinking":
                                 current["_thinking"].append(
                                     _thinking_entry(
                                         len(current["_tool_calls_by_id"]),
@@ -2766,25 +2889,16 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                                         encrypted=True,
                                     )
                                 )
-                        elif block_type == "redacted_thinking":
-                            current["_thinking"].append(
-                                _thinking_entry(
-                                    len(current["_tool_calls_by_id"]),
-                                    entry_previous_timestamp,
-                                    timestamp,
-                                    encrypted=True,
-                                )
-                            )
-                        elif block_type == "tool_use":
-                            current["_tool_calls_by_id"][block.get("id", "")] = {
-                                "tool_name": block.get("name", ""),
-                                "tool_input": _cap_strings(
-                                    block.get("input"), _SUBAGENT_FIELD_CAP
-                                ),
-                                "tool_output": None,
-                                "tool_call_id": block.get("id", ""),
-                                "started_at": timestamp,
-                            }
+                            case "tool_use":
+                                current["_tool_calls_by_id"][block.get("id", "")] = {
+                                    "tool_name": block.get("name", ""),
+                                    "tool_input": _cap_strings(
+                                        block.get("input"), _SUBAGENT_FIELD_CAP
+                                    ),
+                                    "tool_output": None,
+                                    "tool_call_id": block.get("id", ""),
+                                    "started_at": timestamp,
+                                }
                 elif isinstance(content, str) and content:
                     current["agent_response"] = _cap_text(content)
             else:

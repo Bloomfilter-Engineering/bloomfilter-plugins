@@ -24,7 +24,7 @@ else:
 # sys.path before importing either, so a module-level import resolves.
 from codex_rollout import parse_transcript
 
-PLUGIN_VERSION: str = "0.2.0"
+PLUGIN_VERSION: str = "0.2.1"
 _SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
@@ -137,18 +137,25 @@ def _resolve_debug_log_dir() -> str:
 
     Always the bloomfilter config dir (%APPDATA%\\bloomfilter on Windows,
     $XDG_CONFIG_HOME/bloomfilter elsewhere). Codex injects PLUGIN_DATA /
-    CLAUDE_PLUGIN_DATA pointing at ~/.codex/plugins/data/<plugin>-<mp>/, but
-    we deliberately ignore those so debug.log lives next to the user's
+    CLAUDE_PLUGIN_DATA pointing at a plugin-scoped cache dir, but we
+    deliberately ignore those so debug.log lives next to the user's
     config.json and batches/ — one well-known place to look for diagnostics.
+
+    Returns:
+        Absolute path to the directory debug.log is written in.
     """
     return get_config_dir()
 
 
 def debug_log(message: str) -> None:
-    """Append a timestamped line to <plugin-data>/debug.log.
+    """Append a timestamped line to <bloomfilter-config>/debug.log.
 
     Always writes — silent on failure. Intended for ops/diagnostic visibility
     of upload events without polluting Codex's TUI stderr.
+
+    Args:
+        message: Text to record. Written verbatim after the timestamp and the
+            plugin tag, so it must never contain the API key or any secret.
     """
     try:
         log_dir = _resolve_debug_log_dir()
@@ -171,7 +178,14 @@ def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform.
 
     Returns:
-        Absolute path to the Bloomfilter config directory for this platform.
+        The Bloomfilter config directory for this platform. Absolute whenever
+        the home directory resolves — which covers every case observed in
+        practice, including a relative ``XDG_CONFIG_HOME``/``APPDATA``, since
+        the fallback discards the env var and rebuilds from the home directory.
+        NOT guaranteed absolute in one residual case: if ``expanduser`` itself
+        returns ``~`` unchanged (no HOME and no passwd entry, as in a container
+        running an unmapped UID) the fallback rebuilds from that same ``~`` and
+        cannot recover.
     """
     system_name = platform.system()
     if system_name == "Windows":
@@ -193,7 +207,14 @@ def get_config_dir() -> str:
 
 
 def secure_makedirs(directory_path: str) -> None:
-    """Create directories with owner-only permissions on Unix."""
+    """Create directories with owner-only permissions on Unix.
+
+    Args:
+        directory_path: Directory to create. Missing parents are created too. An
+            existing directory is reused rather than raising — but its mode is
+            still narrowed to 0700 on Unix, so calling this on a directory that
+            was deliberately left group- or world-readable will tighten it.
+    """
     os.makedirs(directory_path, exist_ok=True)
     if platform.system() != "Windows":
         os.chmod(directory_path, stat.S_IRWXU)  # 0o700
@@ -205,6 +226,17 @@ def read_json_config(config_path: str, key: str, default: str = "") -> str:
     Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
     UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's Windows setup
     snippet uses exactly that, so user-created configs land here BOM-prefixed.
+
+    Args:
+        config_path: Config file to read.
+        key: Top-level key to look up.
+        default: Value returned when the file is missing or unreadable, the key
+            is absent, or the stored value is not a non-empty string.
+
+    Returns:
+        The stored string, or *default* when there is no usable value. Never
+        raises: a malformed config degrades to the default rather than failing
+        the hook that is reading it.
     """
     try:
         with open(config_path, "r", encoding="utf-8-sig") as config_file:
@@ -217,7 +249,13 @@ def read_json_config(config_path: str, key: str, default: str = "") -> str:
 def bootstrap_config(plugin_root: str) -> str:
     """Create the user config from the plugin template if it does not exist.
 
-    Returns the absolute path to the user config file.
+    Args:
+        plugin_root: Directory holding the packaged ``bloomfilter.config.json``
+            template that seeds a first-run config.
+
+    Returns:
+        Absolute path to the user config file, whether it already existed or
+        was created by this call.
     """
     config_dir = get_config_dir()
     config_file_path = os.path.join(config_dir, "config.json")
@@ -273,7 +311,12 @@ def _sanitize_api_key(raw_key: str) -> str:
 
 
 def resolve_api_key() -> str:
-    """Resolve the API key from env var or user config only."""
+    """Resolve the API key from env var or user config only.
+
+    Returns:
+        The sanitized key, or '' when none is configured or the configured one
+        cannot safely go in a header.
+    """
     api_key_from_env = os.environ.get("BLOOMFILTER_API_KEY", "")
     if api_key_from_env:
         return _sanitize_api_key(api_key_from_env)
@@ -288,6 +331,10 @@ def resolve_api_url() -> str:
     Project-scoped overrides via ./.bloomfilter/config.json were removed
     intentionally — a checked-in project config could redirect uploads to
     an attacker-controlled host. URL is user-controlled only.
+
+    Returns:
+        The configured base URL, or :data:`DEFAULT_API_URL` when neither the
+        environment nor the user config supplies one.
     """
     api_url_from_env = os.environ.get("BLOOMFILTER_URL", "")
     if api_url_from_env:
@@ -301,11 +348,14 @@ def resolve_api_url() -> str:
     return DEFAULT_API_URL
 
 
-def read_payload() -> dict[str, Any]:
+def read_payload() -> Any:
     """Read a JSON hook payload from stdin.
 
     Returns:
-        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
+        The parsed JSON value. ``{}`` ONLY when stdin is empty or blank:
+        malformed JSON is not swallowed here, ``json.loads`` raises
+        JSONDecodeError, which the entrypoint's blanket guard turns into a
+        silent no-op.
     """
     if platform.system() == "Windows":
         # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
@@ -354,7 +404,16 @@ def _resolve_git_executable() -> str:
 
 
 def get_git_branch(project_dir: str) -> str:
-    """Return the current git branch, or '' on failure."""
+    """Return the current git branch, or '' on failure.
+
+    Args:
+        project_dir: Working directory the branch is read from. Passed to git
+            with ``-C``, so it need not be the process's own cwd.
+
+    Returns:
+        The branch name, or '' when git is unavailable, the directory is not a
+        repository, or the command fails or times out.
+    """
     git = _resolve_git_executable()
     if not git:
         return ""
@@ -1664,9 +1723,15 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
 
     Validates the URL scheme up front: only http/https are allowed.
 
-    Network interactions are logged to <plugin-data>/debug.log: the request
+    Network interactions are logged to <bloomfilter-config>/debug.log: the request
     URL + session_id + hook count + payload bytes, the response status +
     truncated body, and any HTTPError / URLError / unexpected exception.
+
+    Args:
+        api_url: Base URL of the Bloomfilter API, without the endpoint path.
+        api_key: Value sent as the ``X-MCP-Token`` header.
+        payload: Request body with ``session_id``, ``source``,
+            ``plugin_version`` and a ``hooks`` list. Must be JSON-serializable.
 
     Returns:
         UPLOAD_OK when the server answered 2xx, meaning the records are safe to
@@ -1739,10 +1804,10 @@ def upload_batch(api_url: str, api_key: str, payload: dict[str, Any]) -> str:
         # batch that measured under the client cap to still be rejected as too
         # large, which is the failure that cap exists to prevent.
         request_body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exception:
         debug_log(
             f"upload_batch: skipped — payload not JSON-serializable "
-            f"session_id={session_id} error={type(exc).__name__}: {exc}"
+            f"session_id={session_id} error={type(exception).__name__}: {exception}"
         )
         return UPLOAD_FAILED
 
@@ -1873,12 +1938,12 @@ def _cap_conversation(conversation: dict[str, Any]) -> None:
         if not isinstance(turn, dict):
             continue
         if turn.get("user_prompt") is not None:
-            turn["user_prompt"] = _cap_text(turn["user_prompt"])
+            turn["user_prompt"] = _cap_text(turn.get("user_prompt"))
         if turn.get("agent_response") is not None:
-            turn["agent_response"] = _cap_text(turn["agent_response"])
+            turn["agent_response"] = _cap_text(turn.get("agent_response"))
         for tool_call in turn.get("tool_calls") or []:
             if isinstance(tool_call, dict) and tool_call.get("tool_output") is not None:
-                tool_call["tool_output"] = _cap_text(tool_call["tool_output"])
+                tool_call["tool_output"] = _cap_text(tool_call.get("tool_output"))
 
 
 def extract_subagent_conversation(
@@ -1889,16 +1954,28 @@ def extract_subagent_conversation(
 ) -> dict[str, Any] | None:
     """Parse a subagent's own Codex rollout into a normalized conversation.
 
-    Returns ``{"turns": [...]}`` (the backend's child-session shape) or None if
-    the transcript path is missing. ``agent_transcript_path`` points at the
-    subagent thread's rollout JSONL.
-
     Codex fires ``SubagentStop`` before the subagent's final assistant message
     is guaranteed flushed to its rollout, so — when ``expected_last_message``
-    (the authoritative ``payload.last_assistant_message``) is provided — this
-    re-parses until the last turn's ``agent_response`` matches it, up to
-    ``max_wait_s``. On timeout it backfills the final response from the
+    is provided — this re-parses until the last turn's ``agent_response``
+    matches it. On timeout it backfills the final response from the
     authoritative message so a partial capture can't survive.
+
+    Args:
+        agent_transcript_path: Path to the subagent thread's own rollout JSONL.
+        expected_last_message: The authoritative
+            ``payload.last_assistant_message``. When given, parsing repeats
+            until the last turn's response matches it; when omitted, the first
+            parse is accepted as-is.
+        max_wait_s: Wall-clock ceiling on that re-parsing, in seconds.
+        poll_s: Delay between re-parse attempts, in seconds.
+
+    Returns:
+        ``{"turns": [...]}`` — the backend's child-session shape — or None when
+        the transcript path is empty or absent from disk. NOTE that a rollout
+        which parses to no turns yields a TRUTHY ``{"turns": []}`` rather than
+        None, so a caller gating on ``if conversation:`` will attach an empty
+        child conversation. The cursor, claude-code and copilot collectors
+        guard against that; this one does not.
     """
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
         return None
@@ -1919,7 +1996,9 @@ def extract_subagent_conversation(
             break
         last_response = ""
         if result and result.get("turns"):
-            last_response = (result["turns"][-1].get("agent_response") or "").strip()
+            last_response = (
+                result.get("turns")[-1].get("agent_response") or ""
+            ).strip()
         matched = bool(last_response) and last_response == expected_capped
         if matched or time.monotonic() >= deadline:
             break
@@ -1928,5 +2007,5 @@ def extract_subagent_conversation(
     # Never confirmed a complete match → the final response is missing or was
     # partially flushed. Replace it with the authoritative message.
     if result and expected and not matched and result.get("turns"):
-        result["turns"][-1]["agent_response"] = _cap_text(expected_last_message)
+        result.get("turns")[-1]["agent_response"] = _cap_text(expected_last_message)
     return result

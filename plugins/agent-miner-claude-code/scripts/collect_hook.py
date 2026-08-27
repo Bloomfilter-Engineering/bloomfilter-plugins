@@ -277,10 +277,10 @@ def _spawn_detached_upload(session_id: str) -> bool:
     try:
         subprocess.Popen(command, **popen_kwargs)
         return True
-    except Exception as exc:
+    except Exception as exception:
         debug_log(
             f"detached upload spawn failed: session_id={session_id} "
-            f"type={type(exc).__name__} message={exc!s}"
+            f"type={type(exception).__name__} message={exception!s}"
         )
         return False
 
@@ -425,11 +425,11 @@ if __name__ == "__main__":
             perform_upload("SessionEnd", sys.argv[2])
         else:
             main()
-    except Exception as exc:
+    except Exception as exception:
         try:
             debug_log(
-                f"collect_hook: unhandled exception type={type(exc).__name__} "
-                f"message={exc!s}"
+                f"collect_hook: unhandled exception type={type(exception).__name__} "
+                f"message={exception!s}"
             )
         except Exception:
             pass  # Never block Claude

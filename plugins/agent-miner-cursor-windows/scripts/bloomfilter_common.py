@@ -26,7 +26,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.0"
+PLUGIN_VERSION = "0.2.1"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
@@ -163,7 +163,14 @@ def get_config_dir() -> str:
     """Return the Bloomfilter config directory for the current platform.
 
     Returns:
-        Absolute path to the Bloomfilter config directory for this platform.
+        The Bloomfilter config directory for this platform. Absolute whenever
+        the home directory resolves — which covers every case observed in
+        practice, including a relative ``XDG_CONFIG_HOME``/``APPDATA``, since
+        the fallback discards the env var and rebuilds from the home directory.
+        NOT guaranteed absolute in one residual case: if ``expanduser`` itself
+        returns ``~`` unchanged (no HOME and no passwd entry, as in a container
+        running an unmapped UID) the fallback rebuilds from that same ``~`` and
+        cannot recover.
     """
     system = platform.system()
     if system == "Windows":
@@ -195,6 +202,9 @@ def _resolve_debug_log_dir() -> str:
     Cursor / Claude / Codex inject a plugin data dir env var when present.
     Fall back to the bloomfilter config dir so the log lives next to the
     user's batches and config.json (%APPDATA%\\bloomfilter on Windows).
+
+    Returns:
+        Absolute path to the directory debug.log is written in.
     """
     return (
         os.environ.get("PLUGIN_DATA")
@@ -209,6 +219,10 @@ def _build_debug_logger() -> logging.Logger:
 
     Uses a dedicated logger name with propagate=False so it cannot affect
     (or be affected by) other code that uses the stdlib logging module.
+
+    Returns:
+        The configured logger. Its handler is attached only once, so repeat
+        calls in one process return the same logger without stacking handlers.
     """
     log_dir = _resolve_debug_log_dir()
     secure_makedirs(log_dir)
@@ -244,6 +258,10 @@ def debug_log(message: str) -> None:
     Backed by ``logging.handlers.RotatingFileHandler``: 1 MB per file with one
     rotated backup, so disk usage is capped at ~2 MB. Silent on failure — the
     logger must never crash a hook.
+
+    Args:
+        message: Text to record. Written verbatim after the timestamp and the
+            plugin tag, so it must never contain the API key or any secret.
     """
     global _debug_logger
     try:
@@ -255,7 +273,14 @@ def debug_log(message: str) -> None:
 
 
 def secure_makedirs(path: str) -> None:
-    """Create directories with owner-only permissions on Unix."""
+    """Create directories with owner-only permissions on Unix.
+
+    Args:
+        path: Directory to create. Missing parents are created too. An existing
+            directory is reused rather than raising — but its mode is still
+            narrowed to 0700 on Unix, so calling this on a directory that was
+            deliberately left group- or world-readable will tighten it.
+    """
     os.makedirs(path, exist_ok=True)
     if platform.system() != "Windows":
         os.chmod(path, stat.S_IRWXU)  # 0o700
@@ -272,6 +297,17 @@ def read_json_config(path: str, key: str, default: str = "") -> str:
     Opens with utf-8-sig so a leading BOM is stripped — `Set-Content -Encoding
     UTF8` on Windows PowerShell 5.1 writes a BOM, and the README's setup snippet
     uses exactly that, so user-created configs land here BOM-prefixed.
+
+    Args:
+        path: Config file to read.
+        key: Top-level key to look up.
+        default: Value returned when the file is missing or unreadable, the key
+            is absent, or the stored value is not a non-empty string.
+
+    Returns:
+        The stored string, or *default* when there is no usable value. Never
+        raises: a malformed config degrades to the default rather than failing
+        the hook that is reading it.
     """
     try:
         with open(path, "r", encoding="utf-8-sig") as config_file:
@@ -287,7 +323,16 @@ def read_json_config(path: str, key: str, default: str = "") -> str:
 
 
 def bootstrap_config(plugin_root: str) -> str:
-    """Copy the template config if the user config does not exist yet."""
+    """Copy the template config if the user config does not exist yet.
+
+    Args:
+        plugin_root: Directory holding the packaged ``bloomfilter.config.json``
+            template that seeds a first-run config.
+
+    Returns:
+        Absolute path to the user config file, whether it already existed or
+        was created by this call.
+    """
     config_dir = get_config_dir()
     config_file = os.path.join(config_dir, "config.json")
     template = os.path.join(plugin_root, "bloomfilter.config.json")
@@ -347,6 +392,10 @@ def resolve_api_key() -> str:
     project configs live in the repo and can be accidentally committed.
     The user config (~/.config/bloomfilter/config.json) and the env var
     are the only supported places to store the API key.
+
+    Returns:
+        The sanitized key, or '' when none is configured or the configured one
+        cannot safely go in a header.
     """
     key = os.environ.get("BLOOMFILTER_API_KEY", "")
     if key:
@@ -357,7 +406,12 @@ def resolve_api_key() -> str:
 
 
 def resolve_api_url() -> str:
-    """Resolve the API URL: env var > user config > default."""
+    """Resolve the API URL: env var > user config > default.
+
+    Returns:
+        The configured base URL, or :data:`DEFAULT_API_URL` when neither the
+        environment nor the user config supplies one.
+    """
     env_url = os.environ.get("BLOOMFILTER_URL", "")
     if env_url:
         return env_url
@@ -380,10 +434,13 @@ def read_payload() -> Any:
 
     Returns the parsed JSON value — normally a dict, but any JSON type is
     possible, so callers must validate the shape (the collect hook checks
-    ``isinstance(payload, dict)``). Returns ``{}`` for empty or non-JSON input.
+    ``isinstance(payload, dict)``).
 
     Returns:
-        The parsed JSON value, or ``{}`` when stdin is empty or not JSON.
+        The parsed JSON value. ``{}`` ONLY when stdin is empty or blank:
+        malformed JSON is not swallowed here, ``json.loads`` raises
+        JSONDecodeError, which the entrypoint's blanket guard turns into a
+        silent no-op.
     """
     if platform.system() == "Windows":
         # utf-8-sig: PowerShell 5.1 pipes can prefix stdin with a UTF-8 BOM.
@@ -443,7 +500,16 @@ def _resolve_git_executable() -> str:
 
 
 def get_git_branch(project_dir: str) -> str:
-    """Return the current git branch, or '' on failure."""
+    """Return the current git branch, or '' on failure.
+
+    Args:
+        project_dir: Working directory the branch is read from. Passed to git
+            with ``-C``, so it need not be the process's own cwd.
+
+    Returns:
+        The branch name, or '' when git is unavailable, the directory is not a
+        repository, or the command fails or times out.
+    """
     git = _resolve_git_executable()
     if not git:
         return ""
@@ -542,9 +608,9 @@ else:
         try:
             file_handle.seek(0)
             msvcrt.locking(file_handle.fileno(), msvcrt.LK_LOCK, 1)
-        except OSError as exc:
+        except OSError as exception:
             print(
-                f"[bloomfilter] Could not acquire batch file lock ({exc}); "
+                f"[bloomfilter] Could not acquire batch file lock ({exception}); "
                 "proceeding unsynchronized.",
                 file=sys.stderr,
             )
@@ -1015,7 +1081,7 @@ def append_to_batch(session_id: str, entry: dict) -> None:
     _evict_batch_if_oversize(session_id, batch_file_size)
 
 
-def append_to_batch_deduped(
+def append_to_batch_deduplicated(
     session_id: str, entry: dict, is_duplicate: Callable[[list], bool]
 ) -> bool:
     """Append *entry* unless *is_duplicate* judges it already batched.
@@ -1057,7 +1123,7 @@ def append_to_batch_deduped(
             # and the lock is released at the end of this block while the file
             # is not closed (flushed) until the outer 'with' exits. Without this
             # the next process could take the lock, reread, miss the append, and
-            # write the duplicate anyway — defeating the dedup.
+            # write the duplicate anyway — defeating the de-duplication.
             batch_file_handle.flush()
             batch_file_size = batch_file_handle.tell()
     if platform.system() != "Windows":
@@ -2018,6 +2084,12 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
     request URL + session_id + hook count, the response status (and body
     length on HTTPError), and any HTTPError / URLError / unexpected exception.
 
+    Args:
+        api_url: Base URL of the Bloomfilter API, without the endpoint path.
+        api_key: Value sent as the ``X-MCP-Token`` header.
+        payload: Request body with ``session_id``, ``source``,
+            ``plugin_version`` and a ``hooks`` list. Must be JSON-serializable.
+
     Returns:
         UPLOAD_OK when the server answered 2xx, meaning the records are safe to
         drain. UPLOAD_TOO_LARGE when it answered 413, meaning the caller must
@@ -2086,10 +2158,10 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
         # batch that measured under the client cap to still be rejected as too
         # large, which is the failure that cap exists to prevent.
         data = json.dumps(payload, separators=(",", ":")).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+    except (TypeError, ValueError) as exception:
         debug_log(
             f"upload_batch: skipped — payload not JSON-serializable "
-            f"session_id={session_id} error={type(exc).__name__}: {exc}"
+            f"session_id={session_id} error={type(exception).__name__}: {exception}"
         )
         return UPLOAD_FAILED
 
@@ -2127,41 +2199,41 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
         if not 200 <= status < 300:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
         return UPLOAD_OK if 200 <= status < 300 else UPLOAD_FAILED
-    except urllib.error.HTTPError as exc:
+    except urllib.error.HTTPError as exception:
         try:
-            body = exc.read().decode("utf-8", errors="replace").strip()
+            body = exception.read().decode("utf-8", errors="replace").strip()
         except Exception:
             body = ""
-        reason = getattr(exc, "reason", "")
+        reason = getattr(exception, "reason", "")
         debug_log(
-            f"upload_batch: HTTPError status={exc.code} reason={reason!r} "
+            f"upload_batch: HTTPError status={exception.code} reason={reason!r} "
             f"session_id={session_id} body_chars={len(body)}"
         )
         # A 413 is expected control flow now, not an error to report: the
         # caller answers it by sending a smaller prefix. Printing it would put
         # two lines of HTTP error text in the user's terminal on a path that
         # recovers by itself. It stays in the debug log above.
-        if exc.code == 413:
+        if exception.code == 413:
             return UPLOAD_TOO_LARGE
-        message = f"[bloomfilter] Upload failed with HTTP {exc.code}"
+        message = f"[bloomfilter] Upload failed with HTTP {exception.code}"
         if reason:
             message += f" {reason}"
         print(message, file=sys.stderr)
         if body:
             print(f"[bloomfilter] Upload response body: {body[:500]}", file=sys.stderr)
         return UPLOAD_FAILED
-    except urllib.error.URLError as exc:
+    except urllib.error.URLError as exception:
         debug_log(
-            f"upload_batch: URLError session_id={session_id} reason={exc.reason!r}"
+            f"upload_batch: URLError session_id={session_id} reason={exception.reason!r}"
         )
-        print(f"[bloomfilter] Upload failed: {exc.reason}", file=sys.stderr)
+        print(f"[bloomfilter] Upload failed: {exception.reason}", file=sys.stderr)
         return UPLOAD_FAILED
-    except Exception as exc:
+    except Exception as exception:
         debug_log(
             f"upload_batch: error session_id={session_id} "
-            f"type={type(exc).__name__} message={exc!s}"
+            f"type={type(exception).__name__} message={exception!s}"
         )
-        print(f"[bloomfilter] Upload failed: {exc}", file=sys.stderr)
+        print(f"[bloomfilter] Upload failed: {exception}", file=sys.stderr)
         return UPLOAD_FAILED
 
 
@@ -2223,9 +2295,9 @@ def _cap_conversation(conversation: dict[str, Any]) -> None:
         if not isinstance(turn, dict):
             continue
         if turn.get("user_prompt") is not None:
-            turn["user_prompt"] = _cap_text(turn["user_prompt"])
+            turn["user_prompt"] = _cap_text(turn.get("user_prompt"))
         if turn.get("agent_response") is not None:
-            turn["agent_response"] = _cap_text(turn["agent_response"])
+            turn["agent_response"] = _cap_text(turn.get("agent_response"))
         for tool_call in turn.get("tool_calls") or []:
             if not isinstance(tool_call, dict):
                 continue
@@ -2250,11 +2322,11 @@ def find_subagent_transcript(parent_transcript_path: str, task: str) -> str | No
     """Locate a Cursor subagent's own transcript file for a ``subagentStop``.
 
     Cursor writes each subagent conversation to
-    ``<parent_conv_dir>/subagents/<child_conv_id>.jsonl`` but the hook exposes
-    neither that path (``agent_transcript_path`` is null) nor the child
-    conversation id. It DOES give the parent transcript path and the subagent's
-    ``task``, so we scan the sibling ``subagents/`` dir and return the file
-    whose opening user query matches the task.
+    ``<parent-conversation-dir>/subagents/<child-conversation-id>.jsonl`` but
+    the hook exposes neither that path (``agent_transcript_path`` is null) nor
+    the child conversation id. It DOES give the parent transcript path and the
+    subagent's ``task``, so we scan the sibling ``subagents/`` directory and
+    return the file whose opening user query matches the task.
 
     Args:
         parent_transcript_path: ``payload.transcript_path`` (the parent
@@ -2299,8 +2371,9 @@ def _read_child_batch(
 
     A Cursor subagent runs as its own conversation whose live hooks
     (``postToolUse``, ``afterAgentThought``, …) land in
-    ``batches/<child_conv_id>.jsonl`` but never upload — no session/turn/response
-    hooks fire for a child conversation, so the batch just orphans. It is the
+    ``batches/<child-conversation-id>.jsonl`` but never upload — no
+    session/turn/response hooks fire for a child conversation, so the batch
+    just orphans. It is the
     ONLY place the subagent's tool OUTPUTS and (unredacted) THINKING exist; the
     transcript records tool inputs only and no thinking.
 
@@ -2327,21 +2400,24 @@ def _read_child_batch(
     tool_calls: list[dict[str, Any]] = []
     thinkings: list[dict[str, Any]] = []
     for entry in entries:
-        hook = entry.get("hook_event_name")
+        hook_event_name = entry.get("hook_event_name")
         payload = entry.get("payload") or {}
-        if hook == "postToolUse":
-            tool_calls.append(
-                {
-                    "tool_name": payload.get("tool_name", ""),
-                    "tool_input": payload.get("tool_input"),
-                    "tool_output": payload.get("tool_output"),
-                    "tool_call_id": payload.get("tool_use_id", ""),
-                }
-            )
-        elif hook == "afterAgentThought":
-            text = payload.get("text")
-            if text:
-                thinkings.append({"content": text, "preceding_tools": len(tool_calls)})
+        match hook_event_name:
+            case "postToolUse":
+                tool_calls.append(
+                    {
+                        "tool_name": payload.get("tool_name", ""),
+                        "tool_input": payload.get("tool_input"),
+                        "tool_output": payload.get("tool_output"),
+                        "tool_call_id": payload.get("tool_use_id", ""),
+                    }
+                )
+            case "afterAgentThought":
+                text = payload.get("text")
+                if text:
+                    thinkings.append(
+                        {"content": text, "preceding_tools": len(tool_calls)}
+                    )
     return tool_calls, thinkings
 
 
@@ -2502,7 +2578,9 @@ def extract_subagent_conversation(
         tool_calls, thinkings = _read_child_batch(child_conversation_id)
         _merge_tool_outputs(result, tool_calls)
         _attach_thinking(
-            result, thinkings, {tc.get("tool_name", "") for tc in tool_calls}
+            result,
+            thinkings,
+            {tool_call.get("tool_name", "") for tool_call in tool_calls},
         )
         _cap_conversation(result)
         if cleanup_child_batch:
