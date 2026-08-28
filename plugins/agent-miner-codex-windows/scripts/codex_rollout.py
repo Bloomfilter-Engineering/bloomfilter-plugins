@@ -455,11 +455,13 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
             }
         )
 
-        # apply_patch is Codex's primary file-edit mechanism. Its input is a
-        # raw patch text covering one or more files; split it so each file
-        # gets its own AgentFileEdit downstream.
-        if call_data["tool_name"] == "apply_patch":
-            patch_text = tool_input if isinstance(tool_input, str) else ""
+        # apply_patch is Codex's primary file-edit mechanism. Its body covers
+        # one or more files; split it so each file gets its own AgentFileEdit
+        # downstream. The tool is named directly on older builds and wrapped in
+        # a JavaScript shim under `exec` on current ones, so the body is
+        # extracted rather than read straight off the input.
+        patch_text = extract_patch_text(call_data["tool_name"], tool_input)
+        if patch_text:
             for file_operation in parse_apply_patch(patch_text):
                 file_edits.append(
                     {
@@ -540,6 +542,125 @@ def _empty_turn() -> dict[str, Any]:
         "started_at": "",
         "ended_at": "",
     }
+
+
+JS_STRING_ESCAPES = {
+    "n": "\n",
+    "t": "\t",
+    "r": "\r",
+    "b": "\b",
+    "f": "\f",
+    "v": "\v",
+    "0": "\0",
+}
+
+
+def _unescape_js_string(literal: str) -> str:
+    """Resolve JavaScript escape sequences in a string-literal body.
+
+    Used only for literals ``json.loads`` cannot take — single-quoted and
+    template literals, and any literal carrying a JavaScript-only escape such
+    as ``\\'``.
+
+    Args:
+        literal: The literal's contents, without its surrounding quotes.
+
+    Returns:
+        The literal with its escape sequences resolved. An unrecognised escape
+        yields the escaped character itself, matching JavaScript.
+    """
+    decoded: list[str] = []
+    index = 0
+    while index < len(literal):
+        character = literal[index]
+        if character != "\\" or index + 1 >= len(literal):
+            decoded.append(character)
+            index += 1
+            continue
+        following = literal[index + 1]
+        if following == "u" and index + 6 <= len(literal):
+            try:
+                decoded.append(chr(int(literal[index + 2 : index + 6], 16)))
+            except ValueError:
+                decoded.append(following)
+            else:
+                index += 6
+                continue
+        decoded.append(JS_STRING_ESCAPES.get(following, following))
+        index += 2
+    return "".join(decoded)
+
+
+def _decode_js_string_literal(source: str, needle: str) -> str:
+    """Decode the JavaScript string literal in *source* that contains *needle*.
+
+    Args:
+        source: JavaScript source recorded as a tool input.
+        needle: Text known to sit inside the literal of interest.
+
+    Returns:
+        The literal with its escapes resolved, or an empty string when the
+        surrounding quotes cannot be located.
+    """
+    needle_index = source.find(needle)
+    if needle_index < 0:
+        return ""
+
+    open_index = -1
+    for position in range(needle_index - 1, -1, -1):
+        if source[position] in "\"'`":
+            open_index = position
+            break
+    if open_index < 0:
+        return ""
+
+    quote = source[open_index]
+    position = open_index + 1
+    while position < len(source):
+        if source[position] == "\\":
+            position += 2
+            continue
+        if source[position] == quote:
+            break
+        position += 1
+    else:
+        return ""
+
+    literal = source[open_index + 1 : position]
+    if quote == '"':
+        try:
+            return json.loads(f'"{literal}"')
+        except ValueError:
+            pass
+    return _unescape_js_string(literal)
+
+
+def extract_patch_text(tool_name: str, tool_input: Any) -> str:
+    """Return the apply_patch body a tool call carries, or an empty string.
+
+    Codex has shipped two shapes. Older builds exposed apply_patch as a named
+    tool whose input was the raw patch. Current builds (observed on codex-cli
+    0.150.1) run it through a JavaScript shim under ``exec``, so the patch
+    arrives as an escaped string literal whose newlines are two-character
+    ``\\n`` sequences — unreadable to the grammar parser until decoded.
+
+    Args:
+        tool_name: Tool name recorded for the call.
+        tool_input: Tool input recorded for the call.
+
+    Returns:
+        The decoded patch text, or an empty string when the call carries no
+        applied patch.
+    """
+    if not isinstance(tool_input, str) or not tool_input:
+        return ""
+    if tool_name == "apply_patch":
+        return tool_input
+    # Require a real invocation: a script that only builds a patch string and
+    # never applies it changed nothing, so it must not be recorded as an edit.
+    if "*** Begin Patch" not in tool_input or "apply_patch(" not in tool_input:
+        return ""
+    return _decode_js_string_literal(tool_input, "*** Begin Patch")
 
 
 def parse_apply_patch(patch_text: str) -> list[dict[str, Any]]:
