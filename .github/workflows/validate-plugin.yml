@@ -1,8 +1,9 @@
-name: Validate Claude Code Plugin
+name: Validate Plugin Manifests
 
 on:
   push:
     branches: [main]
+  
   pull_request:
     branches: [main]
 
@@ -12,6 +13,14 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      # Covers all four vendors. `claude plugin validate` below understands only
+      # `.claude-plugin/`, which is 3 of the 8 plugins and 1 of the 4 marketplace
+      # files; this step is what gives the codex and cursor manifests — and the
+      # other three marketplaces — any CI coverage at all. Standard library only,
+      # so it needs no install and runs before the slower npm step.
+      - name: Validate all plugin and marketplace manifests
+        run: python3 .github/scripts/validate_manifests.py
+
       - uses: actions/setup-node@v6
         with:
           node-version: 24
@@ -19,18 +28,17 @@ jobs:
       - name: Install Claude Code
         run: npm install -g @anthropic-ai/claude-code
 
-      - name: Validate marketplace
+      - name: Validate Claude Code marketplace
         run: claude plugin validate .
 
-      - name: Validate individual plugins
+      - name: Validate Claude Code plugins
         run: |
           shopt -s nullglob
           for plugin_dir in plugins/*/; do
-            # Only validate Claude Code plugins. Other plugins in this
-            # monorepo (e.g. agent-miner-cursor) have their own manifest
-            # format (.cursor-plugin/plugin.json) and would fail here.
+            # Claude Code's validator only accepts its own manifest format. The
+            # codex and cursor plugins are covered by the step above instead.
             if [ ! -f "${plugin_dir}.claude-plugin/plugin.json" ]; then
-              echo "Skipping $plugin_dir (no .claude-plugin/plugin.json)"
+              echo "Skipping $plugin_dir (validated by validate_manifests.py)"
               continue
             fi
             echo "Validating $plugin_dir"

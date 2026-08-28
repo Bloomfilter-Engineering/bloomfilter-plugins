@@ -33,9 +33,20 @@ jobs:
               continue
             fi
 
+            # GitHub runs `run:` under `bash -e`, so an unguarded `$(jq ...)`
+            # on a malformed manifest aborted the whole step at jq's exit 5 —
+            # killing the check for every later plugin and reporting nothing
+            # useful. Inside `if !` the exit status is tested, not fatal.
+            if ! jq -e . "$plugin_json" >/dev/null 2>&1; then
+              echo "✗ ${plugin_json} is not valid JSON"
+              failed=true
+              continue
+            fi
+
             pr_version=$(jq -r '.version // empty' "$plugin_json")
             if [ -z "$pr_version" ]; then
-              echo "⚠ ${plugin_json} has no version field, skipping"
+              echo "✗ ${plugin_json} has no version field"
+              failed=true
               continue
             fi
 
@@ -44,9 +55,19 @@ jobs:
               continue
             fi
 
+            # The pull request side is already known good by here. When main
+            # has nothing comparable the bump cannot be evaluated, so warn and
+            # move on: failing would also block the pull request that repairs
+            # main, leaving no in-band way out. Manifest validity on main is
+            # validate-plugin.yml's job, and it runs on every push to main.
+            if ! git show "origin/main:${plugin_json}" | jq -e . >/dev/null 2>&1; then
+              echo "⚠ ${plugin_dir} manifest on main is not valid JSON, cannot compare"
+              continue
+            fi
+
             main_version=$(git show "origin/main:${plugin_json}" | jq -r '.version // empty')
             if [ -z "$main_version" ]; then
-              echo "⚠ ${plugin_dir} has no version on main, skipping"
+              echo "⚠ ${plugin_dir} has no version on main, cannot compare"
               continue
             fi
 
@@ -66,7 +87,8 @@ jobs:
 
           if [ "$failed" = true ]; then
             echo ""
-            echo "Error: One or more plugins did not have their version bumped."
-            echo "Please update the 'version' field in the affected plugin's plugin.json."
+            echo "Error: one or more plugins failed the version check above."
+            echo "Fix the plugin.json reported with ✗ — either it is unparseable,"
+            echo "it has no version field, or its version needs bumping."
             exit 1
           fi

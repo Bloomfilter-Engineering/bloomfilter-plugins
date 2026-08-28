@@ -93,6 +93,13 @@ def _agent_id_from_tool_use_id(tool_use_id: str) -> str:
     from three independent places: the hook payload's ``agent_id``, the
     chatSessions response part's ``toolCallId``, and that part's enclosing
     ``toolCallRounds[].toolCalls[].id`` (the suffixed form).
+
+    Args:
+        tool_use_id: The runSubagent tool call id, with or without the suffix.
+
+    Returns:
+        The bare agent_id — everything before the first ``__``. An id that
+        carries no suffix is returned unchanged.
     """
     return tool_use_id.split("__", 1)[0]
 
@@ -104,6 +111,14 @@ def _open_subagent(batch_entries: list[dict[str, Any]]) -> dict[str, Any] | None
     SubagentStart with no matching SubagentStop. Returns the payload of the
     ``runSubagent`` PreToolUse that spawned it, or None when no subagent is
     running (or its tool call can't be found).
+
+    Args:
+        batch_entries: This session's envelopes, oldest first. Scanned in
+            reverse, so only the most recent lifecycle event decides.
+
+    Returns:
+        The spawning ``runSubagent`` PreToolUse payload, or None when no
+        subagent is in flight or its tool call is no longer in the batch.
     """
     agent_id = ""
     for entry in reversed(batch_entries):
@@ -141,8 +156,17 @@ def _build_subagent_transcript(
     cost) only in chatSessions, which flushes seconds later, so it is filled in
     by the re-upload worker via ``_overlay_chat_onto_subagents``.
 
-    Returns ``(conversation, agent_id, agent_type)``; conversation is None when
-    there is no matching subagent or no response to record.
+    Args:
+        payload: The runSubagent PostToolUse payload, read for its
+            ``tool_use_id``, ``tool_input`` prompt and ``tool_response``.
+        batch_entries: This session's envelopes, searched for the matching
+            SubagentStart / SubagentStop timing.
+
+    Returns:
+        ``(conversation, agent_id, agent_type)``. The conversation is None when
+        the tool call carries no agent_id, when no SubagentStart was recorded,
+        or when the subagent produced no response — an empty transcript would
+        otherwise create a child session with nothing in it.
     """
     agent_id = _agent_id_from_tool_use_id(payload.get("tool_use_id", ""))
     if not agent_id:
@@ -154,12 +178,13 @@ def _build_subagent_transcript(
         if entry_payload.get("agent_id") != agent_id:
             continue
         event = entry.get("hook_event_name")
-        if event == "SubagentStart":
-            started_at = entry_payload.get("timestamp", "")
-            agent_type = entry_payload.get("agent_type", "")
-        elif event == "SubagentStop":
-            ended_at = entry_payload.get("timestamp", "")
-            agent_type = agent_type or entry_payload.get("agent_type", "")
+        match event:
+            case "SubagentStart":
+                started_at = entry_payload.get("timestamp", "")
+                agent_type = entry_payload.get("agent_type", "")
+            case "SubagentStop":
+                ended_at = entry_payload.get("timestamp", "")
+                agent_type = agent_type or entry_payload.get("agent_type", "")
 
     tool_input = payload.get("tool_input")
     prompt = tool_input.get("prompt", "") if isinstance(tool_input, dict) else ""
@@ -168,9 +193,10 @@ def _build_subagent_transcript(
         response = json.dumps(response)
 
     # No lifecycle events means this wasn't really a subagent run; no response
-    # means there is nothing worth shipping. Returning None keeps an empty
-    # {"turns": []} from passing the caller's truthiness check — the bug fixed
-    # for Cursor in eecc793.
+    # means there is nothing worth shipping. Returning None rather than an empty
+    # {"turns": []} matters because the caller gates on truthiness: a dict with
+    # an empty turn list is truthy, so it would be attached as a child
+    # conversation and materialize a subagent session with nothing in it.
     if not started_at or not response.strip():
         return None, agent_id, agent_type
 
@@ -207,9 +233,18 @@ def _attach_to_subagent_stop(
 
     The backend keys child sessions off the stop hook, so the transcript has to
     live there even though it can only be assembled once the spawning tool call
-    returns. Mutates *batch_entries*; the caller persists with rewrite_batch.
+    returns.
 
-    Returns True if a matching SubagentStop was found and updated.
+    Args:
+        batch_entries: This session's envelopes, mutated in place. The caller
+            is responsible for persisting them with rewrite_batch.
+        agent_id: Identifies the SubagentStop entry to write onto.
+        agent_type: Recorded alongside the transcript when non-empty.
+        conversation: The child conversation to attach.
+
+    Returns:
+        True when a matching SubagentStop was found and updated, False when
+        none is in the batch.
     """
     for entry in reversed(batch_entries):
         if entry.get("hook_event_name") != "SubagentStop":
@@ -230,8 +265,16 @@ def _overlay_chat_onto_subagents(
     """Fill each subagent turn's model and cost from the chatSessions records.
 
     The hook stream has neither; ``toolSpecificData.kind == "subagent"`` in
-    chatSessions has both, keyed by the same agent_id. Returns True if any
-    entry changed.
+    chatSessions has both, keyed by the same agent_id.
+
+    Args:
+        batch_entries: This session's envelopes, mutated in place.
+        subagents: agent_id -> chatSessions subagent record, holding the model
+            and cost the hook stream never carries.
+
+    Returns:
+        True when at least one entry changed, so the caller knows whether a
+        rewrite and re-upload are worth doing.
     """
     updated = False
     for entry in batch_entries:
@@ -242,10 +285,10 @@ def _overlay_chat_onto_subagents(
         turns = (entry.get("subagent_transcript") or {}).get("turns") or []
         for turn in turns:
             if record.get("model") and not turn.get("model"):
-                turn["model"] = record["model"]
+                turn["model"] = record.get("model")
                 updated = True
             if record.get("credits") is not None and turn.get("credits") is None:
-                turn["credits"] = record["credits"]
+                turn["credits"] = record.get("credits")
                 updated = True
     return updated
 
@@ -256,7 +299,15 @@ def _overlay_chat_onto_stops(
     """Overlay exact response/tokens/model from chatSessions onto every Stop
     entry, matched in turn order (Nth Stop <-> Nth request record).
 
-    Returns True if any entry changed.
+    Args:
+        batch_entries: This session's envelopes, mutated in place.
+        chat_requests: chatSessions request records in session order. Walked in
+            lockstep with the Stop entries, so the Nth Stop always takes the
+            Nth record even when some Stops already carry data.
+
+    Returns:
+        True when at least one entry changed, so the caller knows whether a
+        rewrite and re-upload are worth doing.
     """
     updated = False
     record_index = 0
@@ -265,28 +316,29 @@ def _overlay_chat_onto_stops(
             continue
         if record_index >= len(chat_requests):
             break
-        rec = chat_requests[record_index]
+        record = chat_requests[record_index]
         record_index += 1
 
         changed = False
-        if rec.get("response_content") and not entry.get("agent_response"):
-            entry["agent_response"] = rec["response_content"]
+        if record.get("response_content") and not entry.get("agent_response"):
+            entry["agent_response"] = record.get("response_content")
             changed = True
-        if rec.get("reasoning_text") and not entry.get("reasoning_text"):
-            entry["reasoning_text"] = rec["reasoning_text"]
+        if record.get("reasoning_text") and not entry.get("reasoning_text"):
+            entry["reasoning_text"] = record.get("reasoning_text")
             changed = True
-        if rec.get("userMessage") and not entry.get("user_message"):
-            entry["user_message"] = rec["userMessage"]
+        if record.get("userMessage") and not entry.get("user_message"):
+            entry["user_message"] = record.get("userMessage")
             changed = True
-        if rec.get("input_tokens") or rec.get("output_tokens"):
+        if record.get("input_tokens") or record.get("output_tokens"):
             entry["transcript_summary"] = {
                 "api_calls": [
                     {
-                        "input_tokens": rec.get("input_tokens", 0),
-                        "output_tokens": rec.get("output_tokens", 0),
-                        "model": rec.get("resolvedModel") or rec.get("modelId", ""),
-                        "request_id": rec.get("requestId", ""),
-                        "response_id": rec.get("responseId", ""),
+                        "input_tokens": record.get("input_tokens", 0),
+                        "output_tokens": record.get("output_tokens", 0),
+                        "model": record.get("resolvedModel")
+                        or record.get("modelId", ""),
+                        "request_id": record.get("requestId", ""),
+                        "response_id": record.get("responseId", ""),
                     }
                 ]
             }
@@ -304,6 +356,15 @@ def run_reupload_worker(session_id: str) -> None:
     Runs in its own process (see spawn_detached) so it never blocks the Stop
     hook. Re-sending a session is safe by design here, and
     exact token counts clear any earlier estimate.
+
+    Args:
+        session_id: The session whose batch is polled, overlaid and re-sent.
+            The worker returns without re-uploading when no API key is
+            configured, when the batch holds no Stop entry to match against,
+            when no chatSessions path is found, when that file parses to no
+            requests, or when the batch is empty after polling. Exhausting the
+            poll budget is NOT one of those: it is logged and the worker
+            continues, overlaying whatever partial data has flushed so far.
     """
     api_key = resolve_api_key()
     if not api_key:
@@ -311,10 +372,10 @@ def run_reupload_worker(session_id: str) -> None:
         return
 
     batch_entries = read_batch(session_id)
-    n_stops = sum(
+    stop_entry_count = sum(
         1 for entry in batch_entries if entry.get("hook_event_name") == "Stop"
     )
-    if n_stops == 0:
+    if stop_entry_count == 0:
         debug_log(
             f"reupload_worker: aborted session_id={session_id} reason=no-stops "
             f"entries={len(batch_entries)}"
@@ -358,8 +419,8 @@ def run_reupload_worker(session_id: str) -> None:
             chat_requests = parsed.get("requests", [])
             chat_subagents = parsed.get("subagents", {})
             poll_count += 1
-            if len(chat_requests) >= n_stops:
-                last = chat_requests[n_stops - 1]
+            if len(chat_requests) >= stop_entry_count:
+                last = chat_requests[stop_entry_count - 1]
                 subagents_ready = all(
                     (chat_subagents.get(agent_id) or {}).get("model")
                     for agent_id in bare_agent_ids
@@ -374,14 +435,15 @@ def run_reupload_worker(session_id: str) -> None:
         debug_log(
             f"reupload_worker: budget-exhausted session_id={session_id} "
             f"polls={poll_count} waited={waited:.1f}s "
-            f"chat_requests={len(chat_requests)} n_stops={n_stops} "
+            f"chat_requests={len(chat_requests)} "
+            f"stop_entry_count={stop_entry_count} "
             f"chat_path={chat_path!r}"
         )
 
     if not chat_path:
         debug_log(
             f"reupload_worker: aborted session_id={session_id} "
-            f"reason=no-chat-sessions-path n_stops={n_stops} "
+            f"reason=no-chat-sessions-path stop_entry_count={stop_entry_count} "
             f"waited={waited:.1f}s"
         )
         return
@@ -487,6 +549,18 @@ def _upload_with_size_backoff(
 
 
 def main() -> None:
+    """Run one hook, or the detached re-upload worker.
+
+    An argv of ``__reupload <session_id>`` runs the worker; anything else is
+    treated as a hook event name. This runtime keeps no allow-list, so an
+    event name is never rejected for being unrecognised. It still returns
+    early without recording anything on: an empty argv; a payload belonging
+    to another runtime; a payload that is not a JSON object; a missing
+    session id; a UserPromptSubmit carrying an in-flight subagent's own
+    prompt; a duplicate UserPromptSubmit from the CLI's new-session quirk;
+    and a CLI Stop with no API key configured. Every failure is swallowed by
+    the caller's guard, so this must never raise into the host.
+    """
     # Detached background re-upload worker entrypoint.
     if len(sys.argv) > 1 and sys.argv[1] == "__reupload":
         session_id = sys.argv[2] if len(sys.argv) > 2 else ""
@@ -558,11 +632,11 @@ def main() -> None:
                 )
                 return
 
-    # --- Copilot CLI new-session duplicate-hook dedup -------------------
+    # --- Copilot CLI new-session duplicate-hook removal ----------------
     # When a CLI session is started with an initial prompt, the CLI fires
     # `userPromptSubmitted` twice (once for the submission, once again after
     # the sessionStart hook completes) with identical prompt content, then
-    # runs two model turns -> two `agentStop`s. Without dedup the backend
+    # runs two model turns -> two `agentStop`s. Without this the backend
     # creates two turns for one user message. We:
     #   1. Skip the second UserPromptSubmit when it carries the same prompt
     #      as the immediately-previous UPS (no Stop between them).
@@ -763,30 +837,32 @@ def main() -> None:
                         current_request["input_tokens"] = chat_request["input_tokens"]
                         current_request["output_tokens"] = chat_request["output_tokens"]
                     if chat_request.get("resolvedModel"):
-                        current_request["resolvedModel"] = chat_request["resolvedModel"]
+                        current_request["resolvedModel"] = chat_request.get(
+                            "resolvedModel"
+                        )
                     if chat_request.get("requestId"):
-                        current_request["requestId"] = chat_request["requestId"]
+                        current_request["requestId"] = chat_request.get("requestId")
                     if chat_request.get("responseId"):
-                        current_request["responseId"] = chat_request["responseId"]
+                        current_request["responseId"] = chat_request.get("responseId")
                     # Prefer chatSessions reasoning_parts (has thinking_id
                     # and timestamps from toolCallRounds).
                     if chat_request.get("reasoning_parts"):
-                        current_request["reasoning_parts"] = chat_request[
+                        current_request["reasoning_parts"] = chat_request.get(
                             "reasoning_parts"
-                        ]
+                        )
                         if chat_request.get("reasoning_text"):
-                            current_request["reasoning_text"] = chat_request[
+                            current_request["reasoning_text"] = chat_request.get(
                                 "reasoning_text"
-                            ]
+                            )
 
         # Build envelope fields from the combined data.
         if current_request:
             if current_request.get("response_content"):
-                envelope["agent_response"] = current_request["response_content"]
+                envelope["agent_response"] = current_request.get("response_content")
             if current_request.get("reasoning_text"):
-                envelope["reasoning_text"] = current_request["reasoning_text"]
+                envelope["reasoning_text"] = current_request.get("reasoning_text")
             if current_request.get("userMessage"):
-                envelope["user_message"] = current_request["userMessage"]
+                envelope["user_message"] = current_request.get("userMessage")
 
             envelope["transcript_summary"] = {
                 "api_calls": [
@@ -821,7 +897,7 @@ def main() -> None:
                     continue
                 if record_index >= len(earlier):
                     break
-                rec = earlier[record_index]
+                record = earlier[record_index]
                 record_index += 1
 
                 # Check if this entry needs backfill
@@ -834,23 +910,24 @@ def main() -> None:
                 if entry.get("agent_response") and has_tokens:
                     continue  # already complete
 
-                if rec.get("response_content") and not entry.get("agent_response"):
-                    entry["agent_response"] = rec["response_content"]
-                if rec.get("reasoning_text") and not entry.get("reasoning_text"):
-                    entry["reasoning_text"] = rec["reasoning_text"]
-                if rec.get("userMessage") and not entry.get("user_message"):
-                    entry["user_message"] = rec["userMessage"]
-                if rec.get("input_tokens") or rec.get("output_tokens"):
+                if record.get("response_content") and not entry.get("agent_response"):
+                    entry["agent_response"] = record.get("response_content")
+                if record.get("reasoning_text") and not entry.get("reasoning_text"):
+                    entry["reasoning_text"] = record.get("reasoning_text")
+                if record.get("userMessage") and not entry.get("user_message"):
+                    entry["user_message"] = record.get("userMessage")
+                if record.get("input_tokens") or record.get("output_tokens"):
                     entry["transcript_summary"] = {
                         "api_calls": [
                             {
-                                "input_tokens": rec.get("input_tokens", 0),
-                                "output_tokens": rec.get("output_tokens", 0),
+                                "input_tokens": record.get("input_tokens", 0),
+                                "output_tokens": record.get("output_tokens", 0),
                                 "model": (
-                                    rec.get("resolvedModel") or rec.get("modelId", "")
+                                    record.get("resolvedModel")
+                                    or record.get("modelId", "")
                                 ),
-                                "request_id": rec.get("requestId", ""),
-                                "response_id": rec.get("responseId", ""),
+                                "request_id": record.get("requestId", ""),
+                                "response_id": record.get("responseId", ""),
                             }
                         ]
                     }
@@ -975,13 +1052,13 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except Exception as exc:
+    except Exception as exception:
         try:
             debug_log(
-                f"collect_hook: unhandled exception type={type(exc).__name__} "
-                f"message={exc!s}"
+                f"collect_hook: unhandled exception type={type(exception).__name__} "
+                f"message={exception!s}"
             )
         except Exception:
             pass  # Never block Copilot
-        print(f"[bloomfilter] collect_hook failed: {exc}", file=sys.stderr)
+        print(f"[bloomfilter] collect_hook failed: {exception}", file=sys.stderr)
     sys.exit(0)

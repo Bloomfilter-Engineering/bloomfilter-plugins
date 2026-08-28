@@ -83,7 +83,15 @@ SUBAGENT_STOP_HOOK: str = "SubagentStop"
 
 
 def _first_string(candidates: list[Any]) -> str:
-    """Return the first non-empty string from a list, else ''."""
+    """Return the first non-empty string from a list, else ''.
+
+    Args:
+        candidates: Values in preference order. Entries of any type are
+            tolerated; anything that is not a non-empty string is skipped.
+
+    Returns:
+        The first usable string, or '' when the list holds none.
+    """
     for candidate in candidates:
         if isinstance(candidate, str) and candidate:
             return candidate
@@ -91,7 +99,19 @@ def _first_string(candidates: list[Any]) -> str:
 
 
 def _resolve_project_dir(payload: dict[str, Any]) -> str:
-    """Pick the most reliable signal of the user's working directory."""
+    """Pick the most reliable signal of the user's working directory.
+
+    Args:
+        payload: The hook payload, read for ``cwd``, ``project_dir`` and
+            ``workspace_roots`` (or its camelCase spelling).
+
+    Returns:
+        The first usable directory, preferring what the payload states over the
+        environment, and falling back to the process's own cwd. In practice
+        never '', because the cwd entry is non-empty. The candidate list is
+        built eagerly, so ``os.getcwd()`` runs even when the payload supplies a
+        directory, and it raises OSError if the process's cwd has been unlinked.
+    """
     workspace_roots = payload.get("workspace_roots") or payload.get("workspaceRoots")
     first_workspace_root: str = ""
     if isinstance(workspace_roots, list) and workspace_roots:
@@ -189,15 +209,21 @@ def _spawn_detached_upload(session_id: str) -> bool:
     try:
         subprocess.Popen(command, **popen_kwargs)
         return True
-    except Exception as exc:
+    except Exception as exception:
         debug_log(
             f"detached upload spawn failed: session_id={session_id} "
-            f"type={type(exc).__name__} message={exc!s}"
+            f"type={type(exception).__name__} message={exception!s}"
         )
         return False
 
 
 def main() -> None:
+    """Run one hook: read the payload, append an envelope, upload when due.
+
+    Unsupported events and payloads belonging to another runtime return
+    without touching the batch. Every failure is swallowed by the caller's
+    guard, so this must never raise into the host.
+    """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if hook_event_name not in SUPPORTED_HOOKS:
         return
@@ -300,7 +326,7 @@ def main() -> None:
             if assistant_messages:
                 envelope["agent_response"] = assistant_messages[-1].get("text") or ""
             elif payload.get("last_assistant_message"):
-                envelope["agent_response"] = payload["last_assistant_message"]
+                envelope["agent_response"] = payload.get("last_assistant_message")
 
             for narration in assistant_messages[:-1]:
                 narration_text = narration.get("text") or ""
@@ -408,13 +434,13 @@ def main() -> None:
         and "agent_response" not in envelope
         and payload.get("last_assistant_message")
     ):
-        envelope["agent_response"] = payload["last_assistant_message"]
+        envelope["agent_response"] = payload.get("last_assistant_message")
 
     # On SubagentStop, parse the subagent's own rollout (agent_transcript_path)
     # into a normalized child conversation and attach it. Codex fires this hook
     # under the PARENT session_id, so it lands in the parent batch and uploads
     # with the parent on Stop; the API turns it into a linked child
-    # session. Read NOW — the subagent's rollout may be GC'd later.
+    # session. Read NOW — the subagent's rollout may be garbage-collected later.
     if hook_event_name == SUBAGENT_STOP_HOOK:
         conversation = extract_subagent_conversation(
             payload.get("agent_transcript_path", ""),
