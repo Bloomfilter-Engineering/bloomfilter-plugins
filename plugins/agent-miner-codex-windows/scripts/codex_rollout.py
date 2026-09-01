@@ -255,6 +255,9 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     # First pass: track turn_id boundaries, collect raw events.
     current_turn_id: str | None = None
     turn_model: str = ""
+    # Reasoning effort for the turn (e.g. "low"/"medium"/"high"/"xhigh"), read
+    # off the turn's turn_context alongside the model.
+    turn_effort: str = ""
     assistant_chunks: list[str] = []
     assistant_messages: list[dict[str, Any]] = []
     turn_started_at: datetime | None = None
@@ -290,6 +293,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
             current_turn_id = payload.get("turn_id") or current_turn_id
             if in_turn():
                 turn_model = payload.get("model") or turn_model
+                turn_effort = payload.get("effort") or turn_effort
                 if entry_timestamp is not None and turn_started_at is None:
                     turn_started_at = entry_timestamp
                     turn_ended_at = entry_timestamp
@@ -354,6 +358,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                                 "cache_read_tokens": cached_input_tokens,
                                 "cache_creation_tokens": 0,
                                 "model": turn_model,
+                                "effort": turn_effort,
                                 "reasoning_output_tokens": (
                                     last_token_usage.get("reasoning_output_tokens", 0)
                                     or 0

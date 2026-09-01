@@ -24,7 +24,7 @@ else:
 # sys.path before importing either, so a module-level import resolves.
 from codex_rollout import parse_transcript
 
-PLUGIN_VERSION: str = "0.3.1"
+PLUGIN_VERSION: str = "0.3.2"
 _SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"

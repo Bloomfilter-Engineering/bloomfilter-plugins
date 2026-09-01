@@ -21,7 +21,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.3.1"
+PLUGIN_VERSION = "0.3.2"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code"  # disambiguates plugins sharing the same log dir
@@ -2316,6 +2316,12 @@ def _extract_api_calls(scoped_entries: list[dict[str, Any]]) -> list[dict[str, A
         speed = usage.get("speed")
         if speed:
             api_call["speed"] = speed
+        # Reasoning effort is a top-level field on the transcript entry (not in
+        # usage), e.g. "high". Present only when the session ran with a non-default
+        # effort; omitted otherwise so the shape matches turns that never had one.
+        effort = entry.get("effort")
+        if isinstance(effort, str) and effort:
+            api_call["effort"] = effort
         api_calls.append(api_call)
     return api_calls
 
