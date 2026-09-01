@@ -129,6 +129,38 @@ def is_complete(path: str) -> bool:
         return False
 
 
+def latest_turn(path: str) -> dict[str, Any] | None:
+    """Return the transcript's most recent turn (prompt, response, tool calls).
+
+    Used by the no-stdin capture path (Cursor 3.18.x over remote/RDP delivers an
+    empty stdin payload and only exposes the turn through
+    ``CURSOR_TRANSCRIPT_PATH``). Reuses ``parse_transcript`` and returns the last
+    turn so the collector can reconstruct the ``beforeSubmitPrompt.prompt``,
+    ``afterAgentResponse.text``, and ``postToolUse`` fields the backend expects.
+
+    Args:
+        path: Transcript JSONL to read.
+
+    Returns:
+        ``{"user_prompt": str, "agent_response": str, "tool_calls": [...]}`` for
+        the last turn, or ``None`` when the transcript is unreadable or has no
+        turns. The transcript carries no tokens, model, or tool output, so those
+        stay unrecoverable in this mode (``tool_output`` is always ``None``).
+    """
+    try:
+        turns = parse_transcript(path).get("turns") or []
+    except OSError:
+        return None
+    if not turns:
+        return None
+    last = turns[-1]
+    return {
+        "user_prompt": last.get("user_prompt") or "",
+        "agent_response": last.get("agent_response") or "",
+        "tool_calls": last.get("tool_calls") or [],
+    }
+
+
 def _empty_turn(user_prompt: str | None) -> dict[str, Any]:
     """Return a fresh child-turn accumulator seeded with ``user_prompt``.
 

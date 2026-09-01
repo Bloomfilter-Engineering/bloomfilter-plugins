@@ -51,6 +51,27 @@ GIT_BRANCH_HOOKS = {"SessionStart", "UserPromptSubmit"}
 TRANSCRIPT_HOOKS = {"Stop", "UserPromptSubmit"}
 
 
+def _running_as_cursor_agent() -> bool:
+    """True when this Claude Code hook is firing inside Cursor's agent backend.
+
+    Cursor 3.18.x can run Claude Code as its agent model; that inherited process
+    fires the native Claude Code hooks, which would double-capture a turn the
+    Cursor plugin already records — and, being handed no session id there, only
+    spams the debug log with ``no-session-id``. These ``CURSOR_*`` variables are
+    set by Cursor's agent-exec host; a user's own Claude Code in Cursor's
+    integrated terminal does NOT inherit them, so real terminal capture is
+    unaffected.
+
+    Returns:
+        True when a Cursor-agent marker is present in the environment.
+    """
+    return bool(
+        os.environ.get("CURSOR_EXTENSION_HOST_ROLE")
+        or os.environ.get("CURSOR_LAYOUT")
+        or os.environ.get("CURSOR_TRANSCRIPT_PATH")
+    )
+
+
 def main() -> None:
     """Handle one hook invocation: batch the payload, and upload when due.
 
@@ -64,6 +85,13 @@ def main() -> None:
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
         debug_log("hook skipped: reason=missing-hook-event-name (argv empty)")
+        return
+
+    # Cursor runs Claude Code as its agent backend and fires these hooks with no
+    # session id; the Cursor plugin already captures that turn. Skip silently so
+    # this does not double-capture or fill the debug log. Terminal Claude Code
+    # (no Cursor-agent env) is unaffected.
+    if _running_as_cursor_agent():
         return
 
     payload = read_payload()
