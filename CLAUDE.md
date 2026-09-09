@@ -1,6 +1,6 @@
 # bloomfilter-plugins
 
-Monorepo of Bloomfilter "agent-miner" plugins that capture agent activity from four
+Monorepo of Bloomfilter "agent-miner" plugins that capture agent activity from five
 coding-assistant runtimes. Each runtime has **one cross-platform plugin** covering Windows, macOS,
 Linux, and WSL. The `-windows` variants are deprecated and kept only so existing installs keep
 working — never install one alongside its cross-platform replacement, or every event is captured
@@ -12,6 +12,7 @@ twice.
 | Codex | `agent-miner-codex` | `agent-miner-codex-windows` |
 | Copilot (VS Code + CLI) | `bloomfilter-agent-miner-copilot` | — |
 | Cursor | `bloomfilter-agent-miner-cursor` | `-cursor-windows` (and `-cursor-unified`, an alias) |
+| Devin CLI | `agent-miner-devin` | — |
 
 > **Install** is documented in `README.md` (Setup + Install Plugins, per runtime). This file
 > covers **uninstalling** plugins during local testing — which the README does not.
@@ -85,6 +86,20 @@ Remove-Item -Recurse -Force "$env:USERPROFILE\.cursor\plugins\local\agent-miner-
 Replace the trailing dir name for the legacy plugins (`agent-miner-cursor`,
 `agent-miner-cursor-windows`) if those were installed. Install only ONE Cursor plugin at a time —
 multiple cause duplicate event capture.
+
+### Devin CLI
+
+Managed by the `devin` CLI (same command on both OSes):
+
+```bash
+devin plugins remove agent-miner-devin
+# if the repo meta-plugin was installed, remove it too
+devin plugins remove bloomfilter-plugins
+```
+
+`devin plugins list` shows what is installed and whether policy blocks it. If the hooks were
+registered directly in `~/.config/devin/config.json` (no plugin access), delete them from the
+`"hooks"` key. Run `/hooks` in a session to confirm nothing from Bloomfilter is loaded.
 
 ## Refreshing after local edits
 
@@ -169,6 +184,23 @@ Copy-Item -Recurse -Force "C:\path\to\bloomfilter-plugins\plugins\agent-miner-cu
 
 Then run **Developer: Reload Window** in Cursor. Do not symlink — Cursor's loader did not pick up
 a symlinked plugin dir in practice.
+
+### Devin CLI
+
+Local plugin installs are **linked** to their source folder, so edits are live:
+
+```bash
+devin plugins install ./plugins/agent-miner-devin   # one-time, from the repo checkout
+```
+
+`scripts/*.py` changes apply on the next hook fire; `hooks.json` and `.devin-plugin/plugin.json`
+changes apply on the next session. Local pairing state lives next to the batches as
+`<session>.tools.json` and is removed on `Stop`/`SessionEnd`. The plugin's own unit tests run
+without any runtime installed:
+
+```bash
+python3 -m unittest discover -s plugins/agent-miner-devin/tests
+```
 
 ## Shared config
 

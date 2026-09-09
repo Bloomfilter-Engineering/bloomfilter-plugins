@@ -1,0 +1,18 @@
+{
+  "name": "agent-miner-devin",
+  "version": "0.1.0",
+  "description": "Agent mining hooks for Bloomfilter (Devin CLI on Windows, macOS, Linux, and WSL)",
+  "author": {
+    "name": "Bloomfilter Engineering"
+  },
+  "homepage": "https://www.bloomfilter.ai/",
+  "repository": "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins",
+  "license": "Bloomfilter Source-Available License 1.0",
+  "keywords": [
+    "bloomfilter",
+    "devin",
+    "agent-observability",
+    "hooks"
+  ],
+  "skills": []
+}

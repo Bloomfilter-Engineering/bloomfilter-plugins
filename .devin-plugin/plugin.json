@@ -1,0 +1,20 @@
+{
+  "name": "bloomfilter-plugins",
+  "version": "0.1.0",
+  "description": "Bloomfilter's Devin plugin marketplace: installing this meta-plugin pulls in the Bloomfilter agent-miner plugin for Devin CLI",
+  "author": {
+    "name": "Bloomfilter Engineering"
+  },
+  "homepage": "https://www.bloomfilter.ai/",
+  "repository": "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins",
+  "license": "Bloomfilter Source-Available License 1.0",
+  "keywords": ["bloomfilter", "devin", "agent-observability", "marketplace"],
+  "skills": [],
+  "requiredPlugins": [
+    {
+      "source": "git-subdir",
+      "url": "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins.git",
+      "path": "plugins/agent-miner-devin"
+    }
+  ]
+}

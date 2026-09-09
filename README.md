@@ -1,6 +1,6 @@
 # bloomfilter-plugins
 
-Bloomfilter Agent Miner plugins for Claude Code, VS Code Copilot, and Cursor. The plugins capture agent events such as sessions, prompts, tool calls, responses, and session stops, then send them to Bloomfilter for observability and analysis.
+Bloomfilter Agent Miner plugins for Claude Code, Codex, VS Code Copilot, Cursor, and Devin CLI. The plugins capture agent events such as sessions, prompts, tool calls, responses, and session stops, then send them to Bloomfilter for observability and analysis.
 
 ## Available Plugins
 
@@ -18,6 +18,7 @@ only so existing installs keep working — new users should not install them.
 | `bloomfilter-agent-miner-cursor-unified` | Cursor on Windows, macOS, Linux, WSL | ♻️ Alias of `-cursor` | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-cursor-windows` | Cursor on Windows | ⚠️ Deprecated | `.cursor-plugin/marketplace.json` |
 | `bloomfilter-agent-miner-copilot` | VS Code Copilot and Copilot CLI on Windows, macOS, Linux, WSL | ✅ Recommended | `.github/plugin/marketplace.json` |
+| `agent-miner-devin` | Devin CLI (Devin for Terminal) on Windows, macOS, Linux, WSL | 🧪 Beta | `.devin-plugin/plugin.json` (root meta-plugin) |
 
 ## Setup
 
@@ -33,6 +34,7 @@ Do this once on each machine before installing a plugin.
   - Codex CLI or Codex desktop app for `agent-miner-codex` (Windows, macOS, Linux, WSL).
   - Cursor 3.2.16+ with Plugins support for `bloomfilter-agent-miner-cursor` (Windows, macOS, Linux, WSL).
   - VS Code 1.115+ (Copilot extension), or the GitHub Copilot CLI, for `bloomfilter-agent-miner-copilot` (Windows, macOS, Linux, WSL).
+  - Devin CLI with plugin access for `agent-miner-devin` (Windows, macOS, Linux, WSL). Devin plugins are in closed beta; see the Devin section below for the hooks-only fallback.
 - On **Windows**, the Claude Code and Codex plugins run their hooks through **Git Bash** when it
   is installed (falling back to PowerShell otherwise), so installing Git is recommended there.
   This does not apply to the Copilot plugin: VS Code and the Copilot CLI always run hooks through
@@ -347,6 +349,52 @@ Copy-Item -Recurse -Force `
 ```
 
 Reload Cursor after installing or copying the plugin by running **Developer: Reload Window** from the Command Palette.
+
+### Devin CLI
+
+Install the single cross-platform plugin **`agent-miner-devin`** — it runs on Windows, macOS,
+Linux, and WSL. It captures **Devin for Terminal** (CLI) sessions only: cloud Devin sessions never
+fire `SessionStart`/`SessionEnd` and have no local transcript, so they are out of scope for a plugin.
+
+Devin plugins are in **closed beta** (Cognition grants access on request). With plugin access,
+install from this repository — the repo root is a Devin meta-plugin whose `requiredPlugins` pulls
+in `agent-miner-devin`:
+
+```bash
+devin plugins install Bloomfilter-Engineering/bloomfilter-plugins
+devin plugins list
+```
+
+Or install just the plugin from its subfolder:
+
+```bash
+devin plugins install "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins.git#plugins/agent-miner-devin"
+```
+
+For an organization-wide rollout, an enterprise/account admin adds
+`{"requiredPlugins": ["Bloomfilter-Engineering/bloomfilter-plugins"]}` to the managed manifest at
+**Settings → Resources → Plugins** in the Devin web app. Account-level required plugins reach CLI
+users too; org-level ones reach cloud sessions only.
+
+**Without plugin access**, the same hooks can be registered directly. Clone this repository and add
+its hook file to your user config (`~/.config/devin/config.json`, or `%APPDATA%\devin\config.json`
+on Windows) under the `"hooks"` key, replacing each `${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}` /
+`$env:DEVIN_PLUGIN_ROOT` with the absolute path of `plugins/agent-miner-devin`. Run `/hooks` inside
+a Devin session to confirm the eight hooks loaded.
+
+Start a Devin CLI session in any project. The plugin creates the config file automatically on first
+run if it does not exist, but you still need to add your API key.
+
+Notes:
+
+- Devin's hook payloads carry no token counts or model. The plugin reads them from Devin's local
+  ATIF transcript (`~/.local/share/devin/cli/transcripts/<session>.json`) when a turn ends, along
+  with the turn's ACU cost. Set `BLOOMFILTER_DEVIN_DATA_DIR` if your Devin data directory lives
+  elsewhere.
+- Devin's tool hooks carry no per-call id, so the plugin issues one and pairs `PreToolUse` with the
+  oldest pending `PostToolUse` of the same tool name. Two concurrent calls of the same tool that
+  finish out of order can have their outputs swapped.
+- Devin reasoning text is not exposed by the CLI and is not captured.
 
 ## Verify and Debug
 

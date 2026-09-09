@@ -1,0 +1,98 @@
+{
+  "SessionStart": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SessionStart; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" SessionStart",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "UserPromptSubmit": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" UserPromptSubmit; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" UserPromptSubmit",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PreToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PreToolUse; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" PreToolUse",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PostToolUse": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PostToolUse; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" PostToolUse",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "PermissionRequest": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PermissionRequest; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" PermissionRequest",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "Stop": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" Stop; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" Stop",
+          "timeout": 30
+        }
+      ]
+    }
+  ],
+  "PostCompaction": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" PostCompaction; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" PostCompaction",
+          "timeout": 10
+        }
+      ]
+    }
+  ],
+  "SessionEnd": [
+    {
+      "matcher": "",
+      "hooks": [
+        {
+          "type": "command",
+          "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SessionEnd; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" SessionEnd",
+          "timeout": 30
+        }
+      ]
+    }
+  ]
+}

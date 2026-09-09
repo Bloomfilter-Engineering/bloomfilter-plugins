@@ -14,6 +14,7 @@ VENDOR_BY_MANIFEST_DIR = {
     ".claude-plugin": "claude-code",
     ".cursor-plugin": "cursor",
     ".codex-plugin": "codex",
+    ".devin-plugin": "devin",
 }
 
 # Fields every plugin manifest must carry, plus the vendor-specific additions.
@@ -24,6 +25,7 @@ REQUIRED_PLUGIN_FIELDS_BY_VENDOR = {
     "codex": ("interface",),
     "cursor": (),
     "claude-code": (),
+    "devin": (),
 }
 
 # Codex is the strict vendor: it documents required values nested under
@@ -36,23 +38,46 @@ REQUIRED_CODEX_INTERFACE_FIELDS = (
     "category",
 )
 
-# marketplace file -> (required top-level fields, required per-entry fields)
+# Remote forms of this repository. A `git-subdir` entry whose url is one of these
+# points back into this checkout, so its `path` is resolvable like a local source.
+THIS_REPOSITORY_URLS = frozenset(
+    {
+        "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins",
+        "https://github.com/Bloomfilter-Engineering/bloomfilter-plugins.git",
+        "git@github.com:Bloomfilter-Engineering/bloomfilter-plugins.git",
+        "Bloomfilter-Engineering/bloomfilter-plugins",
+    }
+)
+
+# marketplace file -> (required top-level fields, required per-entry fields,
+# key holding the entries). Devin has no marketplace file of its own: the repo
+# root is a meta-plugin whose `requiredPlugins` list is the catalogue, so its
+# manifest doubles as the marketplace and the entries live under that key.
 MARKETPLACE_FILES = {
     ".claude-plugin/marketplace.json": (
         ("name", "owner", "plugins"),
         ("name", "source"),
+        "plugins",
     ),
     ".cursor-plugin/marketplace.json": (
         ("name", "owner", "plugins"),
         ("name", "source"),
+        "plugins",
     ),
     ".github/plugin/marketplace.json": (
         ("name", "owner", "plugins"),
         ("name", "source"),
+        "plugins",
     ),
     ".agents/plugins/marketplace.json": (
         ("name", "interface", "plugins"),
         ("name", "source", "policy", "category"),
+        "plugins",
+    ),
+    ".devin-plugin/plugin.json": (
+        ("name", "version", "description", "requiredPlugins"),
+        ("source", "url", "path"),
+        "requiredPlugins",
     ),
 }
 
@@ -287,12 +312,21 @@ def resolve_source(entry: dict[str, Any], label: str) -> str | None:
         The plugin directory name, or None when the source is remote,
         unreadable, or does not point at a directory under ``plugins/``.
     """
-    match entry.get("source"):
-        case str() as source_path:
+    match entry:
+        case {
+            "source": "git-subdir",
+            "url": str() as url,
+            "path": str() as source_path,
+        }:
+            # Devin's subfolder source. Resolvable only when it names this repo;
+            # a subdir of some other repository is remote like any other.
+            if url not in THIS_REPOSITORY_URLS:
+                return None
+        case {"source": str() as source_path}:
             pass
-        case {"source": "local", "path": str() as source_path}:
+        case {"source": {"source": "local", "path": str() as source_path}}:
             pass
-        case {"source": str()}:
+        case {"source": {"source": str()}}:
             return None
         case _:
             fail(f"{label} has an unreadable 'source'")
@@ -327,19 +361,19 @@ def validate_marketplace(
     if data is None:
         return set()
 
-    top_level_fields, entry_fields = MARKETPLACE_FILES[relative_path]
+    top_level_fields, entry_fields, entries_key = MARKETPLACE_FILES[relative_path]
     for field in top_level_fields:
         if field not in data:
             fail(f"{relative_path}: missing required field '{field}'")
 
-    entries = data.get("plugins")
+    entries = data.get(entries_key)
     if not isinstance(entries, list) or not entries:
-        fail(f"{relative_path}: 'plugins' must be a non-empty list")
+        fail(f"{relative_path}: '{entries_key}' must be a non-empty list")
         return set()
 
     listed: set[str] = set()
     for position, entry in enumerate(entries):
-        label = f"{relative_path}: plugins[{position}]"
+        label = f"{relative_path}: {entries_key}[{position}]"
         if not isinstance(entry, dict):
             fail(f"{label} must be an object")
             continue
