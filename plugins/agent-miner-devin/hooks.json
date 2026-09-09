@@ -6,7 +6,7 @@
         {
           "type": "command",
           "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${DEVIN_PLUGIN_ROOT:-$CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" SessionStart; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$(if ($env:DEVIN_PLUGIN_ROOT) { $env:DEVIN_PLUGIN_ROOT } else { $env:CLAUDE_PLUGIN_ROOT })\\hooks\\run-hook.ps1\" SessionStart",
-          "timeout": 10
+          "timeout": 30
         }
       ]
     }

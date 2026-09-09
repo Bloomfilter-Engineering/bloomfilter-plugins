@@ -190,6 +190,33 @@ class ToolPairingTests(unittest.TestCase):
             devin_tool_pairing.resolve_tool_call_id("s1", "exec"), (second, True)
         )
 
+    def test_out_of_order_completion_pairs_on_input_digest(self):
+        # Two concurrent `exec` calls; the second finishes first. The input
+        # digest picks the right parked id instead of the oldest one.
+        slow = devin_tool_pairing.claim_tool_call_id(
+            "s6", "exec", {"command": "pytest"}
+        )
+        fast = devin_tool_pairing.claim_tool_call_id("s6", "exec", {"command": "ruff"})
+
+        self.assertEqual(
+            devin_tool_pairing.resolve_tool_call_id("s6", "exec", {"command": "ruff"}),
+            (fast, True),
+        )
+        self.assertEqual(
+            devin_tool_pairing.resolve_tool_call_id(
+                "s6", "exec", {"command": "pytest"}
+            ),
+            (slow, True),
+        )
+
+    def test_unknown_input_falls_back_to_oldest(self):
+        oldest = devin_tool_pairing.claim_tool_call_id("s7", "exec", {"command": "a"})
+        devin_tool_pairing.claim_tool_call_id("s7", "exec", {"command": "b"})
+        self.assertEqual(
+            devin_tool_pairing.resolve_tool_call_id("s7", "exec", {"command": "zzz"}),
+            (oldest, True),
+        )
+
     def test_unpaired_end_gets_fresh_id(self):
         call_id, paired = devin_tool_pairing.resolve_tool_call_id("s2", "exec")
         self.assertTrue(call_id.startswith("devin-"))
@@ -214,6 +241,7 @@ class ToolPairingTests(unittest.TestCase):
         )
         state = json.loads(Path(state_path).read_text())
         self.assertEqual(len(state["exec"]), devin_tool_pairing.MAX_PENDING_PER_TOOL)
+        self.assertIn("id", state["exec"][0])
 
 
 class _Capture(http.server.BaseHTTPRequestHandler):
@@ -341,6 +369,95 @@ class EndToEndHookTests(unittest.TestCase):
         self.assertFalse(
             os.path.exists(os.path.join(batch_dir, f"{self.session_id}.tools.json"))
         )
+
+    def test_failed_tool_response_is_filed_as_post_tool_use_failure(self):
+        self._fire("SessionStart", {"source": "startup"})
+        self._fire("UserPromptSubmit", {"prompt_id": "p3", "prompt": "run it"})
+        self._fire(
+            "PreToolUse",
+            {"prompt_id": "p3", "tool_name": "exec", "tool_input": {"command": "foo"}},
+        )
+        self._fire(
+            "PostToolUse",
+            {
+                "prompt_id": "p3",
+                "tool_name": "exec",
+                "tool_input": {"command": "foo"},
+                "tool_response": {
+                    "success": False,
+                    "output": "",
+                    "error": "command not found: foo",
+                },
+            },
+        )
+        self._fire("Stop", {"prompt_id": "p3", "last_assistant_message": "It failed."})
+
+        names = [hook["hook_event_name"] for hook in _Capture.bodies[0]["hooks"]]
+        self.assertIn("PostToolUseFailure", names)
+        self.assertNotIn("PostToolUse", names)
+        failure = next(
+            hook
+            for hook in _Capture.bodies[0]["hooks"]
+            if hook["hook_event_name"] == "PostToolUseFailure"
+        )
+        # The raw payload keeps Devin's own event name; only the envelope is renamed.
+        self.assertEqual(failure["payload"]["hook_event_name"], "PostToolUse")
+        pre = next(
+            hook
+            for hook in _Capture.bodies[0]["hooks"]
+            if hook["hook_event_name"] == "PreToolUse"
+        )
+        self.assertEqual(
+            pre["payload"]["tool_call_id"], failure["payload"]["tool_call_id"]
+        )
+
+    def test_write_start_hook_records_whether_the_file_existed(self):
+        existing = os.path.join(self.project_dir, "existing.py")
+        Path(existing).write_text("x = 1\n")
+        self._fire("SessionStart", {"source": "startup"})
+        self._fire("UserPromptSubmit", {"prompt_id": "p4", "prompt": "write"})
+        self._fire(
+            "PreToolUse",
+            {
+                "prompt_id": "p4",
+                "tool_name": "write",
+                "tool_input": {"file_path": existing, "content": "x = 2\n"},
+            },
+        )
+        self._fire(
+            "PreToolUse",
+            {
+                "prompt_id": "p4",
+                "tool_name": "write",
+                "tool_input": {
+                    "file_path": os.path.join(self.project_dir, "new.py"),
+                    "content": "y = 1\n",
+                },
+            },
+        )
+        self._fire("Stop", {"prompt_id": "p4", "last_assistant_message": "done"})
+
+        pres = [
+            hook["payload"]["tool_input"]
+            for hook in _Capture.bodies[0]["hooks"]
+            if hook["hook_event_name"] == "PreToolUse"
+        ]
+        self.assertEqual(pres[0]["bloomfilter_file_existed"], True)
+        self.assertEqual(pres[1]["bloomfilter_file_existed"], False)
+        self.assertFalse(os.path.exists(os.path.join(self.project_dir, "new.py")))
+
+    def test_payload_from_another_runtime_is_refused(self):
+        # Claude Code and Codex put transcript_path in every payload; Devin never
+        # does. Such a payload must not be filed as a Devin session.
+        self._fire("SessionStart", {"source": "startup"})
+        self._fire(
+            "UserPromptSubmit",
+            {"prompt_id": "p5", "prompt": "hi", "transcript_path": "/tmp/x.jsonl"},
+        )
+        self._fire("Stop", {"prompt_id": "p5", "last_assistant_message": "yo"})
+
+        names = [hook["hook_event_name"] for hook in _Capture.bodies[0]["hooks"]]
+        self.assertEqual(names, ["SessionStart", "Stop"])
 
     def test_user_prompt_submit_carries_backfill_summary(self):
         self._fire("SessionStart", {"source": "startup"})

@@ -38,7 +38,12 @@ from devin_tool_pairing import (
     resolve_tool_call_id,
     sweep_stale_tool_state,
 )
-from devin_transcript import session_metadata, summarize_session_turn
+from devin_transcript import (
+    BACKFILL_MAX_BYTES,
+    TRANSCRIPT_MAX_BYTES,
+    session_metadata,
+    summarize_session_turn,
+)
 
 # The `source` value the API files these sessions under. Must match a
 # configs/<source>.json on the server.
@@ -79,6 +84,24 @@ TRANSCRIPT_HOOKS = {"Stop", "UserPromptSubmit"}
 TOOL_START_HOOK = "PreToolUse"
 TOOL_END_HOOK = "PostToolUse"
 
+# Envelope name given to a PostToolUse whose tool_response reports failure. The
+# API's pairing config resolves status from the END hook's name, not from a
+# payload value, so a failed call has to arrive under a distinct name to be
+# stored as TOOL_ERROR — the same split Claude Code makes natively.
+TOOL_FAILURE_HOOK = "PostToolUseFailure"
+
+# Tools whose start hook is annotated with whether the target file already
+# exists. Devin's `write` replaces a whole file and its response is free text,
+# so this is the only point at which create can be told from overwrite.
+FILE_EXISTENCE_TOOLS = {"write"}
+
+# Payload keys Devin never sends. Claude Code and Codex put these in every
+# payload, so their presence means another runtime's hook reached this
+# collector (Devin loads Claude-format hook files, and the reverse can happen
+# via a shared marketplace). Filing such a session as Devin would misattribute
+# another tool's work, so the payload is refused.
+NON_DEVIN_PAYLOAD_KEYS = ("transcript_path",)
+
 
 def _resolve_project_dir(payload: dict) -> str:
     """Find the project root for this hook invocation.
@@ -110,6 +133,25 @@ def _resolve_project_dir(payload: dict) -> str:
         return ""
 
 
+def _annotate_file_existence(tool_input: dict) -> None:
+    """Record whether a whole-file write targets an existing file.
+
+    Stored inside ``tool_input`` under a namespaced key so the API's file-edit
+    extractor, which sees only ``tool_input``/``tool_output``, can classify the
+    edit as CREATE or MODIFY. A stat only — nothing is read or written.
+
+    Args:
+        tool_input: The payload's ``tool_input`` dict, mutated in place.
+    """
+    file_path = tool_input.get("file_path")
+    if not isinstance(file_path, str) or not file_path:
+        return
+    try:
+        tool_input["bloomfilter_file_existed"] = os.path.exists(file_path)
+    except (OSError, ValueError):
+        return
+
+
 def main() -> None:
     """Handle one hook invocation: batch the payload, and upload when due.
 
@@ -132,7 +174,10 @@ def main() -> None:
     # session it does not serve — and whichever collector uploads first is the
     # one the whole session gets filed under, so acting on it silently records
     # another tool's work as this one's.
-    if is_foreign_runtime_payload(payload):
+    if is_foreign_runtime_payload(payload) or (
+        isinstance(payload, dict)
+        and any(key in payload for key in NON_DEVIN_PAYLOAD_KEYS)
+    ):
         debug_log(
             f"hook skipped: hook={hook_event_name} "
             "reason=payload-belongs-to-another-runtime"
@@ -216,24 +261,30 @@ def main() -> None:
 
     # Devin's tool hooks carry no per-call id. Mint one on the start hook and
     # hand the same one to the matching end hook so the API can pair them.
+    tool_name = str(payload.get("tool_name", ""))
+    tool_input = payload.get("tool_input")
     if hook_event_name == TOOL_START_HOOK and "tool_call_id" not in payload:
-        payload["tool_call_id"] = claim_tool_call_id(
-            session_id, str(payload.get("tool_name", ""))
-        )
-    elif hook_event_name == TOOL_END_HOOK and "tool_call_id" not in payload:
-        call_id, paired = resolve_tool_call_id(
-            session_id, str(payload.get("tool_name", ""))
-        )
-        payload["tool_call_id"] = call_id
-        if not paired:
-            # Recorded so a start-less end hook is distinguishable from a real
-            # pair when the API or a human reads the row.
-            payload["tool_call_unpaired"] = True
+        payload["tool_call_id"] = claim_tool_call_id(session_id, tool_name, tool_input)
+        if tool_name in FILE_EXISTENCE_TOOLS and isinstance(tool_input, dict):
+            _annotate_file_existence(tool_input)
+    elif hook_event_name == TOOL_END_HOOK:
+        if "tool_call_id" not in payload:
+            payload["tool_call_id"], _paired = resolve_tool_call_id(
+                session_id, tool_name, tool_input
+            )
+        tool_response = payload.get("tool_response")
+        if isinstance(tool_response, dict) and tool_response.get("success") is False:
+            envelope["hook_event_name"] = TOOL_FAILURE_HOOK
 
     # Summarize the transcript's trailing turn: tokens, model, request ids,
     # time to first token and ACU cost, none of which are in the hook payload.
+    # The read is capped to the budget of the hook doing it, and runs before
+    # the append so the summary rides on the envelope the API keys on.
     if hook_event_name in TRANSCRIPT_HOOKS:
-        summary = summarize_session_turn(session_id)
+        max_bytes = (
+            TRANSCRIPT_MAX_BYTES if hook_event_name == "Stop" else BACKFILL_MAX_BYTES
+        )
+        summary = summarize_session_turn(session_id, max_bytes)
         if summary:
             agent_response = summary.pop("agent_response", "")
             if summary.get("api_calls") or hook_event_name == "Stop":

@@ -4,12 +4,13 @@ Claude Code and Copilot stamp every tool hook with a ``tool_use_id`` and the
 Bloomfilter API pairs a tool's start and end hooks on it. Devin CLI's payloads
 carry ``tool_name`` and ``tool_input`` but no per-call id, so the two hooks for
 one execution are indistinguishable from the two hooks for two executions of
-the same tool. This module issues the id itself: ``PreToolUse`` claims a fresh
-one and parks it under the tool name; ``PostToolUse`` takes the oldest parked
-id for that tool. In-order completion of same-named tools is therefore paired
-exactly; when Devin runs two ``exec`` calls concurrently and they finish out
-of order the outputs can swap, which is recorded on the envelope so the API
-can weigh it.
+the same tool. This module issues the id itself: ``PreToolUse`` mints one and
+parks it under the tool name together with a digest of ``tool_input``;
+``PostToolUse`` takes the parked id whose digest matches its own ``tool_input``,
+falling back to the oldest parked id for that tool. Concurrent same-named calls
+with different arguments therefore pair exactly; only identical, concurrent,
+out-of-order calls can still swap, and those carry identical inputs so the
+swapped rows differ only in output.
 
 State is one small JSON file per session in the batch directory, guarded by
 the same advisory lock the batch file uses, because each hook is its own
@@ -19,6 +20,7 @@ process and Devin does run tool calls in parallel.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import time
@@ -72,16 +74,33 @@ def _state_path(session_id: str) -> str:
     return os.path.join(get_batch_dir(), f"{session_id}{TOOL_STATE_SUFFIX}")
 
 
-def _read_state(handle: Any) -> dict[str, list[str]]:
+def _input_digest(tool_input: Any) -> str:
+    """Digest a tool's arguments so start and end hooks can be matched on them.
+
+    Args:
+        tool_input: The payload's ``tool_input``; any JSON value.
+
+    Returns:
+        A short hex digest of the canonical JSON form; empty when the value
+        cannot be serialized, so such a call falls back to name-only pairing.
+    """
+    try:
+        canonical = json.dumps(tool_input, sort_keys=True, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return ""
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def _read_state(handle: Any) -> dict[str, list[dict[str, str]]]:
     """Decode the pending map from an open state file.
 
     Args:
         handle: A read/write text handle positioned anywhere.
 
     Returns:
-        ``{tool_name: [oldest_id, ..., newest_id]}``; empty on any decode
-        problem, since a corrupt state file must cost one turn's pairing, not
-        the hook.
+        ``{tool_name: [{"id": ..., "digest": ...}, ...]}`` oldest first; empty
+        on any decode problem, since a corrupt state file must cost one turn's
+        pairing, not the hook.
     """
     try:
         handle.seek(0)
@@ -90,14 +109,19 @@ def _read_state(handle: Any) -> dict[str, list[str]]:
         return {}
     if not isinstance(decoded, dict):
         return {}
-    return {
-        tool_name: [call_id for call_id in ids if isinstance(call_id, str)]
-        for tool_name, ids in decoded.items()
-        if isinstance(tool_name, str) and isinstance(ids, list)
-    }
+    state: dict[str, list[dict[str, str]]] = {}
+    for tool_name, entries in decoded.items():
+        if not isinstance(tool_name, str) or not isinstance(entries, list):
+            continue
+        state[tool_name] = [
+            {"id": entry["id"], "digest": str(entry.get("digest", ""))}
+            for entry in entries
+            if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+        ]
+    return state
 
 
-def _write_state(handle: Any, state: dict[str, list[str]]) -> None:
+def _write_state(handle: Any, state: dict[str, list[dict[str, str]]]) -> None:
     """Replace the state file's contents.
 
     Args:
@@ -128,12 +152,13 @@ def _locked_state(session_id: str):
             yield handle
 
 
-def claim_tool_call_id(session_id: str, tool_name: str) -> str:
+def claim_tool_call_id(session_id: str, tool_name: str, tool_input: Any = None) -> str:
     """Mint and park an id for a tool that is about to run.
 
     Args:
         session_id: Session the PreToolUse hook belongs to.
         tool_name: The payload's ``tool_name``.
+        tool_input: The payload's ``tool_input``, digested for matching.
 
     Returns:
         The new id. Always returns one — when the state file cannot be used the
@@ -145,7 +170,7 @@ def claim_tool_call_id(session_id: str, tool_name: str) -> str:
         with _locked_state(session_id) as handle:
             state = _read_state(handle)
             pending = state.setdefault(tool_name, [])
-            pending.append(call_id)
+            pending.append({"id": call_id, "digest": _input_digest(tool_input)})
             if len(pending) > MAX_PENDING_PER_TOOL:
                 del pending[: len(pending) - MAX_PENDING_PER_TOOL]
             _write_state(handle, state)
@@ -157,12 +182,19 @@ def claim_tool_call_id(session_id: str, tool_name: str) -> str:
     return call_id
 
 
-def resolve_tool_call_id(session_id: str, tool_name: str) -> tuple[str, bool]:
-    """Take the oldest parked id for a tool that just finished.
+def resolve_tool_call_id(
+    session_id: str, tool_name: str, tool_input: Any = None
+) -> tuple[str, bool]:
+    """Take the parked id for a tool that just finished.
+
+    Prefers the oldest parked entry whose input digest matches; otherwise the
+    oldest entry for the tool name, which is exact whenever same-named calls
+    complete in the order they started.
 
     Args:
         session_id: Session the PostToolUse hook belongs to.
         tool_name: The payload's ``tool_name``.
+        tool_input: The payload's ``tool_input``, digested for matching.
 
     Returns:
         ``(call_id, paired)`` — the id to stamp on the end hook, and whether it
@@ -179,9 +211,18 @@ def resolve_tool_call_id(session_id: str, tool_name: str) -> tuple[str, bool]:
             state = _read_state(handle)
             pending = state.get(tool_name) or []
             if pending:
-                call_id = pending.pop(0)
+                digest = _input_digest(tool_input)
+                index = next(
+                    (
+                        position
+                        for position, entry in enumerate(pending)
+                        if digest and entry.get("digest") == digest
+                    ),
+                    0,
+                )
+                entry = pending.pop(index)
                 _write_state(handle, state)
-                return call_id, True
+                return entry["id"], True
     except Exception as exception:
         debug_log(
             f"tool pairing: resolve failed session_id={session_id} tool={tool_name} "
@@ -194,14 +235,21 @@ def clear_tool_pairing(session_id: str) -> None:
     """Remove a session's pairing file.
 
     Called on ``Stop`` (every tool of the turn has ended, so anything still
-    parked is an abandoned call) and on ``SessionEnd``.
+    parked is an abandoned call) and on ``SessionEnd``. The file is emptied
+    under the lock before it is unlinked, so a PostToolUse hook that still
+    holds the old inode finds nothing to pair rather than a stale queue.
 
     Args:
         session_id: Session whose file is removed. Missing is fine.
     """
     try:
-        with contextlib.suppress(FileNotFoundError):
-            os.unlink(_state_path(session_id))
+        path = _state_path(session_id)
+        if not os.path.exists(path):
+            return
+        with _locked_state(session_id) as handle:
+            _write_state(handle, {})
+            with contextlib.suppress(FileNotFoundError):
+                os.unlink(path)
     except Exception as exception:
         debug_log(
             f"tool pairing: clear failed session_id={session_id} "

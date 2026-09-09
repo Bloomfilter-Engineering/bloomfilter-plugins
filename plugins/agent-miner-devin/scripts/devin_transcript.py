@@ -24,10 +24,15 @@ from typing import Any
 
 # Largest transcript this module will parse. A transcript is one JSON object and
 # has to be read whole, so the bound is on bytes read rather than on a tail
-# window. Devin compacts long sessions, and a run that grows past this is one
-# where the token summary is the least of the concerns; skipping it keeps the
-# Stop hook inside its timeout.
-TRANSCRIPT_MAX_BYTES = 64_000_000
+# window, and it is sized to the hook budget that reads it: json.load runs in
+# the low hundreds of milliseconds per 8 MB on a laptop, so this fits the 30 s
+# Stop hook with room to spare. Callers on a shorter budget pass a smaller cap.
+TRANSCRIPT_MAX_BYTES = 32_000_000
+
+# Cap for the UserPromptSubmit backfill read, which runs inside a 10 s hook and
+# in front of the turn-start envelope — a kill there loses the turn, so the read
+# is kept small enough that it cannot plausibly be the thing that overruns.
+BACKFILL_MAX_BYTES = 8_000_000
 
 # Devin's default per-user data directory. The CLI migrated from
 # ``~/.local/share/cognition`` to ``~/.local/share/devin`` and keeps a symlink at
@@ -94,21 +99,24 @@ def transcript_path_for(session_id: str) -> str:
     return os.path.join(data_dir, "transcripts", f"{session_id}.json")
 
 
-def load_transcript(transcript_path: str) -> dict[str, Any] | None:
+def load_transcript(
+    transcript_path: str, max_bytes: int = TRANSCRIPT_MAX_BYTES
+) -> dict[str, Any] | None:
     """Parse one ATIF transcript file.
 
     Args:
         transcript_path: Absolute path to the ``.json`` transcript.
+        max_bytes: Largest file to parse; bigger ones are skipped.
 
     Returns:
         The decoded root object, or ``None`` when the file is missing, larger
-        than :data:`TRANSCRIPT_MAX_BYTES`, unreadable, not JSON, or not an
-        object carrying a ``steps`` list.
+        than *max_bytes*, unreadable, not JSON, or not an object carrying a
+        ``steps`` list.
     """
     if not transcript_path or not os.path.isfile(transcript_path):
         return None
     try:
-        if os.path.getsize(transcript_path) > TRANSCRIPT_MAX_BYTES:
+        if os.path.getsize(transcript_path) > max_bytes:
             return None
         with open(transcript_path, encoding="utf-8", errors="replace") as handle:
             decoded = json.load(handle)
@@ -305,17 +313,20 @@ def summarize_latest_turn(transcript: dict[str, Any]) -> dict[str, Any] | None:
     return summary
 
 
-def summarize_session_turn(session_id: str) -> dict[str, Any] | None:
+def summarize_session_turn(
+    session_id: str, max_bytes: int = TRANSCRIPT_MAX_BYTES
+) -> dict[str, Any] | None:
     """Locate, load and summarize the trailing turn of one session's transcript.
 
     Args:
         session_id: Devin's ``session_id`` from the hook payload.
+        max_bytes: Largest transcript to parse on this hook's time budget.
 
     Returns:
         The :func:`summarize_latest_turn` result, or ``None`` when the
         transcript is absent or unusable.
     """
-    transcript = load_transcript(transcript_path_for(session_id))
+    transcript = load_transcript(transcript_path_for(session_id), max_bytes)
     if transcript is None:
         return None
     return summarize_latest_turn(transcript)
