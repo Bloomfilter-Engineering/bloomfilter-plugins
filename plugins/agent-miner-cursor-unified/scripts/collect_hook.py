@@ -51,6 +51,15 @@ TOKEN_BEARING_HOOKS = {"stop", "afterAgentResponse"}
 # prompt and response there. afterAgentResponse fires once per completed turn,
 # before stop, so reconstructing here yields exactly one prompt+response pair.
 TRANSCRIPT_RECONSTRUCT_HOOKS = {"afterAgentResponse"}
+# Hooks allowed to proceed when the session id was recovered from the transcript
+# path rather than the payload (the no-stdin mode). Cursor 3.19.x sets
+# CURSOR_TRANSCRIPT_PATH on mid-turn hooks too, not just the turn-end ones 3.18.x
+# set it on, so an empty mid-turn hook now resolves a session id and would batch a
+# contentless envelope that collides with the afterAgentResponse reconstruction
+# and splits one turn into several on the backend. Only the turn owners survive:
+# afterAgentResponse (rebuilds the turn) and the upload triggers (stop /
+# sessionEnd / subagentStop, which also carries the subagent transcript).
+NO_STDIN_ALLOWED_HOOKS = TRANSCRIPT_RECONSTRUCT_HOOKS | UPLOAD_HOOKS
 
 
 def _thought_already_batched(records: list, payload: dict) -> bool:
@@ -281,6 +290,25 @@ def main() -> None:
         )
         return
 
+    # No-stdin mode: the id came from CURSOR_TRANSCRIPT_PATH, not the payload, so
+    # this hook carried no content of its own. Under Cursor 3.19.x that path is
+    # set on mid-turn hooks too, so an empty beforeSubmitPrompt / afterAgentThought
+    # / postToolUse would batch a contentless envelope that fractures the turn the
+    # afterAgentResponse reconstruction rebuilds. Drop everything but the turn
+    # owners; a payload that named its own session (normal mode) is unaffected.
+    payload_named_session = bool(
+        payload.get("conversation_id") or payload.get("session_id")
+    )
+    if (
+        not payload_named_session
+        and hook_event_name not in NO_STDIN_ALLOWED_HOOKS
+    ):
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=no-stdin-empty-hook "
+            f"session_id={session_id}"
+        )
+        return
+
     # Cursor ships postToolUse tool_output as a JSON-encoded string; decode
     # so the API's extractor sees a dict, as it does for the other runtimes.
     if hook_event_name in {"postToolUse", "postToolUseFailure"}:
@@ -467,6 +495,13 @@ def main() -> None:
                 "payload": tool_payload,
             },
         )
+
+    # The afterAgentResponse envelope was stamped (above) before the reconstructed
+    # prompt and tool envelopes it must follow, so re-stamp it now that they are
+    # appended. This keeps received_at increasing in emission order — prompt ->
+    # tool calls -> response — for a backend that orders a turn by timestamp.
+    if reconstructed_prompt:
+        envelope["received_at"] = utcnow_iso()
 
     if hook_event_name == "afterAgentThought":
         appended = append_to_batch_deduplicated(

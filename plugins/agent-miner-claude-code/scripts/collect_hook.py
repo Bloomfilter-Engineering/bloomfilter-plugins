@@ -88,10 +88,16 @@ def main() -> None:
         return
 
     # Cursor runs Claude Code as its agent backend and fires these hooks with no
-    # session id; the Cursor plugin already captures that turn. Skip silently so
-    # this does not double-capture or fill the debug log. Terminal Claude Code
-    # (no Cursor-agent env) is unaffected.
+    # session id; the Cursor plugin already captures that turn. Skip so this does
+    # not double-capture. Terminal Claude Code (no Cursor-agent env) is
+    # unaffected. Logged rather than returned silently: this guard rests on the
+    # assumption that Cursor's integrated terminal does NOT inherit these vars,
+    # so a mistaken skip that kills legitimate terminal capture stays visible.
     if _running_as_cursor_agent():
+        debug_log(
+            f"hook skipped: hook={hook_event_name} reason=cursor-agent-host "
+            "(CURSOR_* env present; Cursor plugin captures this turn)"
+        )
         return
 
     payload = read_payload()
