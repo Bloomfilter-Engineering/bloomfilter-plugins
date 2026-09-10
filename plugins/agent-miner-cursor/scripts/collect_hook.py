@@ -299,10 +299,7 @@ def main() -> None:
     payload_named_session = bool(
         payload.get("conversation_id") or payload.get("session_id")
     )
-    if (
-        not payload_named_session
-        and hook_event_name not in NO_STDIN_ALLOWED_HOOKS
-    ):
+    if not payload_named_session and hook_event_name not in NO_STDIN_ALLOWED_HOOKS:
         debug_log(
             f"hook skipped: hook={hook_event_name} reason=no-stdin-empty-hook "
             f"session_id={session_id}"
@@ -333,7 +330,11 @@ def main() -> None:
     # transcript path (Cursor sets it only at turn end) and was skipped.
     reconstructed_prompt = ""
     reconstructed_tool_calls: list = []
-    if hook_event_name in TRANSCRIPT_RECONSTRUCT_HOOKS and not payload.get("text"):
+    if (
+        hook_event_name in TRANSCRIPT_RECONSTRUCT_HOOKS
+        and not payload.get("text")
+        and not payload_named_session
+    ):
         transcript_path = payload.get("transcript_path") or os.environ.get(
             "CURSOR_TRANSCRIPT_PATH", ""
         )
@@ -500,7 +501,7 @@ def main() -> None:
     # prompt and tool envelopes it must follow, so re-stamp it now that they are
     # appended. This keeps received_at increasing in emission order — prompt ->
     # tool calls -> response — for a backend that orders a turn by timestamp.
-    if reconstructed_prompt:
+    if reconstructed_prompt or reconstructed_tool_calls:
         envelope["received_at"] = utcnow_iso()
 
     if hook_event_name == "afterAgentThought":
