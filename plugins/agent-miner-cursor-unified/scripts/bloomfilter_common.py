@@ -2212,7 +2212,7 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
         reason = getattr(exception, "reason", "")
         debug_log(
             f"upload_batch: HTTPError status={exception.code} reason={reason!r} "
-            f"session_id={session_id} body_chars={len(body)}"
+            f"session_id={session_id} body={body[:500]!r}"
         )
         # A 413 is expected control flow now, not an error to report: the
         # caller answers it by sending a smaller prefix. Printing it would put
