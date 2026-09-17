@@ -222,26 +222,43 @@ def final_turn_is_closed(path: str) -> bool:
     a finished turn and costs a caller its whole poll budget on every hook. What
     actually distinguishes a finished turn is that nothing follows its marker.
 
-    Known limit: a turn whose first line is not on disk yet is invisible here —
-    the previous turn's marker is last, so the file reads as closed and that
-    previous turn reads as the current one. Closing this needs a per-turn key,
-    which Cursor does not expose in the no-stdin mode this serves.
+    The final line is read raw rather than through :func:`_read_lines`, which
+    drops anything that does not parse. That is right for extracting content and
+    wrong here: a half-written line is the very evidence this looks for, and
+    skipping it hands back the marker behind it, reporting a file that is
+    actively being appended to as closed. Measured — a ``turn_ended`` followed
+    by a torn line read as closed and rebuilt the previous turn.
+
+    Known limit: a turn whose first line has not reached disk at all is still
+    invisible — the previous turn's marker is genuinely last, so the file is
+    closed by every test available here and that previous turn reads as the
+    current one. Closing this needs a per-turn key, which Cursor does not expose
+    in the no-stdin mode this serves.
 
     Args:
         path: Transcript JSONL to inspect.
 
     Returns:
-        True when the last entry on disk is a ``turn_ended`` marker. False when
-        the file cannot be read, is empty, or ends mid-turn — so a caller
-        polling on this waits rather than reading a half-written turn.
+        True when the last non-empty line is a complete ``turn_ended`` object.
+        False when the file cannot be read, is empty, ends mid-turn, or ends on
+        a line that does not parse — so a caller polling on this waits rather
+        than reading a half-written turn.
     """
-    last = None
+    last_raw_line = ""
     try:
-        for entry in _read_lines(path):
-            last = entry
+        with open(path, encoding="utf-8", errors="replace") as transcript_file:
+            for raw_line in transcript_file:
+                if raw_line.strip():
+                    last_raw_line = raw_line
     except OSError:
         return False
-    return bool(last) and last.get("type") == "turn_ended"
+    if not last_raw_line:
+        return False
+    try:
+        last = json.loads(last_raw_line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(last, dict) and last.get("type") == "turn_ended"
 
 
 def parse_transcript(path: str) -> dict[str, Any]:
