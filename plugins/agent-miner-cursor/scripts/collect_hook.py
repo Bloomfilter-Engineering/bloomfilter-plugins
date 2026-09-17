@@ -220,10 +220,11 @@ def _speed_from_model_params(payload: dict) -> str:
     null on others, so absence has to leave the id heuristic in charge rather than
     assert a default.
 
-    The field is undocumented, so its shape is not a contract: anything that is not
-    the expected list-of-objects is treated as saying nothing. Guessing wrong here
-    changes real cost, because Cursor publishes separate rates for its fast
-    variants.
+    ``model_params`` itself is documented, but ``fast`` is not among the ids the
+    vendor names and no stability guarantee is published for these payloads, so
+    its shape is not a contract: anything that is not the expected
+    list-of-objects is treated as saying nothing. Guessing wrong here changes
+    real cost, because Cursor publishes separate rates for its fast variants.
 
     Args:
         payload: The hook payload as the runtime sent it.
@@ -246,6 +247,57 @@ def _speed_from_model_params(payload: dict) -> str:
                 return "fast"
             if lowered in ("false", "0", "no"):
                 return "standard"
+        return ""
+    return ""
+
+
+# Ids Cursor uses for the reasoning-effort level in ``model_params``. The vendor
+# documents the field as "Selected model parameters, such as thinking, context,
+# or effort" and shows ``effort`` in its payload examples, so that spelling is
+# from the contract. ``reasoning`` appears in no published schema — it is what
+# the Kimi tiers were observed sending live — so it is accepted as a second
+# spelling rather than assumed to be general.
+# Source: https://cursor.com/docs/hooks (input schema shared by every hook).
+EFFORT_PARAM_IDS = ("effort", "reasoning")
+
+
+def _effort_from_model_params(payload: dict) -> str:
+    """Return the reasoning-effort level Cursor states on the payload, or "".
+
+    ``model_params`` is part of the documented input schema every hook shares:
+    a list of ``{"id", "value"}`` items carrying the selected model parameters,
+    ``effort`` among the ids the vendor names. It is read rather than inferred
+    for that reason. See :data:`EFFORT_PARAM_IDS` for the second spelling,
+    which is observed rather than documented.
+
+    The trailing ``-high``/``-max`` on the model id restates the same choice,
+    but only as an inference, and the API resolves that suffix to a price tier
+    rather than to a level — so this is the only source ``AgentTurn.effort``
+    has.
+
+    The documented shape is honoured but not trusted: the vendor publishes no
+    stability guarantee for these payloads, so anything that is not the
+    expected list-of-objects is treated as saying nothing rather than guessed
+    at. Measured live, the field is absent on some turns, and absence has to
+    read as "no statement" rather than a default — asserting one would label
+    every such turn with an effort it never ran at.
+
+    Args:
+        payload: The hook payload as the runtime sent it.
+
+    Returns:
+        The stated level, lowercased (for example "high" or "max"), or "" when
+        the payload states nothing usable.
+    """
+    params = payload.get("model_params")
+    if not isinstance(params, list):
+        return ""
+    for entry in params:
+        if not isinstance(entry, dict) or entry.get("id") not in EFFORT_PARAM_IDS:
+            continue
+        value = entry.get("value")
+        if isinstance(value, str) and value.strip():
+            return value.strip().lower()
         return ""
     return ""
 
@@ -438,6 +490,9 @@ def main() -> None:
         stated_speed = _speed_from_model_params(payload)
         if stated_speed:
             api_call["speed"] = stated_speed
+        stated_effort = _effort_from_model_params(payload)
+        if stated_effort:
+            api_call["effort"] = stated_effort
         envelope["transcript_summary"] = {"api_calls": [api_call]}
 
     # On subagentStop, parse the subagent's own transcript into a normalized
