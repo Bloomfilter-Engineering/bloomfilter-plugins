@@ -390,18 +390,31 @@ def main() -> None:
         transcript_path = payload.get("transcript_path") or os.environ.get(
             "CURSOR_TRANSCRIPT_PATH", ""
         )
-        if transcript_path:
-            turn = latest_turn(transcript_path)
-            if turn:
-                # Backfill the common fields Cursor no longer sends on stdin so
-                # this afterAgentResponse envelope is well-formed (it otherwise
-                # carried only text — not even conversation_id), then the text.
-                for key, value in _cursor_env_common_fields(session_id).items():
-                    payload.setdefault(key, value)
-                if turn["agent_response"]:
-                    payload["text"] = turn["agent_response"]
-                reconstructed_prompt = turn["user_prompt"]
-                reconstructed_tool_calls = turn["tool_calls"]
+        turn = latest_turn(transcript_path) if transcript_path else None
+        if not turn:
+            # Nothing to rebuild from: the transcript is absent, unreadable, or
+            # has not been flushed yet — all reachable on the remote/RDP hosts
+            # this path exists for. Appending regardless batches an
+            # afterAgentResponse carrying no text and, because the backfill
+            # below never runs, no conversation_id either. That envelope is
+            # PROTECTED and a turn terminal, so it survives eviction, is
+            # uploaded on the next stop/sessionEnd, and lands as a phantom
+            # terminal turn. Drop it: this hook owns no content of its own.
+            debug_log(
+                f"hook skipped: hook={hook_event_name} "
+                f"reason=no-stdin-reconstruction-failed session_id={session_id} "
+                f"transcript_path={transcript_path!r}"
+            )
+            return
+        # Backfill the common fields Cursor no longer sends on stdin so
+        # this afterAgentResponse envelope is well-formed (it otherwise
+        # carried only text — not even conversation_id), then the text.
+        for key, value in _cursor_env_common_fields(session_id).items():
+            payload.setdefault(key, value)
+        if turn["agent_response"]:
+            payload["text"] = turn["agent_response"]
+        reconstructed_prompt = turn["user_prompt"]
+        reconstructed_tool_calls = turn["tool_calls"]
 
     if hook_event_name == "sessionStart":
         bootstrap_config(plugin_root)
