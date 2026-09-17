@@ -1,14 +1,21 @@
 #!/bin/sh
 # POSIX launcher for the Bloomfilter hook collector.
 #
-# This is the macOS/Linux half of the unified plugin, and also the path taken on
-# Windows when the runtime runs hooks through Git Bash (where $OS=Windows_NT). It
-# keeps hooks.json readable: each hook's command is a tiny bash/PowerShell
-# polyglot that just delegates here (bash side) or to run-hook.ps1 (PowerShell
-# side, i.e. Windows without Git Bash).
+# This is the macOS/Linux half of the unified plugin. Each hook's command names
+# both launchers -- run-hook.ps1 first, then this script -- and each one declines
+# on the platform it does not serve: powershell.exe does not resolve on
+# macOS/Linux, and the guard below exits on Windows.
 #
 # `exec` is used so the hook payload on stdin passes straight through to the
 # child (python or powershell) with no extra buffering.
+# Windows: the hook command runs run-hook.ps1 FIRST and that call receives the
+# payload, because the runtime pipes it as `$input | <command>` and PowerShell
+# binds that pipeline to the first command only. The `sh` clause in the same
+# command still executes when Git Bash is on PATH, but with empty stdin — so bail
+# out here rather than deliver a second, contentless copy of every event. The
+# $OS=Windows_NT delegation below is therefore unreachable on Windows now; it is
+# kept for direct invocation of this script outside the hook command.
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) exit 0 ;; esac
 event="$1"
 
 # Resolve the plugin root the runtime injects; fall back to the parent of hooks/.
