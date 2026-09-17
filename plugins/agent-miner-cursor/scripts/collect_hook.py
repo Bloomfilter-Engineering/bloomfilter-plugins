@@ -7,7 +7,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from cursor_transcript import latest_turn
+from cursor_transcript import final_turn_is_closed, latest_turn
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
@@ -60,6 +60,14 @@ TRANSCRIPT_RECONSTRUCT_HOOKS = {"afterAgentResponse"}
 # afterAgentResponse (rebuilds the turn) and the upload triggers (stop /
 # sessionEnd / subagentStop, which also carries the subagent transcript).
 NO_STDIN_ALLOWED_HOOKS = TRANSCRIPT_RECONSTRUCT_HOOKS | UPLOAD_HOOKS
+# How long the no-stdin reconstruction waits for Cursor to finish writing the
+# turn it is about to read. Matches what extract_subagent_conversation already
+# spends on the same marker for the same race. The ceiling matters: this runs
+# inside the afterAgentResponse hook, whose manifest budget is 10 s, so the wait
+# has to stay a small fraction of it or a slow flush turns a recoverable turn
+# into a killed hook.
+TRANSCRIPT_FLUSH_MAX_WAIT_S = 2.0
+TRANSCRIPT_FLUSH_POLL_S = 0.1
 
 
 def _thought_already_batched(records: list, payload: dict) -> bool:
@@ -261,6 +269,43 @@ def _speed_from_model_params(payload: dict) -> str:
 EFFORT_PARAM_IDS = ("effort", "reasoning")
 
 
+def _await_transcript_flush(path: str, hook_event_name: str) -> None:
+    """Wait, briefly, for Cursor to finish writing the turn about to be read.
+
+    Cursor appends a ``turn_ended`` line once the turn's final response is on
+    disk. Reading ahead of it does not return a partial turn — it returns the
+    PREVIOUS one, because the current turn has no lines yet. The reconstruction
+    would then re-emit a turn already captured and never emit this one, and
+    ``afterAgentResponse`` is not deduplicated on append, so the copy lands.
+
+    ``extract_subagent_conversation`` already polls this marker for this same
+    race; the no-stdin path read straight through it. It polls
+    :func:`final_turn_is_closed`, not ``is_complete`` — the latter is satisfied
+    by turn 1's marker and would make this a no-op from turn 2 onward. Bounded, and returns
+    either way: a transcript that never gains the marker must still be read, or
+    a runtime that stopped writing it would cost every turn instead of risking
+    some. Proceeding without it is logged so the stale-turn window stays visible.
+
+    Args:
+        path: Transcript JSONL the reconstruction is about to read.
+        hook_event_name: Hook being processed, for the log line.
+
+    Returns:
+        None. The caller reads the transcript regardless.
+    """
+    deadline = time.monotonic() + TRANSCRIPT_FLUSH_MAX_WAIT_S
+    flushed = final_turn_is_closed(path)
+    while not flushed and time.monotonic() < deadline:
+        time.sleep(TRANSCRIPT_FLUSH_POLL_S)
+        flushed = final_turn_is_closed(path)
+    if not flushed:
+        debug_log(
+            f"transcript not flushed: hook={hook_event_name} "
+            f"reason=no-turn-ended-marker waited={TRANSCRIPT_FLUSH_MAX_WAIT_S}s "
+            f"transcript_path={path!r}"
+        )
+
+
 def _effort_from_model_params(payload: dict) -> str:
     """Return the reasoning-effort level Cursor states on the payload, or "".
 
@@ -390,6 +435,8 @@ def main() -> None:
         transcript_path = payload.get("transcript_path") or os.environ.get(
             "CURSOR_TRANSCRIPT_PATH", ""
         )
+        if transcript_path:
+            _await_transcript_flush(transcript_path, hook_event_name)
         turn = latest_turn(transcript_path) if transcript_path else None
         if not turn:
             # Nothing to rebuild from: the transcript is absent, unreadable, or

@@ -207,6 +207,43 @@ def _finalize(turn: dict[str, Any]) -> dict[str, Any]:
     return turn
 
 
+def final_turn_is_closed(path: str) -> bool:
+    """Whether the transcript's LAST turn has been fully written.
+
+    :func:`is_complete` answers a different question — whether *any*
+    ``turn_ended`` line is present. That is right for a subagent transcript,
+    which holds one turn per file, and wrong for a session transcript: turn 1's
+    marker would report every later turn as flushed, making a poll on it a no-op
+    from turn 2 onward.
+
+    The test is positional, not a count. Counting ``turn_ended`` against ``user``
+    lines was measured wrong on real transcripts — a single turn can carry
+    several ``user`` entries and still close with one marker — which under-reports
+    a finished turn and costs a caller its whole poll budget on every hook. What
+    actually distinguishes a finished turn is that nothing follows its marker.
+
+    Known limit: a turn whose first line is not on disk yet is invisible here —
+    the previous turn's marker is last, so the file reads as closed and that
+    previous turn reads as the current one. Closing this needs a per-turn key,
+    which Cursor does not expose in the no-stdin mode this serves.
+
+    Args:
+        path: Transcript JSONL to inspect.
+
+    Returns:
+        True when the last entry on disk is a ``turn_ended`` marker. False when
+        the file cannot be read, is empty, or ends mid-turn — so a caller
+        polling on this waits rather than reading a half-written turn.
+    """
+    last = None
+    try:
+        for entry in _read_lines(path):
+            last = entry
+    except OSError:
+        return False
+    return bool(last) and last.get("type") == "turn_ended"
+
+
 def parse_transcript(path: str) -> dict[str, Any]:
     """Parse a Cursor subagent transcript into ``{"turns": [...]}``.
 

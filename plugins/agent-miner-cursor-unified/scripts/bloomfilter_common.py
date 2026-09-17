@@ -26,7 +26,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.3.5"
+PLUGIN_VERSION = "0.3.6"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
