@@ -3,105 +3,105 @@
   "hooks": {
     "sessionStart": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" sessionStart; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionStart",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionStart; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" sessionStart; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "sessionEnd": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" sessionEnd; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionEnd",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" sessionEnd; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" sessionEnd; exit",
         "type": "command",
         "timeout": 30
       }
     ],
     "stop": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" stop; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" stop",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" stop; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" stop; exit",
         "type": "command",
         "timeout": 30
       }
     ],
     "beforeSubmitPrompt": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" beforeSubmitPrompt; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeSubmitPrompt",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeSubmitPrompt; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" beforeSubmitPrompt; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUse": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" postToolUse; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUse",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUse; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" postToolUse; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "postToolUseFailure": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" postToolUseFailure; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUseFailure",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" postToolUseFailure; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" postToolUseFailure; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStart": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" subagentStart; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStart",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStart; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" subagentStart; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "subagentStop": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" subagentStop; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStop",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" subagentStop; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" subagentStop; exit",
         "type": "command",
         "timeout": 30
       }
     ],
     "afterShellExecution": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterShellExecution; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterShellExecution",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterShellExecution; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterShellExecution; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterMCPExecution": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterMCPExecution; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterMCPExecution",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterMCPExecution; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterMCPExecution; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "beforeReadFile": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" beforeReadFile; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeReadFile",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" beforeReadFile; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" beforeReadFile; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterFileEdit": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterFileEdit; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterFileEdit",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterFileEdit; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterFileEdit; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "preCompact": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" preCompact; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" preCompact",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" preCompact; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" preCompact; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentResponse": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterAgentResponse; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentResponse",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentResponse; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterAgentResponse; exit",
         "type": "command",
         "timeout": 10
       }
     ],
     "afterAgentThought": [
       {
-        "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterAgentThought; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentThought",
+        "command": "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CURSOR_PLUGIN_ROOT\\hooks\\run-hook.ps1\" afterAgentThought; sh \"${CURSOR_PLUGIN_ROOT}/hooks/run-hook.sh\" afterAgentThought; exit",
         "type": "command",
         "timeout": 10
       }

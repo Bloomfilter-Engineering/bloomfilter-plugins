@@ -175,3 +175,37 @@ a symlinked plugin dir in practice.
 All plugins read one config: macOS `~/.config/bloomfilter/config.json`,
 Windows `%APPDATA%\bloomfilter\config.json` (or the `BLOOMFILTER_API_KEY` env var). Local batch
 output lands in the sibling `batches/` dir.
+
+### Pointing at staging (internal only)
+
+The config has no `url` by default, so the plugins upload to production
+(`DEFAULT_API_URL` in `scripts/bloomfilter_common.py`). Customers leave it unset; only internal
+testing needs to change it.
+
+The staging **API** is `https://staging-api.bloomfilter.app` — NOT `staging.bloomfilter.app`,
+which is the web app you open in a browser. Posting to the web app host gets you a bare
+Cloudflare `403 / error code: 1010` (it rejects the plugin's default `Python-urllib` user agent),
+which looks nothing like "wrong hostname".
+
+macOS/Linux — add the `url` key alongside `api_key`:
+```bash
+python3 - <<'PY'
+import json, pathlib
+p = pathlib.Path.home() / ".config/bloomfilter/config.json"
+d = json.loads(p.read_text(encoding="utf-8-sig"))
+d["url"] = "https://staging-api.bloomfilter.app"
+p.write_text(json.dumps(d, indent=2) + "\n", encoding="utf-8")
+PY
+```
+
+Windows (PowerShell):
+```powershell
+$p = "$env:APPDATA\bloomfilter\config.json"
+$c = Get-Content $p -Raw | ConvertFrom-Json
+$c | Add-Member -NotePropertyName url -NotePropertyValue "https://staging-api.bloomfilter.app" -Force
+$c | ConvertTo-Json | Set-Content $p -Encoding utf8
+```
+
+A staging key against production answers `401 Unauthorized`; production is the default, so that is
+what a missing `url` looks like. Config is re-read on every hook fire, so no restart is needed —
+confirm with `upload_batch: response status=201` in `debug.log` (sibling of `config.json`).

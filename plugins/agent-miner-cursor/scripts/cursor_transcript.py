@@ -7,6 +7,8 @@ from typing import Any
 # The opening user message wraps the real prompt in these tags, e.g.
 # "<timestamp>...</timestamp>\n<user_query>\ndo the thing\n</user_query>".
 _USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+# A user line whose entire content is the timestamp wrapper carries no prompt.
+_TIMESTAMP_ONLY_RE = re.compile(r"\s*<timestamp>.*?</timestamp>\s*", re.DOTALL)
 # Cursor redacts subagent reasoning/thinking with this literal — it can be a
 # whole text block or trailing junk appended to a real response
 # ("Done.\n\n[REDACTED]"), so we strip the token out rather than match blocks.
@@ -74,11 +76,17 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
     Joins the line's text blocks, then unwraps ``<user_query>...</user_query>``
     if present (the opening prompt carries a ``<timestamp>`` prefix we drop).
 
+    A line whose only content is that ``<timestamp>`` wrapper is not a prompt —
+    Cursor emits them, and one was observed in a real transcript. Returning the
+    markup verbatim would publish a prompt the user never typed, so those read
+    as empty and the caller's emptiness checks take over.
+
     Args:
         entry: One decoded user transcript line.
 
     Returns:
-        The prompt text, unwrapped from ``<user_query>`` when present.
+        The prompt text, unwrapped from ``<user_query>`` when present, or "" when
+        the line carries no prompt of its own.
     """
     # The text must be a string as well as present: the join below raises
     # TypeError on anything else, and a block is only required to be a dict.
@@ -89,7 +97,11 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
     ]
     joined = "\n".join(text for text in texts if text).strip()
     match = _USER_QUERY_RE.search(joined)
-    return (match.group(1).strip() if match else joined) or ""
+    if match:
+        return match.group(1).strip() or ""
+    if _TIMESTAMP_ONLY_RE.fullmatch(joined):
+        return ""
+    return joined or ""
 
 
 def first_user_query(path: str) -> str:
@@ -127,6 +139,47 @@ def is_complete(path: str) -> bool:
         return any(entry.get("type") == "turn_ended" for entry in _read_lines(path))
     except OSError:
         return False
+
+
+def latest_turn(path: str) -> dict[str, Any] | None:
+    """Return the transcript's most recent turn (prompt, response, tool calls).
+
+    Used by the no-stdin capture path (Cursor 3.18.x over remote/RDP delivers an
+    empty stdin payload and only exposes the turn through
+    ``CURSOR_TRANSCRIPT_PATH``). Reuses ``parse_transcript`` and returns the last
+    turn so the collector can reconstruct the ``beforeSubmitPrompt.prompt``,
+    ``afterAgentResponse.text``, and ``postToolUse`` fields the backend expects.
+
+    ``turn_index`` is the last turn's position in the transcript. It is the only
+    stable per-turn identity this mode has: the payload that would normally carry
+    ``generation_id`` is empty, so the caller derives that key from this index
+    and re-reading the same turn then produces the same key. Without it a
+    re-emitted turn becomes a second turn on the collector rather than an
+    idempotent update.
+
+    Args:
+        path: Transcript JSONL to read.
+
+    Returns:
+        ``{"user_prompt": str, "agent_response": str, "tool_calls": [...],
+        "turn_index": int}`` for the last turn, or ``None`` when the transcript
+        is unreadable or has no turns. The transcript carries no tokens, model,
+        or tool output, so those stay unrecoverable in this mode (``tool_output``
+        is always ``None``).
+    """
+    try:
+        turns = parse_transcript(path).get("turns") or []
+    except OSError:
+        return None
+    if not turns:
+        return None
+    last = turns[-1]
+    return {
+        "user_prompt": last.get("user_prompt") or "",
+        "agent_response": last.get("agent_response") or "",
+        "tool_calls": last.get("tool_calls") or [],
+        "turn_index": len(turns) - 1,
+    }
 
 
 def _empty_turn(user_prompt: str | None) -> dict[str, Any]:
@@ -173,6 +226,60 @@ def _finalize(turn: dict[str, Any]) -> dict[str, Any]:
     if not turn.get("agent_response") and final_summary:
         turn["agent_response"] = final_summary
     return turn
+
+
+def final_turn_is_closed(path: str) -> bool:
+    """Whether the transcript's LAST turn has been fully written.
+
+    :func:`is_complete` answers a different question — whether *any*
+    ``turn_ended`` line is present. That is right for a subagent transcript,
+    which holds one turn per file, and wrong for a session transcript: turn 1's
+    marker would report every later turn as flushed, making a poll on it a no-op
+    from turn 2 onward.
+
+    The test is positional, not a count. Counting ``turn_ended`` against ``user``
+    lines was measured wrong on real transcripts — a single turn can carry
+    several ``user`` entries and still close with one marker — which under-reports
+    a finished turn and costs a caller its whole poll budget on every hook. What
+    actually distinguishes a finished turn is that nothing follows its marker.
+
+    The final line is read raw rather than through :func:`_read_lines`, which
+    drops anything that does not parse. That is right for extracting content and
+    wrong here: a half-written line is the very evidence this looks for, and
+    skipping it hands back the marker behind it, reporting a file that is
+    actively being appended to as closed. Measured — a ``turn_ended`` followed
+    by a torn line read as closed and rebuilt the previous turn.
+
+    Known limit: a turn whose first line has not reached disk at all is still
+    invisible — the previous turn's marker is genuinely last, so the file is
+    closed by every test available here and that previous turn reads as the
+    current one. Closing this needs a per-turn key, which Cursor does not expose
+    in the no-stdin mode this serves.
+
+    Args:
+        path: Transcript JSONL to inspect.
+
+    Returns:
+        True when the last non-empty line is a complete ``turn_ended`` object.
+        False when the file cannot be read, is empty, ends mid-turn, or ends on
+        a line that does not parse — so a caller polling on this waits rather
+        than reading a half-written turn.
+    """
+    last_raw_line = ""
+    try:
+        with open(path, encoding="utf-8", errors="replace") as transcript_file:
+            for raw_line in transcript_file:
+                if raw_line.strip():
+                    last_raw_line = raw_line
+    except OSError:
+        return False
+    if not last_raw_line:
+        return False
+    try:
+        last = json.loads(last_raw_line)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return isinstance(last, dict) and last.get("type") == "turn_ended"
 
 
 def parse_transcript(path: str) -> dict[str, Any]:

@@ -26,7 +26,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.1"
+PLUGIN_VERSION = "0.2.3"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
@@ -2212,7 +2212,7 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
         reason = getattr(exception, "reason", "")
         debug_log(
             f"upload_batch: HTTPError status={exception.code} reason={reason!r} "
-            f"session_id={session_id} body_chars={len(body)}"
+            f"session_id={session_id} body={body[:500]!r}"
         )
         # A 413 is expected control flow now, not an error to report: the
         # caller answers it by sending a smaller prefix. Printing it would put
