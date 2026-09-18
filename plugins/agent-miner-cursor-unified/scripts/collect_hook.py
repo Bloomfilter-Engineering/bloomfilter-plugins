@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -61,12 +62,22 @@ TRANSCRIPT_RECONSTRUCT_HOOKS = {"afterAgentResponse"}
 # sessionEnd / subagentStop, which also carries the subagent transcript).
 NO_STDIN_ALLOWED_HOOKS = TRANSCRIPT_RECONSTRUCT_HOOKS | UPLOAD_HOOKS
 # How long the no-stdin reconstruction waits for Cursor to finish writing the
-# turn it is about to read. Matches what extract_subagent_conversation already
-# spends on the same marker for the same race. The ceiling matters: this runs
-# inside the afterAgentResponse hook, whose manifest budget is 10 s, so the wait
-# has to stay a small fraction of it or a slow flush turns a recoverable turn
-# into a killed hook.
-TRANSCRIPT_FLUSH_MAX_WAIT_S = 2.0
+# turn it is about to read.
+#
+# Deliberately small, and smaller than the 2.0 s extract_subagent_conversation
+# spends on the same marker: that runs on subagentStop, whose manifest budget is
+# 30 s, while this runs on afterAgentResponse with 10 s. Two costs bound it from
+# above. This hook also shells out to git (5 s timeout) and appends every
+# reconstructed envelope, so a long wait plus a slow repo can reach the budget
+# and have the hook killed mid-append. And afterAgentResponse holds no upload
+# slot while it sleeps — `stop` fires next and can take the slot and upload
+# without this turn, so every millisecond here is a millisecond of the turn's
+# own upload window given away.
+#
+# What makes a short wait safe is the per-turn key below: a read that lands on
+# the previous turn now re-states that turn under its own key instead of
+# creating a second one, so a missed flush costs a retry, not corruption.
+TRANSCRIPT_FLUSH_MAX_WAIT_S = 0.5
 TRANSCRIPT_FLUSH_POLL_S = 0.1
 
 
@@ -160,7 +171,34 @@ def _session_id_from_transcript_path(path: str) -> str:
     return os.path.splitext(os.path.basename(path))[0]
 
 
-def _cursor_env_common_fields(session_id: str) -> dict:
+def _no_stdin_turn_key(session_id: str, turn_index: int) -> str:
+    """Return a stable ``generation_id`` for a reconstructed no-stdin turn.
+
+    The backend keys a Cursor turn on ``payload.generation_id``. In no-stdin mode
+    the payload is empty, so nothing carried that key and every reconstructed
+    turn fell back to positional numbering — which makes a re-emitted turn a
+    *second* turn rather than an update of the first. Re-emission is not
+    hypothetical: the reconstruction reads whatever the transcript holds, and
+    nothing de-duplicates ``afterAgentResponse`` on append.
+
+    Derived from the session and the turn's position, so the same turn always
+    yields the same key and two turns in one session never collide. Prefixed so
+    a synthetic key is never mistaken for one Cursor issued.
+
+    Args:
+        session_id: The session the turn belongs to.
+        turn_index: The turn's position in the transcript.
+
+    Returns:
+        A deterministic identifier for this turn.
+    """
+    digest = hashlib.sha1(
+        f"{session_id}:{turn_index}".encode(), usedforsecurity=False
+    ).hexdigest()
+    return f"nostdin-{digest[:24]}"
+
+
+def _cursor_env_common_fields(session_id: str, turn_key: str = "") -> dict:
     """Return the common Cursor payload fields recoverable from the environment.
 
     In the no-stdin mode (Cursor 3.18.x remote/RDP) every hook payload is empty,
@@ -172,12 +210,16 @@ def _cursor_env_common_fields(session_id: str) -> dict:
 
     Args:
         session_id: The session id already resolved for this hook.
+        turn_key: Stable per-turn identity to publish as ``generation_id``.
+            Omitted for callers that have no turn in hand.
 
     Returns:
         A dict of the common fields that could be recovered; keys with no
         environment value are omitted.
     """
     fields: dict = {"conversation_id": session_id}
+    if turn_key:
+        fields["generation_id"] = turn_key
     version = os.environ.get("CURSOR_VERSION")
     if version:
         fields["cursor_version"] = version
@@ -293,6 +335,10 @@ def _await_transcript_flush(path: str, hook_event_name: str) -> None:
     Returns:
         None. The caller reads the transcript regardless.
     """
+    # An absent file never gains a marker, so polling one only burns the budget
+    # and then drops the event anyway. Measured: 2.2 s spent for zero envelopes.
+    if not os.path.exists(path):
+        return
     deadline = time.monotonic() + TRANSCRIPT_FLUSH_MAX_WAIT_S
     flushed = final_turn_is_closed(path)
     while not flushed and time.monotonic() < deadline:
@@ -343,7 +389,10 @@ def _effort_from_model_params(payload: dict) -> str:
         value = entry.get("value")
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
-        return ""
+        # Keep looking rather than give up on this id: the ids are alternative
+        # spellings, and a payload carrying both must not lose the usable one
+        # because the other happened to come first with an empty value.
+        continue
     return ""
 
 
@@ -427,6 +476,7 @@ def main() -> None:
     # transcript path (Cursor sets it only at turn end) and was skipped.
     reconstructed_prompt = ""
     reconstructed_tool_calls: list = []
+    reconstructed_turn_key = ""
     if (
         hook_event_name in TRANSCRIPT_RECONSTRUCT_HOOKS
         and not payload.get("text")
@@ -438,6 +488,14 @@ def main() -> None:
         if transcript_path:
             _await_transcript_flush(transcript_path, hook_event_name)
         turn = latest_turn(transcript_path) if transcript_path else None
+        if turn and not (
+            turn["agent_response"] or turn["user_prompt"] or turn["tool_calls"]
+        ):
+            # A turn that parsed but holds nothing is the same phantom as no turn
+            # at all — an empty PROTECTED, turn-terminal envelope that survives
+            # eviction and uploads. Reachable from a user line with an empty
+            # content list, and from a line the timestamp filter empties.
+            turn = None
         if not turn:
             # Nothing to rebuild from: the transcript is absent, unreadable, or
             # has not been flushed yet — all reachable on the remote/RDP hosts
@@ -456,7 +514,14 @@ def main() -> None:
         # Backfill the common fields Cursor no longer sends on stdin so
         # this afterAgentResponse envelope is well-formed (it otherwise
         # carried only text — not even conversation_id), then the text.
-        for key, value in _cursor_env_common_fields(session_id).items():
+        # Token counts, model and effort are NOT recoverable here: the
+        # transcript carries none of them, and transcript_summary is only built
+        # for a payload that already had token fields. A no-stdin turn is
+        # therefore always un-priced and always without effort, by construction.
+        reconstructed_turn_key = _no_stdin_turn_key(session_id, turn["turn_index"])
+        for key, value in _cursor_env_common_fields(
+            session_id, reconstructed_turn_key
+        ).items():
             payload.setdefault(key, value)
         if turn["agent_response"]:
             payload["text"] = turn["agent_response"]
@@ -583,7 +648,7 @@ def main() -> None:
     # backend's turn builder pairs prompt → tool calls → response correctly.
     # tool_output is not in the transcript, so tool calls carry input only.
     if reconstructed_prompt:
-        prompt_payload = _cursor_env_common_fields(session_id)
+        prompt_payload = _cursor_env_common_fields(session_id, reconstructed_turn_key)
         prompt_payload["prompt"] = reconstructed_prompt
         prompt_envelope = {
             "hook_event_name": "beforeSubmitPrompt",
@@ -596,7 +661,7 @@ def main() -> None:
         append_to_batch(session_id, prompt_envelope)
 
     for tool_call in reconstructed_tool_calls:
-        tool_payload = _cursor_env_common_fields(session_id)
+        tool_payload = _cursor_env_common_fields(session_id, reconstructed_turn_key)
         tool_payload["tool_name"] = tool_call.get("tool_name", "")
         tool_payload["tool_input"] = tool_call.get("tool_input")
         # The transcript records no result, so state the absence explicitly

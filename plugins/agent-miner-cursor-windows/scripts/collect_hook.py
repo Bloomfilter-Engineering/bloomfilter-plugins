@@ -220,7 +220,10 @@ def _effort_from_model_params(payload: dict) -> str:
         value = entry.get("value")
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
-        return ""
+        # Keep looking rather than give up on this id: the ids are alternative
+        # spellings, and a payload carrying both must not lose the usable one
+        # because the other happened to come first with an empty value.
+        continue
     return ""
 
 

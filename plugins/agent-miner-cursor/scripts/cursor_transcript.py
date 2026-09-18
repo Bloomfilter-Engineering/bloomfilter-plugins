@@ -7,6 +7,8 @@ from typing import Any
 # The opening user message wraps the real prompt in these tags, e.g.
 # "<timestamp>...</timestamp>\n<user_query>\ndo the thing\n</user_query>".
 _USER_QUERY_RE = re.compile(r"<user_query>\s*(.*?)\s*</user_query>", re.DOTALL)
+# A user line whose entire content is the timestamp wrapper carries no prompt.
+_TIMESTAMP_ONLY_RE = re.compile(r"\s*<timestamp>.*?</timestamp>\s*", re.DOTALL)
 # Cursor redacts subagent reasoning/thinking with this literal — it can be a
 # whole text block or trailing junk appended to a real response
 # ("Done.\n\n[REDACTED]"), so we strip the token out rather than match blocks.
@@ -74,11 +76,17 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
     Joins the line's text blocks, then unwraps ``<user_query>...</user_query>``
     if present (the opening prompt carries a ``<timestamp>`` prefix we drop).
 
+    A line whose only content is that ``<timestamp>`` wrapper is not a prompt —
+    Cursor emits them, and one was observed in a real transcript. Returning the
+    markup verbatim would publish a prompt the user never typed, so those read
+    as empty and the caller's emptiness checks take over.
+
     Args:
         entry: One decoded user transcript line.
 
     Returns:
-        The prompt text, unwrapped from ``<user_query>`` when present.
+        The prompt text, unwrapped from ``<user_query>`` when present, or "" when
+        the line carries no prompt of its own.
     """
     # The text must be a string as well as present: the join below raises
     # TypeError on anything else, and a block is only required to be a dict.
@@ -89,7 +97,11 @@ def _user_prompt_text(entry: dict[str, Any]) -> str:
     ]
     joined = "\n".join(text for text in texts if text).strip()
     match = _USER_QUERY_RE.search(joined)
-    return (match.group(1).strip() if match else joined) or ""
+    if match:
+        return match.group(1).strip() or ""
+    if _TIMESTAMP_ONLY_RE.fullmatch(joined):
+        return ""
+    return joined or ""
 
 
 def first_user_query(path: str) -> str:
@@ -138,14 +150,22 @@ def latest_turn(path: str) -> dict[str, Any] | None:
     turn so the collector can reconstruct the ``beforeSubmitPrompt.prompt``,
     ``afterAgentResponse.text``, and ``postToolUse`` fields the backend expects.
 
+    ``turn_index`` is the last turn's position in the transcript. It is the only
+    stable per-turn identity this mode has: the payload that would normally carry
+    ``generation_id`` is empty, so the caller derives that key from this index
+    and re-reading the same turn then produces the same key. Without it a
+    re-emitted turn becomes a second turn on the collector rather than an
+    idempotent update.
+
     Args:
         path: Transcript JSONL to read.
 
     Returns:
-        ``{"user_prompt": str, "agent_response": str, "tool_calls": [...]}`` for
-        the last turn, or ``None`` when the transcript is unreadable or has no
-        turns. The transcript carries no tokens, model, or tool output, so those
-        stay unrecoverable in this mode (``tool_output`` is always ``None``).
+        ``{"user_prompt": str, "agent_response": str, "tool_calls": [...],
+        "turn_index": int}`` for the last turn, or ``None`` when the transcript
+        is unreadable or has no turns. The transcript carries no tokens, model,
+        or tool output, so those stay unrecoverable in this mode (``tool_output``
+        is always ``None``).
     """
     try:
         turns = parse_transcript(path).get("turns") or []
@@ -158,6 +178,7 @@ def latest_turn(path: str) -> dict[str, Any] | None:
         "user_prompt": last.get("user_prompt") or "",
         "agent_response": last.get("agent_response") or "",
         "tool_calls": last.get("tool_calls") or [],
+        "turn_index": len(turns) - 1,
     }
 
 

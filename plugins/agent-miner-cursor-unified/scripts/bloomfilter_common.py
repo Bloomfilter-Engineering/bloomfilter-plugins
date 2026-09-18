@@ -18,7 +18,11 @@ from collections import defaultdict, deque
 from datetime import datetime, timezone
 from typing import IO, Any, Callable, Iterator
 
-from cursor_transcript import first_user_query, is_complete, parse_transcript
+from cursor_transcript import (
+    final_turn_is_closed,
+    first_user_query,
+    parse_transcript,
+)
 
 # Platform-specific stdlib modules used by ``_lock_file`` below.
 if platform.system() == "Windows":
@@ -26,7 +30,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.3.7"
+PLUGIN_VERSION = "0.3.8"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
@@ -2564,7 +2568,12 @@ def extract_subagent_conversation(
         return None
 
     deadline = time.monotonic() + max_wait_s
-    while not is_complete(path) and time.monotonic() < deadline:
+    # final_turn_is_closed, not is_complete: the two agree on a one-turn subagent
+    # transcript except when its last line is half-written, and that is exactly
+    # the case this poll exists to wait out. is_complete reads through
+    # _read_lines, which drops an unparseable line and hands back the marker
+    # behind it — reporting a file still being appended to as finished.
+    while not final_turn_is_closed(path) and time.monotonic() < deadline:
         time.sleep(poll_s)
 
     try:
