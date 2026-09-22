@@ -25,7 +25,7 @@ Do this once on each machine before installing a plugin.
 
 ### Dependencies
 
-- Python 3.10 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
+- Python 3.11 or newer. The hook scripts use only Python standard library modules, so there are no Python packages to install.
 - A Bloomfilter API key.
 - Git, if you want Git branch metadata captured. The plugins still work without Git.
 - The host application for the plugin you want to use:
@@ -46,7 +46,7 @@ Check whether Python is already installed:
 python3 --version || python --version
 ```
 
-If Python is missing, install it with Homebrew:
+If that prints Python 3.11 or newer, you are set. If it is older, or Python is missing, install it with Homebrew:
 
 ```bash
 brew install python
@@ -81,7 +81,7 @@ python3 --version
 python --version
 ```
 
-If either command prints Python 3.10 or newer, you are set. If Python is missing, install it with `winget`:
+If either command prints Python 3.11 or newer, you are set. If it prints an older version, or Python is missing, install a current one with `winget`:
 
 ```powershell
 winget install Python.Python.3.13
@@ -362,7 +362,7 @@ the plugin that wrote each line.
 
 If data does not appear in Bloomfilter, check that:
 
-- Python is available from the agent application's environment. Run `python3 --version` or `python --version` to confirm.
+- Python **3.11 or newer** is available from the agent application's environment. Run `python3 --version` or `python --version` to confirm. Below 3.11 the hooks skip collection and write `reason=no-python-3.11-found` to `debug.log`.
 - Your user config contains a valid `api_key`.
 - The plugin is installed and the agent application was restarted or reloaded after installation.
 - Only one plugin per runtime is installed. A deprecated `-windows` plugin left alongside the

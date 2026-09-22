@@ -349,6 +349,15 @@ def main() -> None:
                     },
                 )
 
+            # Plan mode rides on the Stop envelope because that is where the
+            # rollout is parsed. Codex's own hook payloads report
+            # permission_mode="default" even in Plan mode, so this is the only
+            # field that states it, and the backend's planning_mode config
+            # reads it from here.
+            collaboration_mode = parsed_turn.get("collaboration_mode") or ""
+            if collaboration_mode:
+                payload["collaboration_mode"] = collaboration_mode
+
             api_calls = parsed_turn.get("api_calls") or []
             time_to_first_token_ms = parsed_turn.get("time_to_first_token_ms")
             if api_calls or time_to_first_token_ms is not None:

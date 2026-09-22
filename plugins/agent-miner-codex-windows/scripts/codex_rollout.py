@@ -258,6 +258,8 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     # Reasoning effort for the turn (e.g. "low"/"medium"/"high"/"xhigh"), read
     # off the turn's turn_context alongside the model.
     turn_effort: str = ""
+    # Codex's Plan / Default mode for the turn, read off the same turn_context.
+    turn_collaboration_mode: str = ""
     assistant_chunks: list[str] = []
     assistant_messages: list[dict[str, Any]] = []
     turn_started_at: datetime | None = None
@@ -294,6 +296,17 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
             if in_turn():
                 turn_model = payload.get("model") or turn_model
                 turn_effort = payload.get("effort") or turn_effort
+                # Plan mode. Codex does NOT report it through
+                # permission_mode: a session driven into Plan mode with /plan
+                # reports "default" on every hook payload while recording
+                # {"mode": "plan"} here. This is the only place the runtime
+                # states it, and the turn model/effort above come from the same
+                # entry, so reading it costs nothing extra.
+                collaboration = payload.get("collaboration_mode")
+                if isinstance(collaboration, dict):
+                    turn_collaboration_mode = (
+                        collaboration.get("mode") or turn_collaboration_mode
+                    )
                 if entry_timestamp is not None and turn_started_at is None:
                     turn_started_at = entry_timestamp
                     turn_ended_at = entry_timestamp
@@ -519,6 +532,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
         "file_edits": file_edits,
         "api_calls": api_calls,
         "model": turn_model,
+        "collaboration_mode": turn_collaboration_mode,
         "time_to_first_token_ms": time_to_first_token_ms,
         "user_prompt": user_prompt_text or None,
         "assistant_messages": assistant_messages,
@@ -541,6 +555,7 @@ def _empty_turn() -> dict[str, Any]:
         "file_edits": [],
         "api_calls": [],
         "model": "",
+        "collaboration_mode": "",
         "time_to_first_token_ms": None,
         "user_prompt": None,
         "assistant_messages": [],
