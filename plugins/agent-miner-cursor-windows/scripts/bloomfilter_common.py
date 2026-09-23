@@ -3021,10 +3021,10 @@ USER_SKILL_FOLDERS = PROJECT_SKILL_FOLDERS
 # Bounds on the search for one prompt. The prompt hook holds the prompt until it
 # returns, and a skill can sit in a subdirectory anywhere in the project, so the
 # search is capped by directories visited and by time — whichever comes first.
-# It holds two budgets of SKILL_SEARCH_MAX_DIRECTORIES each, one for walking the
-# project's subdirectories and one for searching inside skills folders, so one
-# prompt can visit up to twice that many; both start together, so
-# SKILL_SEARCH_MAX_SECONDS bounds the whole search.
+# It holds three budgets of SKILL_SEARCH_MAX_DIRECTORIES each — the home skills
+# folders, the project's skills folders, and the walk through the project's
+# subdirectories — so one prompt can visit up to three times that many; all
+# start together, so SKILL_SEARCH_MAX_SECONDS bounds the whole search.
 SKILL_SEARCH_MAX_DIRECTORIES = 2000
 SKILL_SEARCH_MAX_SECONDS = 0.25
 
@@ -3033,7 +3033,7 @@ MAX_TYPED_SKILLS = 5
 
 
 class _SkillSearchBudget:
-    """Directories and time left for one of a prompt's two skill-search budgets."""
+    """Directories and time left for one of a prompt's three skill-search budgets."""
 
     def __init__(self) -> None:
         """Start with ``SKILL_SEARCH_MAX_DIRECTORIES`` and ``SKILL_SEARCH_MAX_SECONDS``.
@@ -3165,8 +3165,9 @@ def typed_skill_records(prompt: Any, project_roots: list[str]) -> list[dict[str,
     No Cursor hook reports a skill, so a typed ``/name`` is checked against the
     folders Cursor loads skills from, and recorded only when one of them holds
     a skill of that name: a custom subagent or a built-in command is typed the
-    same way. A name is looked up in the project first, then in the user's
-    home folders.
+    same way. A skill the project defines takes precedence over one in the
+    user's home folders, which are searched first because they are small and a
+    slow project walk must not starve them.
 
     Args:
         prompt: ``payload.prompt`` from ``beforeSubmitPrompt``.
@@ -3180,8 +3181,19 @@ def typed_skill_records(prompt: Any, project_roots: list[str]) -> list[dict[str,
     if not names:
         return []
     home = os.path.expanduser("~")
+    # The home folders are small and fixed, so they are searched before a slow
+    # project walk can use up the deadline the budgets share.
+    user_budget = _SkillSearchBudget()
     folder_budget = _SkillSearchBudget()
     walk_budget = _SkillSearchBudget()
+    user_names = {
+        name
+        for name in names
+        if any(
+            _skill_in_folder(os.path.join(home, *folder_parts), name, user_budget)
+            for folder_parts in USER_SKILL_FOLDERS
+        )
+    }
     records: list[dict[str, str]] = []
     for name in names:
         if any(
@@ -3190,15 +3202,12 @@ def typed_skill_records(prompt: Any, project_roots: list[str]) -> list[dict[str,
             if project_root
         ):
             source = "project"
-        elif any(
-            _skill_in_folder(os.path.join(home, *folder_parts), name, folder_budget)
-            for folder_parts in USER_SKILL_FOLDERS
-        ):
+        elif name in user_names:
             source = "user"
         else:
             continue
         records.append({"name": name, "source": source, "invocation": "typed"})
-    if folder_budget.exhausted or walk_budget.exhausted:
+    if user_budget.exhausted or folder_budget.exhausted or walk_budget.exhausted:
         debug_log(
             f"typed skill search stopped early: names={len(names)} "
             f"recorded={len(records)} reason=search-budget-used-up"
