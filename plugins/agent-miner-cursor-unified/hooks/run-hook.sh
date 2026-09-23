@@ -37,13 +37,13 @@ fi
 
 # Name existence is not enough: an asdf/pyenv/mise shim resolves as a name but
 # fails at exec when no version is set. Probe by actually running each candidate,
-# requiring Python >= 3.10 (the collector floor) AND that the collector's own
+# requiring Python >= 3.11 (the collector floor) AND that the collector's own
 # module-top imports resolve. collect_hook.py imports json/subprocess/urllib.request
 # at import time -- before its exit-0 guard, and with no shell fallback after exec --
 # so a stripped interpreter that passed a lighter probe would ImportError into the
 # exact hook error we fix. Keep this set == the collector's unguarded top imports.
 _bf_probe() {  # $1 = interpreter; stdin from /dev/null so it can't eat the payload
-  "$1" -c 'import sys, json, subprocess, urllib.request; raise SystemExit(0 if sys.version_info[:2] >= (3, 10) else 1)' \
+  "$1" -c 'import sys, json, subprocess, urllib.request; raise SystemExit(0 if sys.version_info[:2] >= (3, 11) else 1)' \
     </dev/null >/dev/null 2>&1
 }
 
@@ -75,7 +75,7 @@ _bf_find_python() {
 
   # PATH is not the whole machine. A hook host need not pass the user's
   # interactive PATH, and on a stock macOS the only interpreter on a minimal one
-  # is /usr/bin/python3 -- which is 3.9, below the floor -- while the 3.10+ the
+  # is /usr/bin/python3 -- which is 3.9, below the floor -- while the 3.11+ the
   # user actually installed sits in Homebrew, asdf, or the python.org framework.
   # Searching PATH alone therefore finds nothing usable and the hook captures
   # nothing at all, on a machine that is perfectly well provisioned.
@@ -94,7 +94,7 @@ _bf_find_python() {
     [ -x "$_bf_cand" ] || continue
     _bf_probe "$_bf_cand" && { printf '%s\n' "$_bf_cand"; return 0; }
   done
-  for _bf_cand in $(ls -d /Library/Frameworks/Python.framework/Versions/3.* 2>/dev/null | sort -r)
+  for _bf_cand in $(ls -d /Library/Frameworks/Python.framework/Versions/3.* 2>/dev/null | sort -Vr)
   do
     [ -x "$_bf_cand/bin/python3" ] || continue
     _bf_probe "$_bf_cand/bin/python3" && {
@@ -107,11 +107,19 @@ _bf_find_python() {
 # debug.log -- so this failure is otherwise completely silent: no data, and
 # nothing anywhere to say why. Leave the one line from the shell instead.
 _bf_note_no_python() {
-  _bf_note_dir="${XDG_CONFIG_HOME:-$HOME/.config}/bloomfilter"
+  # Absolute only. A relative XDG_CONFIG_HOME resolves against the current
+  # directory, which for a hook is the user's project, so the note would land
+  # in the repo being worked on rather than beside the collector's own log.
+  # get_config_dir() in the collector discards a relative value the same way.
+  case "${XDG_CONFIG_HOME:-}" in
+    /*) _bf_note_base="$XDG_CONFIG_HOME" ;;
+    *) _bf_note_base="$HOME/.config" ;;
+  esac
+  _bf_note_dir="$_bf_note_base/bloomfilter"
   mkdir -p "$_bf_note_dir" 2>/dev/null || return 0
-  printf '%sZ [%s] hook skipped: reason=no-python-3.10-found event=%s\n' \
+  printf '%sZ [%s] hook skipped: reason=no-python-3.11-found event=%s\n' \
     "$(date -u +%Y-%m-%dT%H:%M:%S 2>/dev/null || printf 'unknown-time')" \
-    "$(basename "$root")" "$event" >> "$_bf_note_dir/debug.log" 2>/dev/null || true
+    'bloomfilter-launcher' "$event" >> "$_bf_note_dir/debug.log" 2>/dev/null || true
 }
 
 # `|| true` keeps the graceful {} contract intrinsic even under an inherited

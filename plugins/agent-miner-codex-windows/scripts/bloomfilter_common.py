@@ -22,9 +22,9 @@ else:
 
 # codex_rollout sits beside this module; every entrypoint puts the scripts dir on
 # sys.path before importing either, so a module-level import resolves.
-from codex_rollout import parse_transcript
+from codex_rollout import parse_transcript, rollout_turn_ids
 
-PLUGIN_VERSION: str = "0.2.2"
+PLUGIN_VERSION: str = "0.2.3"
 _SUBAGENT_FIELD_CAP: int = 10_000
 DEFAULT_API_URL: str = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME: str = "debug.log"
@@ -542,6 +542,37 @@ def get_batch_file(session_id: str) -> str:
     if not safe_session_id or safe_session_id != session_id or ".." in session_id:
         raise ValueError(f"Invalid session_id: {session_id!r}")
     return os.path.join(get_batch_dir(), f"{safe_session_id}.jsonl")
+
+
+# Sidecar serialising the supply of finished reviews to a session's batch, so two
+# uploads running at once cannot each append the same review.
+REVIEW_LOCK_SUFFIX = ".reviews"
+
+
+@contextlib.contextmanager
+def batch_sidecar_lock(session_id: str, suffix: str) -> Iterator[bool]:
+    """Hold an exclusive lock on a sidecar next to a session's batch.
+
+    For a read-then-append sequence that must not interleave with the same
+    sequence in another hook process: the batch's own lock is released between
+    the read and the append, so it cannot serialise the two.
+
+    Args:
+        session_id: Session whose batch the sidecar sits beside.
+        suffix: The sidecar's suffix, such as ``REVIEW_LOCK_SUFFIX``.
+
+    Yields:
+        True while the lock is held; False when the sidecar could not be opened,
+        in which case the caller skips the guarded work.
+    """
+    try:
+        lock_handle = open(get_batch_file(session_id) + suffix, "a+")
+    except (OSError, RuntimeError, ValueError):
+        yield False
+        return
+    with lock_handle:
+        with _lock_file(lock_handle, exclusive=True):
+            yield True
 
 
 def _delivered_marker_path(session_id: str) -> str:
@@ -1713,7 +1744,7 @@ def sweep_stale_batches(
             # never fail the hook that is sweeping.
             continue
         removed_count += 1
-        for sidecar_suffix in (".upload", ".sent"):
+        for sidecar_suffix in (".upload", ".sent", REVIEW_LOCK_SUFFIX):
             with contextlib.suppress(OSError):
                 os.unlink(batch_file_path + sidecar_suffix)
     if removed_count:
@@ -1957,6 +1988,7 @@ def extract_subagent_conversation(
     expected_last_message: str | None = None,
     max_wait_s: float = 2.0,
     poll_s: float = 0.1,
+    parent_transcript_path: str = "",
 ) -> dict[str, Any] | None:
     """Parse a subagent's own Codex rollout into a normalized conversation.
 
@@ -1974,6 +2006,9 @@ def extract_subagent_conversation(
             parse is accepted as-is.
         max_wait_s: Wall-clock ceiling on that re-parsing, in seconds.
         poll_s: Delay between re-parse attempts, in seconds.
+        parent_transcript_path: The parent session's rollout. Turns it records
+            are excluded: a subagent spawned with its parent's history replays
+            every earlier parent turn, and those are not the subagent's work.
 
     Returns:
         ``{"turns": [...]}`` — the backend's child-session shape — or None when
@@ -1986,6 +2021,7 @@ def extract_subagent_conversation(
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
         return None
 
+    parent_turn_ids = rollout_turn_ids(parent_transcript_path)
     expected = (expected_last_message or "").strip()
     expected_capped = (_cap_text(expected) or "").strip()
     deadline = time.monotonic() + max_wait_s
@@ -1993,7 +2029,7 @@ def extract_subagent_conversation(
     matched = False
     while True:
         try:
-            result = parse_transcript(agent_transcript_path)
+            result = parse_transcript(agent_transcript_path, parent_turn_ids)
         except Exception:
             result = None
         if isinstance(result, dict):

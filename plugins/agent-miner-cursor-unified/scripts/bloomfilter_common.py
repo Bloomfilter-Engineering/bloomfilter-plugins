@@ -6,6 +6,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -15,8 +16,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict, deque
-from datetime import datetime, timezone
-from typing import IO, Any, Callable, Iterator
+from datetime import datetime, timedelta, timezone
+from typing import IO, Any, Callable, Collection, Iterator
 
 from cursor_transcript import (
     final_turn_is_closed,
@@ -30,7 +31,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.3.8"
+PLUGIN_VERSION = "0.3.9"
 _SUBAGENT_FIELD_CAP = 10_000
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
@@ -114,6 +115,11 @@ BATCH_MAX_AGE_SECONDS = 14 * 24 * 60 * 60
 UPLOAD_OK = "ok"
 UPLOAD_FAILED = "failed"
 UPLOAD_TOO_LARGE = "too-large"
+# The server accepted the batch but filed it under no session: nothing in it
+# opens one and no earlier upload did either. It answers 201 with
+# ``"session_id": null``, and treating that as delivered deletes records that
+# were stored nowhere.
+UPLOAD_NOT_FILED = "not-filed"
 
 # Envelopes that open a turn. Never shed on size, however large they get: on a
 # runtime that supplies no per-turn key, these are the only thing that marks
@@ -2047,7 +2053,7 @@ def sweep_stale_batches(
             # never fail the hook that is sweeping.
             continue
         removed_count += 1
-        for sidecar_suffix in (".upload", ".sent"):
+        for sidecar_suffix in (".upload", ".sent", SUBAGENT_CLAIMS_SUFFIX):
             with contextlib.suppress(OSError):
                 os.unlink(batch_file_path + sidecar_suffix)
     if removed_count:
@@ -2082,6 +2088,55 @@ def _sanitize_url_for_log(url: str) -> str:
     return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
+# The server answers a batch with a few dozen bytes; nothing past this is read.
+_RESPONSE_BODY_READ_BYTES = 4096
+
+
+def _read_response_body(response: Any) -> bytes:
+    """Read the start of a successful upload's response body.
+
+    A failure to read it must not turn a delivered batch into a failed one, so
+    any error reads as an empty body, which counts as filed.
+
+    Args:
+        response: The open response from ``urllib.request.urlopen``.
+
+    Returns:
+        Up to ``_RESPONSE_BODY_READ_BYTES`` of the body, or b"" when it could
+        not be read.
+    """
+    try:
+        body = response.read(_RESPONSE_BODY_READ_BYTES)
+    except Exception:
+        return b""
+    return body if isinstance(body, bytes) else b""
+
+
+def _filed_under_no_session(response_body: bytes) -> bool:
+    """True when the server says it filed the batch under no session.
+
+    It answers every processed batch with ``{"session_id", "hooks_processed"}``
+    and sets ``session_id`` to null when nothing in the batch could open a
+    session and none existed. Only that explicit null counts: a body that is
+    missing, unreadable or shaped differently is read as filed.
+
+    Args:
+        response_body: The start of the 2xx response body.
+
+    Returns:
+        True only for a JSON object whose ``session_id`` is null.
+    """
+    try:
+        decoded = json.loads(response_body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return False
+    return (
+        isinstance(decoded, dict)
+        and "session_id" in decoded
+        and decoded["session_id"] is None
+    )
+
+
 def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
     """POST raw hook batch to the Bloomfilter API.
 
@@ -2101,7 +2156,9 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
 
     Returns:
         UPLOAD_OK when the server answered 2xx, meaning the records are safe to
-        drain. UPLOAD_TOO_LARGE when it answered 413, meaning the caller must
+        drain. UPLOAD_NOT_FILED when it answered 2xx but said it filed the batch
+        under no session, meaning the records were stored nowhere and must be
+        kept. UPLOAD_TOO_LARGE when it answered 413, meaning the caller must
         send fewer records rather than retry this body — an identical oversize
         request can never succeed, so collapsing 413 into the generic failure is
         what makes an oversize batch permanent. UPLOAD_FAILED for an invalid
@@ -2204,10 +2261,18 @@ def upload_batch(api_url: str, api_key: str, payload: dict) -> str:
         request.add_unredirected_header("X-MCP-Token", api_key)
         with urllib.request.urlopen(request, timeout=UPLOAD_TIMEOUT_S) as response:
             status = response.getcode()
+            response_body = _read_response_body(response)
         debug_log(f"upload_batch: response status={status} session_id={session_id}")
         if not 200 <= status < 300:
             print(f"[bloomfilter] Upload response status: {status}", file=sys.stderr)
-        return UPLOAD_OK if 200 <= status < 300 else UPLOAD_FAILED
+            return UPLOAD_FAILED
+        if _filed_under_no_session(response_body):
+            debug_log(
+                f"upload_batch: batch filed under no session session_id={session_id} "
+                f"hooks={hook_count}"
+            )
+            return UPLOAD_NOT_FILED
+        return UPLOAD_OK
     except urllib.error.HTTPError as exception:
         try:
             body = exception.read().decode("utf-8", errors="replace").strip()
@@ -2327,51 +2392,353 @@ def _cap_conversation(conversation: dict[str, Any]) -> None:
                     )
 
 
-def find_subagent_transcript(parent_transcript_path: str, task: str) -> str | None:
+# Sidecar next to a conversation's batch recording which child transcript each
+# of its subagents was matched to, as ``{subagent_id: child_conversation_id}``.
+# The batch itself cannot hold it: a session end drains the batch, and the
+# conversation's ``subagents/`` directory keeps every child for as long as the
+# conversation exists.
+SUBAGENT_CLAIMS_SUFFIX = ".subagents"
+
+# Slack on each side of a subagent's run when matching the child conversation
+# that started inside it. The start, the stop and the child's first hook are
+# stamped by three separate hook processes, so start-up latency can put the
+# child's first stamp just before the start or, for a very short run, just after
+# the stop. A match must still be unique, so the slack cannot pick the wrong
+# child: a second child inside the window makes the match give up instead.
+SUBAGENT_RUN_SLACK = timedelta(seconds=2)
+
+
+def _child_conversation_id(transcript_path: str) -> str:
+    """Return the child conversation id a subagent transcript is named after.
+
+    Args:
+        transcript_path: Path to ``subagents/<child-conversation-id>.jsonl``.
+
+    Returns:
+        The file name without its extension.
+    """
+    return os.path.splitext(os.path.basename(transcript_path))[0]
+
+
+def _parse_timestamp(value: Any) -> datetime | None:
+    """Parse an envelope's ``received_at`` into an aware datetime.
+
+    Args:
+        value: The stamp as :func:`utcnow_iso` wrote it.
+
+    Returns:
+        The instant, or None when *value* is not an ISO 8601 string with a
+        time zone.
+    """
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _child_batch_opened_at(child_conversation_id: str) -> datetime | None:
+    """Return when a child conversation's own hooks began, from its stray batch.
+
+    Args:
+        child_conversation_id: Conversation id the stray batch is named after.
+
+    Returns:
+        The earliest ``received_at`` in that batch, or None when there is no
+        batch or no usable stamp in it.
+    """
+    try:
+        entries = read_batch(child_conversation_id)
+    except (OSError, RuntimeError, ValueError):
+        return None
+    stamps = [
+        stamp
+        for stamp in (
+            _parse_timestamp(entry.get("received_at"))
+            for entry in entries
+            if isinstance(entry, dict)
+        )
+        if stamp is not None
+    ]
+    return min(stamps) if stamps else None
+
+
+def _child_timing(
+    child_conversation_id: str, run_window: tuple[datetime, datetime]
+) -> str:
+    """Say whether a child conversation started during a subagent's run.
+
+    Args:
+        child_conversation_id: Conversation id of the candidate child.
+        run_window: ``(started_at, stopped_at)`` of the subagent being matched.
+
+    Returns:
+        ``"inside"`` when the child's stray batch opened within the run,
+        allowing ``SUBAGENT_RUN_SLACK`` on either side; ``"outside"`` when it
+        opened before or after it; ``"unknown"`` when the child left no stray
+        batch to tell.
+    """
+    opened_at = _child_batch_opened_at(child_conversation_id)
+    if opened_at is None:
+        return "unknown"
+    started_at, stopped_at = run_window
+    if started_at - SUBAGENT_RUN_SLACK <= opened_at <= stopped_at + SUBAGENT_RUN_SLACK:
+        return "inside"
+    return "outside"
+
+
+def subagent_run_window(
+    session_id: str, payload: dict[str, Any], stopped_at: str
+) -> tuple[datetime, datetime] | None:
+    """Return when the subagent a ``subagentStop`` closes started and stopped.
+
+    The start is the ``subagentStart`` in this conversation's batch that names
+    the same ``subagent_id``. When that envelope is no longer there — a session
+    end drained it while the subagent ran — the start is taken from the stop's
+    own ``duration_ms``.
+
+    Args:
+        session_id: The parent conversation, whose batch holds the start.
+        payload: The ``subagentStop`` payload.
+        stopped_at: The ``received_at`` of the ``subagentStop`` envelope.
+
+    Returns:
+        ``(started_at, stopped_at)``, or None when either end is unknown.
+    """
+    stop_instant = _parse_timestamp(stopped_at)
+    if stop_instant is None:
+        return None
+    subagent_id = payload.get("subagent_id")
+    start_instant = None
+    if isinstance(subagent_id, str) and subagent_id:
+        try:
+            entries = read_batch(session_id)
+        except (OSError, RuntimeError, ValueError):
+            entries = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("hook_event_name") != "subagentStart":
+                continue
+            entry_payload = entry.get("payload")
+            if not isinstance(entry_payload, dict):
+                continue
+            if entry_payload.get("subagent_id") != subagent_id:
+                continue
+            start_instant = _parse_timestamp(entry.get("received_at")) or start_instant
+    if start_instant is None:
+        duration_ms = payload.get("duration_ms")
+        if (
+            isinstance(duration_ms, (int, float))
+            and not isinstance(duration_ms, bool)
+            and duration_ms >= 0
+        ):
+            start_instant = stop_instant - timedelta(milliseconds=duration_ms)
+    if start_instant is None or start_instant > stop_instant:
+        return None
+    return start_instant, stop_instant
+
+
+def find_subagent_transcript(
+    parent_transcript_path: str,
+    task: str,
+    claimed_ids: Collection[str] = (),
+    run_window: tuple[datetime, datetime] | None = None,
+) -> str | None:
     """Locate a Cursor subagent's own transcript file for a ``subagentStop``.
 
     Cursor writes each subagent conversation to
     ``<parent-conversation-dir>/subagents/<child-conversation-id>.jsonl`` but
     the hook exposes neither that path (``agent_transcript_path`` is null) nor
     the child conversation id. It DOES give the parent transcript path and the
-    subagent's ``task``, so we scan the sibling ``subagents/`` directory and
-    return the file whose opening user query matches the task.
+    subagent's ``task``, so the sibling ``subagents/`` directory is searched in
+    this order:
+
+    1. the file whose opening user query matches the task;
+    2. the only file in the directory, when the task was reformatted;
+    3. the one file whose conversation started during this subagent's run.
+       Cursor rewrites the prompt of its own review subagents, so their task
+       never matches, and ``subagents/`` keeps every child of the conversation,
+       so any earlier subagent rules out step 2. The child's own hooks land in a
+       batch named after its conversation, and when the first of them arrived
+       is the only link left: nothing the child sends names its parent.
+
+    With a run window, a file whose conversation started outside the run is
+    another subagent's and is ruled out of every step, and when more than one
+    file still matches the task — parallel subagents given the same task — the
+    search gives up rather than guess. A file already matched to another
+    subagent of the conversation is never returned, and step 3 gives up rather
+    than guess when more than one file fits.
 
     Args:
         parent_transcript_path: ``payload.transcript_path`` (the parent
             conversation's transcript), used to locate the ``subagents/`` dir.
         task: ``payload.task`` — the subagent's prompt, matched against each
-            candidate's first user query.
+            candidate's first user query. Empty skips step 1.
+        claimed_ids: Child conversation ids already matched to other subagents
+            of this conversation.
+        run_window: ``(started_at, stopped_at)`` of this subagent, as its hooks
+            recorded them. None skips the timing checks and step 3.
 
     Returns:
         Path to the matching transcript — relative when the parent transcript
         path from the payload was relative — or None if the dir/file is
         missing or nothing matches.
     """
-    if not parent_transcript_path or not task:
+    if not parent_transcript_path:
         return None
     parent_dir = os.path.dirname(parent_transcript_path)
     subagents_dir = os.path.join(parent_dir, "subagents")
     if not os.path.isdir(subagents_dir):
         return None
 
-    wanted = task.strip()
+    wanted = task.strip() if isinstance(task, str) else ""
     candidates = sorted(
         os.path.join(subagents_dir, name)
         for name in os.listdir(subagents_dir)
         if name.endswith(".jsonl")
     )
-    for candidate in candidates:
+    timings = (
+        {
+            candidate: _child_timing(_child_conversation_id(candidate), run_window)
+            for candidate in candidates
+        }
+        if run_window is not None
+        else {}
+    )
+    possible = [
+        candidate
+        for candidate in candidates
+        if _child_conversation_id(candidate) not in claimed_ids
+        and timings.get(candidate) != "outside"
+    ]
+    exact_matches = []
+    for candidate in possible if wanted else []:
         try:
             if first_user_query(candidate).strip() == wanted:
-                return candidate
+                exact_matches.append(candidate)
         except OSError:
             continue
-    # Exactly one subagent this turn and no text match (e.g. the task was
-    # reformatted): fall back to the sole candidate rather than losing it.
-    if len(candidates) == 1:
+    if len(exact_matches) == 1 or (exact_matches and run_window is None):
+        return exact_matches[0]
+    if exact_matches:
+        debug_log(
+            f"subagent transcript ambiguous: candidates={len(exact_matches)} "
+            "reason=several-children-match-the-task"
+        )
+        return None
+    # Exactly one subagent so far in this conversation and no text match (e.g.
+    # the task was reformatted): keep the sole candidate rather than lose it.
+    if len(candidates) == 1 and possible:
         return candidates[0]
+    if run_window is None:
+        return None
+    started_during_run = [
+        candidate for candidate in possible if timings.get(candidate) == "inside"
+    ]
+    if len(started_during_run) == 1:
+        return started_during_run[0]
+    if started_during_run:
+        debug_log(
+            f"subagent transcript ambiguous: candidates={len(started_during_run)} "
+            "reason=several-children-started-during-run"
+        )
     return None
+
+
+def _subagent_claims_path(session_id: str) -> str:
+    """Return the sidecar recording which child each subagent was matched to.
+
+    Args:
+        session_id: The parent conversation.
+
+    Returns:
+        Path to the claims file next to that conversation's batch.
+    """
+    return get_batch_file(session_id) + SUBAGENT_CLAIMS_SUFFIX
+
+
+def _decode_subagent_claims(raw: str) -> dict[str, str]:
+    """Decode a claims sidecar, dropping anything that is not ``str -> str``.
+
+    Args:
+        raw: The sidecar's contents.
+
+    Returns:
+        ``{subagent_id: child_conversation_id}``; empty when *raw* is blank or
+        not a JSON object.
+    """
+    try:
+        decoded = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return {}
+    if not isinstance(decoded, dict):
+        return {}
+    return {
+        subagent_id: child_id
+        for subagent_id, child_id in decoded.items()
+        if isinstance(subagent_id, str) and isinstance(child_id, str) and child_id
+    }
+
+
+def claim_subagent_transcript(
+    session_id: str,
+    subagent_id: str,
+    parent_transcript_path: str,
+    task: str,
+    run_window: tuple[datetime, datetime] | None = None,
+) -> str | None:
+    """Find a subagent's transcript and record it as that subagent's.
+
+    Held under a lock on the claims sidecar, so two subagents stopping at once
+    cannot both take the same child. A subagent that already has a child keeps
+    it. When the sidecar cannot be opened the search still runs, without the
+    record, so the stop is never lost to it.
+
+    Args:
+        session_id: The parent conversation.
+        subagent_id: ``payload.subagent_id`` of the stopping subagent.
+        parent_transcript_path: ``payload.transcript_path``.
+        task: ``payload.task``.
+        run_window: ``(started_at, stopped_at)`` of the subagent, or None.
+
+    Returns:
+        Path to the subagent's transcript, or None when none matched.
+    """
+    try:
+        claims_path = _subagent_claims_path(session_id)
+        claims_handle = open(claims_path, "a+")
+    except (OSError, RuntimeError, ValueError):
+        return find_subagent_transcript(
+            parent_transcript_path, task, run_window=run_window
+        )
+    with claims_handle:
+        with _lock_file(claims_handle, exclusive=True):
+            claims_handle.seek(0)
+            claims = _decode_subagent_claims(claims_handle.read())
+            claimed_child_id = claims.get(subagent_id)
+            if claimed_child_id:
+                claimed_path = os.path.join(
+                    os.path.dirname(parent_transcript_path),
+                    "subagents",
+                    f"{claimed_child_id}.jsonl",
+                )
+                return claimed_path if os.path.isfile(claimed_path) else None
+            path = find_subagent_transcript(
+                parent_transcript_path,
+                task,
+                claimed_ids=set(claims.values()),
+                run_window=run_window,
+            )
+            if path:
+                claims[subagent_id] = _child_conversation_id(path)
+                claims_handle.seek(0)
+                claims_handle.truncate()
+                claims_handle.write(json.dumps(claims, separators=(",", ":")))
+                claims_handle.flush()
+    return path
 
 
 def _read_child_batch(
@@ -2536,6 +2903,9 @@ def extract_subagent_conversation(
     max_wait_s: float = 2.0,
     poll_s: float = 0.1,
     cleanup_child_batch: bool = True,
+    session_id: str = "",
+    subagent_id: str = "",
+    run_window: tuple[datetime, datetime] | None = None,
 ) -> dict[str, Any] | None:
     """Parse a Cursor subagent's transcript into a normalized conversation.
 
@@ -2559,11 +2929,24 @@ def extract_subagent_conversation(
             merging (default). The merged result is frozen into the parent
             batch envelope, so the orphan batch is no longer needed; removing it
             stops the batches dir from accumulating dead child files.
+        session_id: The parent conversation. With ``subagent_id`` it records
+            which child this subagent took, so no later subagent of the
+            conversation can take it too.
+        subagent_id: ``payload.subagent_id`` of the stopping subagent.
+        run_window: ``(started_at, stopped_at)`` of the subagent, used to match
+            a child whose prompt Cursor rewrote.
 
     Returns:
         The capped conversation dict, or None.
     """
-    path = find_subagent_transcript(parent_transcript_path, task)
+    if session_id and subagent_id:
+        path = claim_subagent_transcript(
+            session_id, subagent_id, parent_transcript_path, task, run_window
+        )
+    else:
+        path = find_subagent_transcript(
+            parent_transcript_path, task, run_window=run_window
+        )
     if not path:
         return None
 
@@ -2589,7 +2972,7 @@ def extract_subagent_conversation(
         # Enrich the transcript (tool inputs only, no thinking) with the outputs
         # and thinking captured in the subagent's own stray hook batch, keyed by
         # the child conversation id (the transcript's filename stem).
-        child_conversation_id = os.path.splitext(os.path.basename(path))[0]
+        child_conversation_id = _child_conversation_id(path)
         tool_calls, thinkings = _read_child_batch(child_conversation_id)
         _merge_tool_outputs(result, tool_calls)
         _attach_thinking(
@@ -2616,3 +2999,226 @@ def _delete_child_batch(child_conversation_id: str) -> None:
         os.remove(get_batch_file(child_conversation_id))
     except (OSError, ValueError):
         pass
+
+
+# ---------------------------------------------------------------------------
+# Typed skills
+# ---------------------------------------------------------------------------
+
+# A skill typed into a prompt reaches the hooks only as the prompt's text. Cursor
+# names a skill after the folder holding its SKILL.md, in lowercase letters,
+# numbers and hyphens, and runs it when the prompt names it as ``/name``.
+# Source: https://cursor.com/docs/skills
+_TYPED_SKILL_RE = re.compile(r"/([a-z0-9]+(?:-[a-z0-9]+)*)")
+
+# Skill folders Cursor loads at a project root, including the Claude and Codex
+# folders it reads for compatibility.
+PROJECT_SKILL_FOLDERS = (
+    (".cursor", "skills"),
+    (".agents", "skills"),
+    (".claude", "skills"),
+    (".codex", "skills"),
+)
+
+# Folders whose ``skills`` directory Cursor also picks up in any subdirectory
+# of the project.
+NESTED_PROJECT_SKILL_PARENTS = (".cursor", ".agents")
+
+# Skill folders Cursor loads from the user's home directory.
+USER_SKILL_FOLDERS = PROJECT_SKILL_FOLDERS
+
+# Bounds on the search for one prompt. The prompt hook holds the prompt until it
+# returns, and a skill can sit in a subdirectory anywhere in the project, so the
+# search is capped by directories visited and by time — whichever comes first.
+# It holds three budgets of SKILL_SEARCH_MAX_DIRECTORIES each — the home skills
+# folders, the project's skills folders, and the walk through the project's
+# subdirectories — so one prompt can visit up to three times that many; all
+# start together, so SKILL_SEARCH_MAX_SECONDS bounds the whole search.
+SKILL_SEARCH_MAX_DIRECTORIES = 2000
+SKILL_SEARCH_MAX_SECONDS = 0.25
+
+# Most skills recorded for one prompt.
+MAX_TYPED_SKILLS = 5
+
+
+class _SkillSearchBudget:
+    """Directories and time left for one of a prompt's three skill-search budgets."""
+
+    def __init__(self) -> None:
+        """Start with ``SKILL_SEARCH_MAX_DIRECTORIES`` and ``SKILL_SEARCH_MAX_SECONDS``.
+
+        Returns:
+            None.
+        """
+        self.directories_left = SKILL_SEARCH_MAX_DIRECTORIES
+        self.deadline = time.monotonic() + SKILL_SEARCH_MAX_SECONDS
+        self.exhausted = False
+
+    def spend(self) -> bool:
+        """Account for one directory visited.
+
+        Returns:
+            True while the budget lasts; False from the first visit past it.
+        """
+        self.directories_left -= 1
+        if self.directories_left < 0 or time.monotonic() > self.deadline:
+            self.exhausted = True
+        return not self.exhausted
+
+
+def typed_skill_names(prompt: Any) -> list[str]:
+    """Return the skills a prompt invokes as ``/name``, in the order typed.
+
+    Only the prompt's opening counts: its leading ``/name`` words, which may
+    follow or sit among ``@`` mentions (``@calc.py:1-3 /review-bugbot``). The
+    first other word ends it, so a skill merely mentioned later in the text is
+    not taken for a use of it.
+
+    Args:
+        prompt: ``payload.prompt`` from ``beforeSubmitPrompt``.
+
+    Returns:
+        Up to ``MAX_TYPED_SKILLS`` distinct names; empty when the prompt does
+        not open with one.
+    """
+    if not isinstance(prompt, str):
+        return []
+    names: list[str] = []
+    for word in prompt.split():
+        if word.startswith("@"):
+            continue
+        match = _TYPED_SKILL_RE.fullmatch(word)
+        if match is None:
+            break
+        if match.group(1) not in names:
+            names.append(match.group(1))
+        if len(names) >= MAX_TYPED_SKILLS:
+            break
+    return names
+
+
+def _skill_in_folder(skills_folder: str, name: str, budget: _SkillSearchBudget) -> bool:
+    """True when a skills folder holds a skill called *name*.
+
+    The skill may sit directly in the folder or under category folders; its
+    name is the folder that holds ``SKILL.md``. A skill folder that is a
+    symbolic link still counts, but linked category folders are not entered.
+
+    Args:
+        skills_folder: A skills root such as ``<project>/.cursor/skills``.
+        name: The skill name typed.
+        budget: The search budget, spent one directory at a time.
+
+    Returns:
+        True when ``<folder>/…/<name>/SKILL.md`` exists.
+    """
+    if not os.path.isdir(skills_folder):
+        return False
+    for current, dirnames, _ in os.walk(skills_folder):
+        if not budget.spend():
+            return False
+        if name in dirnames and os.path.isfile(os.path.join(current, name, "SKILL.md")):
+            return True
+        dirnames.sort()
+    return False
+
+
+def _skill_in_project(
+    project_root: str,
+    name: str,
+    folder_budget: _SkillSearchBudget,
+    walk_budget: _SkillSearchBudget,
+) -> bool:
+    """True when a project defines a skill called *name*.
+
+    The folders at the project root are checked first, then the ``skills``
+    folders under ``.cursor`` and ``.agents`` in its subdirectories. Hidden
+    directories and ``node_modules`` are not walked into.
+
+    Args:
+        project_root: A workspace root.
+        name: The skill name typed.
+        folder_budget: Budget for searching inside skills folders.
+        walk_budget: Budget for walking the project's subdirectories.
+
+    Returns:
+        True when any of those folders holds the skill.
+    """
+    for folder_parts in PROJECT_SKILL_FOLDERS:
+        if _skill_in_folder(
+            os.path.join(project_root, *folder_parts), name, folder_budget
+        ):
+            return True
+    if not os.path.isdir(project_root):
+        return False
+    for current, dirnames, _ in os.walk(project_root):
+        if not walk_budget.spend():
+            return False
+        if current != project_root:
+            for parent_name in NESTED_PROJECT_SKILL_PARENTS:
+                if parent_name in dirnames and _skill_in_folder(
+                    os.path.join(current, parent_name, "skills"), name, folder_budget
+                ):
+                    return True
+        dirnames[:] = sorted(
+            directory
+            for directory in dirnames
+            if not directory.startswith(".") and directory != "node_modules"
+        )
+    return False
+
+
+def typed_skill_records(prompt: Any, project_roots: list[str]) -> list[dict[str, str]]:
+    """Return a record for each skill a prompt invokes that exists on disk.
+
+    No Cursor hook reports a skill, so a typed ``/name`` is checked against the
+    folders Cursor loads skills from, and recorded only when one of them holds
+    a skill of that name: a custom subagent or a built-in command is typed the
+    same way. A skill the project defines takes precedence over one in the
+    user's home folders, which are searched first because they are small and a
+    slow project walk must not starve them.
+
+    Args:
+        prompt: ``payload.prompt`` from ``beforeSubmitPrompt``.
+        project_roots: The workspace roots to search.
+
+    Returns:
+        ``[{"name", "source", "invocation"}]`` with ``source`` ``"project"`` or
+        ``"user"`` and ``invocation`` ``"typed"``; empty when none resolved.
+    """
+    names = typed_skill_names(prompt)
+    if not names:
+        return []
+    home = os.path.expanduser("~")
+    # The home folders are small and fixed, so they are searched before a slow
+    # project walk can use up the deadline the budgets share.
+    user_budget = _SkillSearchBudget()
+    folder_budget = _SkillSearchBudget()
+    walk_budget = _SkillSearchBudget()
+    user_names = {
+        name
+        for name in names
+        if any(
+            _skill_in_folder(os.path.join(home, *folder_parts), name, user_budget)
+            for folder_parts in USER_SKILL_FOLDERS
+        )
+    }
+    records: list[dict[str, str]] = []
+    for name in names:
+        if any(
+            _skill_in_project(project_root, name, folder_budget, walk_budget)
+            for project_root in project_roots
+            if project_root
+        ):
+            source = "project"
+        elif name in user_names:
+            source = "user"
+        else:
+            continue
+        records.append({"name": name, "source": source, "invocation": "typed"})
+    if user_budget.exhausted or folder_budget.exhausted or walk_budget.exhausted:
+        debug_log(
+            f"typed skill search stopped early: names={len(names)} "
+            f"recorded={len(records)} reason=search-budget-used-up"
+        )
+    return records

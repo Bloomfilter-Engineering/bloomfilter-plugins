@@ -22,6 +22,17 @@
         ]
       }
     ],
+    "UserPromptExpansion": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" UserPromptExpansion; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" UserPromptExpansion",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "hooks": [

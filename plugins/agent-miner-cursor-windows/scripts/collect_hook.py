@@ -4,12 +4,14 @@ import json
 import os
 import sys
 import time
+from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
     SESSION_END_SLOT_WAIT_S,
+    UPLOAD_NOT_FILED,
     UPLOAD_OK,
     UPLOAD_RETRY_BUDGET_S,
     UPLOAD_TOO_LARGE,
@@ -28,7 +30,9 @@ from bloomfilter_common import (
     resolve_api_key,
     resolve_api_url,
     select_uploadable_prefix,
+    subagent_run_window,
     sweep_stale_batches,
+    typed_skill_records,
     upload_batch,
     upload_slot,
     utcnow_iso,
@@ -115,6 +119,38 @@ def _resolve_project_dir(payload: dict) -> str:
         if candidate:
             return candidate
     return os.getcwd()
+
+
+def _typed_skills(prompt: Any, payload: dict, project_dir: str) -> list:
+    """Return the records of the skills a prompt invokes, never raising.
+
+    A failed lookup may cost a prompt its skill record, never the prompt: the
+    prompt's envelope is appended whatever happens here.
+
+    Args:
+        prompt: The prompt text as the runtime sent it.
+        payload: The hook payload, read for ``workspace_roots``.
+        project_dir: The directory resolved for this hook.
+
+    Returns:
+        The records from ``typed_skill_records``, or [] when none resolved or
+        the lookup failed.
+    """
+    project_roots: list[str] = []
+    workspace_roots = payload.get("workspace_roots")
+    for candidate in [project_dir] + (
+        workspace_roots if isinstance(workspace_roots, list) else []
+    ):
+        if isinstance(candidate, str) and candidate and candidate not in project_roots:
+            project_roots.append(candidate)
+    try:
+        return typed_skill_records(prompt, project_roots)
+    except Exception as exception:
+        debug_log(
+            f"typed skill lookup failed: type={type(exception).__name__} "
+            f"message={exception!s}"
+        )
+        return []
 
 
 def _resolve_session_id(payload: dict) -> str:
@@ -233,6 +269,9 @@ def main() -> None:
     Reads the hook event name from ``argv[1]`` and the JSON payload from stdin,
     appends an envelope to the session's batch file, and POSTs the accumulated
     batch to the Bloomfilter API on the ``stop`` / ``sessionEnd`` hooks.
+
+    Returns:
+        None.
     """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
@@ -322,6 +361,13 @@ def main() -> None:
     if hook_event_name in GIT_BRANCH_HOOKS and project_dir:
         envelope["git_branch"] = get_git_branch(project_dir)
 
+    # A skill typed as /name reaches no hook as a skill, only as the prompt's
+    # text, so the name is looked up in the folders Cursor loads skills from.
+    if hook_event_name == "beforeSubmitPrompt":
+        skill_records = _typed_skills(payload.get("prompt"), payload, project_dir)
+        if skill_records:
+            envelope["skills"] = skill_records
+
     # Top-level cwd on sessionStart — the API's session config reads it from the
     # envelope rather than payload.workspace_roots (no list-index support).
     if hook_event_name == "sessionStart" and project_dir:
@@ -377,7 +423,8 @@ def main() -> None:
     # conversation_id (so it lands in the parent batch) but leaves
     # agent_transcript_path null — the transcript lives at
     # <parent-conversation-dir>/subagents/<child-conversation>.jsonl, discovered
-    # by matching the task. The backend turns subagent_transcript into a linked
+    # by matching the task, or, when Cursor rewrote the child's prompt, by when
+    # the child started. The backend turns subagent_transcript into a linked
     # child session keyed on payload.subagent_id. Read NOW — before the file is
     # garbage-collected. The subagent_id carries an embedded newline (the tool
     # call id plus a generation id); leave it as-is, it is stable across
@@ -386,9 +433,15 @@ def main() -> None:
         parent_transcript = payload.get("transcript_path") or os.environ.get(
             "CURSOR_TRANSCRIPT_PATH", ""
         )
+        subagent_id = payload.get("subagent_id")
         conversation = extract_subagent_conversation(
             parent_transcript,
             payload.get("task", ""),
+            session_id=session_id,
+            subagent_id=subagent_id if isinstance(subagent_id, str) else "",
+            run_window=subagent_run_window(
+                session_id, payload, envelope["received_at"]
+            ),
         )
         if conversation:
             envelope["subagent_transcript"] = conversation
@@ -504,6 +557,18 @@ def main() -> None:
                     "reason=single-envelope-exceeds-server-limit"
                 )
                 drop_leading_entries(session_id, 1)
+                return
+
+            # Accepted but filed under no session: nothing in the batch opens
+            # one and no earlier upload did. Typically that is a subagent's own
+            # conversation whose transcript the parent's subagentStop did not
+            # match — its tool outputs and thinking exist only here. Keep it;
+            # the stale-batch sweep removes it after BATCH_MAX_AGE_SECONDS.
+            if upload_result == UPLOAD_NOT_FILED:
+                debug_log(
+                    f"upload kept: hook={hook_event_name} session_id={session_id} "
+                    f"hooks={len(pending_entries)} reason=filed-under-no-session"
+                )
                 return
 
             # Record how much of the batch the collector has now seen. A runtime

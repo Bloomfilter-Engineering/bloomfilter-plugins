@@ -1,6 +1,6 @@
 {
   "name": "agent-miner-codex",
-  "version": "0.3.2",
+  "version": "0.3.3",
   "description": "Agent mining hooks for Bloomfilter (Codex on Windows, macOS, Linux, and WSL)",
   "author": {
     "name": "Bloomfilter Engineering"

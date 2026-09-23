@@ -21,7 +21,7 @@ if platform.system() == "Windows":
 else:
     import fcntl
 
-PLUGIN_VERSION = "0.2.2"
+PLUGIN_VERSION = "0.2.3"
 DEFAULT_API_URL = "https://api.bloomfilter.app"
 DEBUG_LOG_NAME = "debug.log"
 DEBUG_LOG_TAG = "claude-code-windows"  # disambiguates plugins sharing the same log dir
@@ -130,6 +130,8 @@ FOREIGN_RUNTIME_MARKERS = frozenset({"cursor_version"})
 PROTECTED_HOOK_EVENTS = frozenset(
     {
         "UserPromptSubmit",
+        # Carries the only record of a typed skill; small, and one per prompt.
+        "UserPromptExpansion",
         "Stop",
         "StopFailure",
         "SessionStart",
@@ -2530,6 +2532,56 @@ def extract_transcript_summary(transcript_path: str) -> dict[str, Any] | None:
 # doesn't bloat the batch upload. Generous enough to keep summaries intact.
 _SUBAGENT_FIELD_CAP = 10_000
 
+# Cap for the report a subagent hands back through a tool. Larger than the field
+# cap because the report is the subagent's whole result, and cutting it at the
+# field cap would drop the end of any report longer than that.
+_SUBAGENT_REPORT_CAP = 100_000
+
+# Tools a subagent delivers its report through: from Claude Code 2.1.271, a
+# subagent that runs with SubagentHandback, which Claude Code provides in auto
+# mode, hands its report back through it (code.claude.com/docs/en/hooks,
+# SubagentStop). The report is the call's `message` input; the text the subagent
+# closes with is not it.
+_HANDBACK_TOOL_NAMES = frozenset({"SubagentHandback"})
+
+
+def _cap_report(value: str) -> str:
+    """Truncate a handed-back report to :data:`_SUBAGENT_REPORT_CAP` characters.
+
+    Args:
+        value: The report text.
+
+    Returns:
+        str: The report, truncated with a marker when longer than the cap.
+    """
+    if len(value) > _SUBAGENT_REPORT_CAP:
+        return value[:_SUBAGENT_REPORT_CAP] + "…[truncated]"
+    return value
+
+
+def _preloaded_skill_name(text: str) -> str | None:
+    """Return the skill a transcript record injected, when it is a skill preload.
+
+    Claude Code writes each skill a custom agent preloads (its `skills:`
+    frontmatter) as its own user record carrying ``<command-name>…</command-name>``.
+    A forked skill's body carries no such tag — it is the subagent's task.
+
+    Args:
+        text: The record's text.
+
+    Returns:
+        str | None: The skill's name, or None when the record names none.
+    """
+    start_tag, end_tag = "<command-name>", "</command-name>"
+    start = text.find(start_tag)
+    if start < 0:
+        return None
+    end = text.find(end_tag, start + len(start_tag))
+    if end < 0:
+        return None
+    name = text[start + len(start_tag) : end].strip().lstrip("/")
+    return name or None
+
 
 def _cap_text(value: Any) -> Any:
     """Truncate a string to the subagent field cap; return it unchanged otherwise.
@@ -2626,6 +2678,96 @@ def _thinking_entry(
     return entry
 
 
+# How far back from the end of the transcript to look for the record of the prompt
+# a UserPromptSubmit just delivered. The record can reach the file after the hook
+# has read it, so the lookup is best effort, and the backend's reading of the
+# prompt's opening tag covers a miss.
+_PROMPT_ORIGIN_READ_BYTES = 262_144
+
+# The origin Claude Code writes for a prompt the user typed in an interactive
+# session. It is not a notice, so it is never reported as one.
+_TYPED_PROMPT_ORIGIN = "human"
+
+
+def read_prompt_origin(transcript_path: str, prompt: Any) -> str | None:
+    """Return the origin Claude Code recorded for a prompt, when it recorded one.
+
+    Claude Code delivers a background result, a cross-session message or a
+    webhook notice as a new prompt, and marks the prompt's transcript record with
+    ``origin: {"kind": ...}``. A prompt the user typed is marked ``human`` in an
+    interactive session and carries no origin in a headless one; neither is a
+    notice, so neither is reported. The hook payload has no such field, so the
+    record is looked up by its text. Reads only the transcript's tail and never
+    raises: a lagging, unreadable or malformed transcript just means no origin
+    is reported, and the backend falls back to the prompt's opening tag.
+
+    Args:
+        transcript_path: ``payload.transcript_path``.
+        prompt: The ``payload.prompt`` the hook delivered.
+
+    Returns:
+        str | None: The recorded origin kind, such as ``"task-notification"``,
+        or None when the prompt was typed, or its record has no origin or cannot
+        be found.
+    """
+    if (
+        not isinstance(transcript_path, str)
+        or not transcript_path
+        or not isinstance(prompt, str)
+        or not prompt
+    ):
+        return None
+    try:
+        with open(transcript_path, "rb") as transcript_file:
+            transcript_file.seek(0, os.SEEK_END)
+            size = transcript_file.tell()
+            transcript_file.seek(max(0, size - _PROMPT_ORIGIN_READ_BYTES))
+            tail = transcript_file.read()
+    except OSError:
+        return None
+    for line in reversed(tail.decode("utf-8", errors="replace").splitlines()):
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            continue
+        if not isinstance(record, dict) or record.get("type") != "user":
+            continue
+        if _user_record_text(record) != prompt:
+            continue
+        origin = record.get("origin")
+        kind = origin.get("kind") if isinstance(origin, dict) else None
+        if not isinstance(kind, str) or not kind or kind == _TYPED_PROMPT_ORIGIN:
+            return None
+        return kind
+    return None
+
+
+def _user_record_text(record: dict) -> str | None:
+    """Return the text of a transcript user record, whatever shape it has.
+
+    Args:
+        record: One decoded transcript line of type ``user``.
+
+    Returns:
+        str | None: The message content, its text blocks joined by newlines
+        when it is a list (an empty string when the list holds no text block),
+        or None when the content is neither a string nor a list.
+    """
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            block["text"]
+            for block in content
+            if isinstance(block, dict)
+            and block.get("type") == "text"
+            and isinstance(block.get("text"), str)
+        )
+    return None
+
+
 def extract_subagent_conversation(
     agent_transcript_path: str,
     expected_last_message: str | None = None,
@@ -2640,7 +2782,10 @@ def extract_subagent_conversation(
     response). ``expected_last_message`` is the SubagentStop payload's
     ``last_assistant_message`` (authoritative + complete); we poll the transcript
     (bounded by ``max_wait_s``) until its last assistant text matches, then
-    backfill the final response from it if the file still hasn't caught up.
+    backfill the final response from it if the file still hasn't caught up. A
+    report the subagent handed back through a tool then replaces that response,
+    and the turn is marked ``handback_report_applied`` so the backend keeps it
+    rather than the tool input's copy, which is cut at the smaller field cap.
 
     Args:
         agent_transcript_path: Path to the subagent (sidechain) transcript.
@@ -2679,6 +2824,19 @@ def extract_subagent_conversation(
     # a partial (non-empty) capture can't survive.
     if result and expected and not matched and result.get("turns"):
         result.get("turns")[-1]["agent_response"] = _cap_text(expected_last_message)
+    # A report handed back through a tool replaces the response only once the
+    # wait above is over. The wait compares the transcript's closing text with the
+    # hook's last_assistant_message, which is that same closing text — so swapping
+    # the report in earlier would make the wait never match, hold the hook for the
+    # full two seconds, and then overwrite the report with the closing text.
+    # Marked, so the backend does not replace it with the tool input's copy,
+    # which is cut at the smaller field cap.
+    if result and result.get("turns"):
+        for turn in result["turns"]:
+            report = turn.pop("handback_report", None)
+            if report:
+                turn["agent_response"] = report
+                turn["handback_report_applied"] = True
     return result
 
 
@@ -2690,18 +2848,26 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
     transcript and returns per-turn user_prompt/agent_response, tool calls, and
     summed token usage so the API can build a full child session.
 
-    A subagent transcript is the same JSONL format as a normal session and its
-    first user entry is the real task prompt. Normally there is a single real
-    user prompt (one turn with many tool calls), but this splits on every real
-    user prompt to stay faithful if a subagent had multiple.
+    A subagent transcript is the same JSONL format as a normal session. Its task
+    is normally the first user entry, but Claude Code also writes the context it
+    injects as ``isMeta`` user entries — preloaded skills, a forked skill's body,
+    hand-back reminders, background notices — and a fork's transcript opens
+    with the parent's last message. A new turn starts at each user prompt that
+    is not injected context, a coordinator's message to the running subagent
+    included, except that a prompt arriving while the open turn is still empty
+    becomes that turn's prompt. Injected context fills a turn that has no prompt
+    yet and never splits one, a preloaded skill is recorded under ``skills``
+    rather than taken as the prompt, and a fork's inherited parent message
+    opens no turn.
 
     Args:
         agent_transcript_path: Path to the subagent (sidechain) transcript.
 
     Returns:
-        ``{"turns": [ {user_prompt, agent_response, tool_calls, model,
+        ``{"turns": [ {user_prompt, agent_response, tool_calls, thinking, model,
         response_id, input_tokens, output_tokens, cache_read_tokens,
-        cache_creation_tokens, started_at, ended_at} ]}``, or None when the
+        cache_creation_tokens, started_at, ended_at} ]}`` — a turn also carries
+        ``skills`` and ``handback_report`` when it has them — or None when the
         transcript is missing, unreadable, or holds no turns.
     """
     if not agent_transcript_path or not os.path.exists(agent_transcript_path):
@@ -2804,7 +2970,85 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
             turn.update(totals)
             turn["tool_calls"] = list(turn.pop("_tool_calls_by_id", {}).values())
             turn["thinking"] = turn.pop("_thinking", [])
+            skills = turn.pop("_skills", [])
+            if skills:
+                turn["skills"] = skills
+            report = turn.pop("_handback_report", None)
+            if report:
+                turn["handback_report"] = report
             return turn
+
+        def _new_turn(prompt: str | None, timestamp: str | None) -> dict[str, Any]:
+            """Open a turn accumulator.
+
+            Args:
+                prompt (str | None): The prompt that opens it; None for a turn
+                    opened by activity alone.
+                timestamp (str | None): When it opens.
+
+            Returns:
+                dict[str, Any]: The accumulator ``_finalize`` expects.
+            """
+            return {
+                "user_prompt": _cap_text(prompt) if prompt is not None else None,
+                "agent_response": None,
+                "model": "",
+                "response_id": "",
+                "started_at": timestamp,
+                "ended_at": timestamp,
+                "_usage_by_id": {},
+                "_tool_calls_by_id": {},
+                "_thinking": [],
+                "_skills": [],
+                "_handback_report": None,
+            }
+
+        def _is_empty(turn: dict[str, Any]) -> bool:
+            """Whether a turn holds nothing yet but preloaded context.
+
+            Args:
+                turn (dict[str, Any]): A turn accumulator.
+
+            Returns:
+                bool: True when it has no prompt, response, usage, tool call or
+                thinking.
+            """
+            return not (
+                turn["user_prompt"]
+                or turn["agent_response"]
+                or turn["_usage_by_id"]
+                or turn["_tool_calls_by_id"]
+                or turn["_thinking"]
+            )
+
+        def _is_injected(entry: dict[str, Any]) -> bool:
+            """Whether a user record is context Claude Code injected, not a message.
+
+            Claude Code marks what it injects with ``isMeta`` — preloaded skills,
+            a forked skill's body, hand-back reminders, background notices. None
+            of those starts a new turn. A coordinator's message to a running
+            subagent is marked the same way but is a real new message, so it
+            does.
+
+            Args:
+                entry (dict[str, Any]): A user record.
+
+            Returns:
+                bool: True when the record is injected context.
+            """
+            if not entry.get("isMeta"):
+                return False
+            origin = entry.get("origin")
+            return not (
+                isinstance(origin, dict) and origin.get("kind") == "coordinator"
+            )
+
+        # A fork's transcript opens with the parent's own last message, which the
+        # parent's transcript already bills. The marker record says it is a fork.
+        is_fork = any(
+            isinstance(entry, dict) and entry.get("type") == "fork-context-ref"
+            for entry in entries
+        )
 
         previous_timestamp = None
         for entry in entries:
@@ -2818,34 +3062,43 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                 previous_timestamp = timestamp
 
             if _is_real_user_prompt(entry):
+                text = _user_text(entry)
+                if _is_injected(entry):
+                    # Fills a turn that has no prompt yet — a forked skill's body is
+                    # its only task — and never splits one that has. A preload is
+                    # recorded as a skill use rather than taken as the prompt.
+                    preloaded_skill = _preloaded_skill_name(text)
+                    if current is None:
+                        current = _new_turn(
+                            None if preloaded_skill else text, timestamp
+                        )
+                    elif not preloaded_skill and not current["user_prompt"]:
+                        current["user_prompt"] = _cap_text(text)
+                    if preloaded_skill:
+                        current["_skills"].append(
+                            {"name": preloaded_skill, "invocation": "preloaded"}
+                        )
+                    continue
+                if current is not None and _is_empty(current):
+                    # Opened by injected context alone; the task is its prompt.
+                    current["user_prompt"] = _cap_text(text)
+                    continue
                 if current is not None:
                     turns.append(_finalize(current))
-                current = {
-                    "user_prompt": _cap_text(_user_text(entry)),
-                    "agent_response": None,
-                    "model": "",
-                    "response_id": "",
-                    "started_at": timestamp,
-                    "ended_at": timestamp,
-                    "_usage_by_id": {},
-                    "_tool_calls_by_id": {},
-                    "_thinking": [],
-                }
+                current = _new_turn(text, timestamp)
                 continue
 
             if current is None:
+                is_assistant_entry = (
+                    entry_type == "assistant" or message.get("role") == "assistant"
+                )
+                # Bookkeeping records (attachments, the fork marker) and tool
+                # results with no call to attach to open no turn. Nor does a fork's
+                # inherited parent message: its usage is the parent's.
+                if not is_assistant_entry or is_fork:
+                    continue
                 # Tool activity before any real prompt — start an implicit turn.
-                current = {
-                    "user_prompt": None,
-                    "agent_response": None,
-                    "model": "",
-                    "response_id": "",
-                    "started_at": timestamp,
-                    "ended_at": timestamp,
-                    "_usage_by_id": {},
-                    "_tool_calls_by_id": {},
-                    "_thinking": [],
-                }
+                current = _new_turn(None, timestamp)
 
             if timestamp:
                 current["ended_at"] = timestamp
@@ -2912,6 +3165,15 @@ def _parse_subagent_transcript(agent_transcript_path: str) -> dict | None:
                                     "tool_call_id": block.get("id", ""),
                                     "started_at": timestamp,
                                 }
+                                handback_input = block.get("input")
+                                if block.get("name") in _HANDBACK_TOOL_NAMES and (
+                                    isinstance(handback_input, dict)
+                                ):
+                                    report = handback_input.get("message")
+                                    if isinstance(report, str) and report.strip():
+                                        current["_handback_report"] = _cap_report(
+                                            report
+                                        )
                 elif isinstance(content, str) and content:
                     current["agent_response"] = _cap_text(content)
             else:
