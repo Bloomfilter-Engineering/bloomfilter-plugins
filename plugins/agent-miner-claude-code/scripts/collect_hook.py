@@ -25,6 +25,7 @@ from bloomfilter_common import (
     get_git_branch,
     is_foreign_runtime_payload,
     read_batch,
+    read_prompt_origin,
     read_payload,
     resolve_api_key,
     resolve_api_url,
@@ -81,6 +82,9 @@ def main() -> None:
     that makes the invocation unusable — no event name, a non-object payload, no
     session id, no API key — is recorded in the debug log and returns quietly,
     because a telemetry collector must never disturb the host.
+
+    Returns:
+        None.
     """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if not hook_event_name:
@@ -175,6 +179,16 @@ def main() -> None:
         transcript_summary = extract_transcript_summary(transcript_path)
         if transcript_summary:
             envelope["transcript_summary"] = transcript_summary
+
+    # A prompt Claude Code delivered itself (a background result, a webhook or
+    # cross-session notice) is marked as such in the transcript, never in the
+    # hook payload, so the backend is told here.
+    if hook_event_name == "UserPromptSubmit":
+        prompt_origin = read_prompt_origin(
+            payload.get("transcript_path", ""), payload.get("prompt")
+        )
+        if prompt_origin:
+            envelope["prompt_origin"] = prompt_origin
 
     # On SubagentStop, capture the subagent's own (sidechain) transcript so the
     # API can build a full child session. Read it NOW — these files are

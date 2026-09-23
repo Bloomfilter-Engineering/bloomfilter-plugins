@@ -10,10 +10,12 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from bloomfilter_common import (
     PLUGIN_VERSION,
+    REVIEW_LOCK_SUFFIX,
     UPLOAD_OK,
     UPLOAD_RETRY_BUDGET_S,
     UPLOAD_TOO_LARGE,
     append_to_batch,
+    batch_sidecar_lock,
     bootstrap_config,
     clear_batch,
     debug_log,
@@ -30,7 +32,16 @@ from bloomfilter_common import (
     upload_batch,
     utcnow_iso,
 )
-from codex_rollout import parse_session_meta, parse_turn
+from codex_rollout import (
+    later_timestamp,
+    mentioned_skill_records,
+    parse_session_meta,
+    parse_turn,
+    review_findings,
+    review_outcome,
+    review_thread,
+    subagent_spawn_details,
+)
 
 SUPPORTED_HOOKS: set[str] = {
     "SessionStart",
@@ -80,6 +91,16 @@ SESSION_META_HOOKS: set[str] = {"SessionStart"}
 # rollout path (agent_transcript_path); we parse that into a child conversation
 # and attach it so the API builds a linked child session.
 SUBAGENT_STOP_HOOK: str = "SubagentStop"
+# A `/review` runs as its own thread whose hooks fire under the reviewing
+# session's id, pointing `transcript_path` at the review's own rollout. These are
+# the hooks it fires; Codex fires no start, stop or turn end for it at all.
+REVIEW_HOOKS: set[str] = {
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+}
+REVIEW_AGENT_TYPE: str = "review"
 
 
 def _first_string(candidates: list[Any]) -> str:
@@ -223,6 +244,9 @@ def main() -> None:
     Unsupported events and payloads belonging to another runtime return
     without touching the batch. Every failure is swallowed by the caller's
     guard, so this must never raise into the host.
+
+    Returns:
+        None.
     """
     hook_event_name = sys.argv[1] if len(sys.argv) > 1 else ""
     if hook_event_name not in SUPPORTED_HOOKS:
@@ -287,6 +311,22 @@ def main() -> None:
 
     transcript_path = payload.get("transcript_path", "")
     turn_id = payload.get("turn_id", "")
+
+    # A review's prompt keeps its turn in this session; the review's own tool
+    # calls are tagged as the review's so the backend does not take them for
+    # this session's. The upload path supplies the envelopes Codex never fires
+    # for a review once its rollout says it has finished.
+    if (
+        hook_event_name in REVIEW_HOOKS
+        and transcript_path
+        and session_id not in os.path.basename(transcript_path)
+    ):
+        review_thread_id = review_thread(transcript_path, session_id)
+        if review_thread_id and hook_event_name == "UserPromptSubmit":
+            envelope["review_rollout"] = transcript_path
+        elif review_thread_id:
+            payload["agent_id"] = review_thread_id
+            payload["agent_type"] = REVIEW_AGENT_TYPE
 
     # Enrich SessionStart with rollout-level metadata (cli_version, originator).
     # The rollout file usually exists by the time SessionStart fires.
@@ -360,12 +400,17 @@ def main() -> None:
 
             api_calls = parsed_turn.get("api_calls") or []
             time_to_first_token_ms = parsed_turn.get("time_to_first_token_ms")
-            if api_calls or time_to_first_token_ms is not None:
+            # A `$skill` mention: Codex injects the skill's instructions into the
+            # turn as a `<skill>` message, which only the rollout records.
+            skill_records = mentioned_skill_records(parsed_turn)
+            if api_calls or time_to_first_token_ms is not None or skill_records:
                 transcript_summary: dict[str, Any] = {"api_calls": api_calls}
                 if time_to_first_token_ms is not None:
                     transcript_summary["time_to_first_token_ms"] = (
                         time_to_first_token_ms
                     )
+                if skill_records:
+                    transcript_summary["skills"] = skill_records
                 envelope["transcript_summary"] = transcript_summary
 
             for thinking_block in parsed_turn.get("thinking_blocks", []) or []:
@@ -451,12 +496,17 @@ def main() -> None:
     # with the parent on Stop; the API turns it into a linked child
     # session. Read NOW — the subagent's rollout may be garbage-collected later.
     if hook_event_name == SUBAGENT_STOP_HOOK:
+        agent_transcript_path = payload.get("agent_transcript_path", "")
         conversation = extract_subagent_conversation(
-            payload.get("agent_transcript_path", ""),
+            agent_transcript_path,
             expected_last_message=payload.get("last_assistant_message"),
+            parent_transcript_path=transcript_path,
         )
         if conversation:
             envelope["subagent_transcript"] = conversation
+        # The subagent's task name, and for a nested one the subagent that
+        # spawned it — both only in the subagent's own rollout.
+        envelope.update(subagent_spawn_details(agent_transcript_path, session_id))
 
     append_to_batch(session_id, envelope)
 
@@ -489,12 +539,171 @@ def main() -> None:
         _upload_session_batch(session_id)
 
 
+def _append_finished_reviews(session_id: str) -> None:
+    """Supply the envelopes Codex never fires for a `/review` that has finished.
+
+    Codex runs a review as its own thread and fires no start, stop or turn end
+    for it, so without these the review is attached to nothing and its turn in
+    this session never closes. For every review prompt in the batch whose
+    rollout records completion, this appends what the backend already knows how
+    to link: a start/stop pair carrying the parsed review — its tool calls, its
+    findings and its tokens, as a child session — and a `Stop` that closes the
+    reviewing session's turn with the findings its own rollout recorded.
+
+    Idempotent: a review already given a stop in this batch is skipped, so the
+    cumulative re-send of this batch never supplies it twice, and the whole
+    check-then-append runs under a lock, so two uploads starting at once cannot
+    both supply it. A review still running is left for a later upload. Every
+    appended envelope is marked ``synthesized`` so it can be told from one Codex
+    fired.
+
+    Args:
+        session_id: The reviewing session.
+
+    Returns:
+        None.
+    """
+    with batch_sidecar_lock(session_id, REVIEW_LOCK_SUFFIX) as locked:
+        if not locked:
+            debug_log(
+                f"review supply skipped: session_id={session_id} "
+                "reason=lock-unavailable"
+            )
+            return
+        _supply_finished_reviews(session_id)
+
+
+def _supply_finished_reviews(session_id: str) -> None:
+    """Append the envelopes for every finished review not yet supplied.
+
+    Called only with the review lock held. A review counts as supplied when the
+    batch holds its stop or the turn end that closed it: the turn end is never
+    shed, so a review whose stop was evicted is not supplied again.
+
+    Args:
+        session_id: The reviewing session.
+
+    Returns:
+        None.
+    """
+    entries = read_batch(session_id)
+    supplied = {
+        (entry.get("payload") or {}).get("agent_id")
+        for entry in entries
+        if entry.get("hook_event_name") == SUBAGENT_STOP_HOOK
+    } | {
+        entry.get("review_thread_id")
+        for entry in entries
+        if entry.get("hook_event_name") == "Stop" and entry.get("review_thread_id")
+    }
+    session_rollout = ""
+    for entry in entries:
+        candidate = (entry.get("payload") or {}).get("transcript_path")
+        if isinstance(candidate, str) and session_id in os.path.basename(candidate):
+            session_rollout = candidate
+            break
+
+    for entry in entries:
+        review_rollout = entry.get("review_rollout")
+        if entry.get("hook_event_name") != "UserPromptSubmit" or not isinstance(
+            review_rollout, str
+        ):
+            continue
+        review_thread_id = review_thread(review_rollout, session_id)
+        if not review_thread_id or review_thread_id in supplied:
+            continue
+        outcome = review_outcome(review_rollout)
+        if outcome is None:
+            continue
+        prompt_payload = entry.get("payload") or {}
+        review_turn_id = prompt_payload.get("turn_id") or ""
+        common = {
+            "session_id": session_id,
+            "turn_id": review_turn_id,
+            "permission_mode": prompt_payload.get("permission_mode", ""),
+        }
+        review = {"agent_id": review_thread_id, "agent_type": REVIEW_AGENT_TYPE}
+        started_at = later_timestamp(
+            [entry.get("received_at"), outcome["started_at"]], add_milliseconds=1
+        )
+        ended_at = later_timestamp(
+            [started_at, outcome["ended_at"]], add_milliseconds=1
+        )
+        findings = (
+            review_findings(session_rollout, review_turn_id) if session_rollout else ""
+        )
+
+        append_to_batch(
+            session_id,
+            {
+                "hook_event_name": "SubagentStart",
+                "received_at": started_at,
+                "plugin_version": PLUGIN_VERSION,
+                "synthesized": True,
+                "payload": {
+                    **common,
+                    **review,
+                    "hook_event_name": "SubagentStart",
+                    "transcript_path": review_rollout,
+                },
+            },
+        )
+        stop_envelope: dict[str, Any] = {
+            "hook_event_name": SUBAGENT_STOP_HOOK,
+            "received_at": ended_at,
+            "plugin_version": PLUGIN_VERSION,
+            "synthesized": True,
+            "subagent_label": REVIEW_AGENT_TYPE,
+            "payload": {
+                **common,
+                **review,
+                "hook_event_name": SUBAGENT_STOP_HOOK,
+                "transcript_path": session_rollout,
+                "agent_transcript_path": review_rollout,
+                "last_assistant_message": outcome["last_agent_message"],
+            },
+        }
+        conversation = extract_subagent_conversation(
+            review_rollout, parent_transcript_path=session_rollout
+        )
+        if conversation:
+            stop_envelope["subagent_transcript"] = conversation
+        append_to_batch(session_id, stop_envelope)
+        append_to_batch(
+            session_id,
+            {
+                "hook_event_name": "Stop",
+                "received_at": later_timestamp([ended_at], add_milliseconds=1),
+                "plugin_version": PLUGIN_VERSION,
+                "synthesized": True,
+                "review_thread_id": review_thread_id,
+                "agent_response": findings,
+                "transcript_summary": {"api_calls": []},
+                "payload": {
+                    **common,
+                    "hook_event_name": "Stop",
+                    "transcript_path": session_rollout,
+                    "stop_hook_active": False,
+                    "last_assistant_message": findings,
+                },
+            },
+        )
+        supplied.add(review_thread_id)
+        debug_log(
+            f"review supplied: session_id={session_id} review={review_thread_id} "
+            f"turns={len((conversation or {}).get('turns') or [])} "
+            f"findings_chars={len(findings)}"
+        )
+
+
 def _upload_session_batch(session_id: str) -> None:
     """Ship as much of one session's batch as fits, and record what landed.
 
     Shared by the inline path and by the detached child, so both drive the
     identical sequence. Takes no payload: everything it needs is already in the
-    batch file, which is what lets the detached child run without stdin.
+    batch file, which is what lets the detached child run without stdin. Before
+    uploading, it appends the envelopes of any finished ``/review`` the batch
+    does not hold yet (:func:`_append_finished_reviews`).
 
     Args:
         session_id: Session whose batch is uploaded.
@@ -506,6 +715,16 @@ def _upload_session_batch(session_id: str) -> None:
     if not api_key:
         debug_log(f"upload skipped: session_id={session_id} reason=no-api-key")
         return
+
+    # A review that cannot be supplied must not cost the session its upload:
+    # this runs before every request, so an error here would block them all.
+    try:
+        _append_finished_reviews(session_id)
+    except Exception as exception:
+        debug_log(
+            f"review supply failed: session_id={session_id} "
+            f"type={type(exception).__name__} message={exception!s}"
+        )
 
     # Cumulative read — never truncate mid-session. This runtime supplies no
     # stable per-turn identity of its own, so a turn is identified by its

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Iterator
 
 
@@ -119,6 +119,249 @@ def parse_session_meta(path: str) -> dict[str, str]:
     return {}
 
 
+def _first_session_meta(path: str) -> dict[str, Any]:
+    """Return the payload of a rollout's first ``session_meta`` record.
+
+    A subagent spawned with its parent's history replays the parent's
+    ``session_meta`` after its own, so only the first one describes the thread
+    the file belongs to.
+
+    Args:
+        path: Rollout JSONL file to read.
+
+    Returns:
+        The first ``session_meta`` payload, or an empty dict when the file has
+        none or cannot be read.
+    """
+    try:
+        for entry in _read_lines(path):
+            if entry.get("type") == "session_meta":
+                payload = entry.get("payload")
+                return payload if isinstance(payload, dict) else {}
+    except OSError:
+        return {}
+    return {}
+
+
+def rollout_turn_ids(path: str) -> set[str]:
+    """Return every turn id a rollout records a ``turn_context`` for.
+
+    Args:
+        path: Rollout JSONL file to read.
+
+    Returns:
+        The turn ids; empty when the path is blank or unreadable.
+    """
+    if not path:
+        return set()
+    try:
+        return set(_iter_turn_ids(list(_read_lines(path))))
+    except OSError:
+        return set()
+
+
+def subagent_spawn_details(path: str, root_session_id: str) -> dict[str, Any]:
+    """Describe a subagent from its own rollout: a label, and who spawned it.
+
+    Codex fills a subagent's type with its profile — ``default`` unless one was
+    chosen — so its task name, the last part of ``agent_path``
+    (``/root/mid/nested`` → ``nested``), is a far better label. A nested
+    subagent's ``parent_thread_id`` is the subagent that spawned it, not the
+    root session every subagent is attached to.
+
+    Args:
+        path: The subagent's rollout (``agent_transcript_path``).
+        root_session_id: The session the subagent's hooks fire under.
+
+    Returns:
+        ``subagent_label``, plus ``spawned_by_agent_id`` and ``spawn_depth`` for
+        a nested subagent; only the keys the rollout supports are present.
+    """
+    meta = _first_session_meta(path) if path else {}
+    source = meta.get("source")
+    details: dict[str, Any] = {}
+    if isinstance(source, dict) and source.get("subagent") == "review":
+        details["subagent_label"] = "review"
+        return details
+    spawn = (source or {}).get("subagent") if isinstance(source, dict) else None
+    spawn = spawn.get("thread_spawn") if isinstance(spawn, dict) else None
+    if not isinstance(spawn, dict):
+        return details
+    agent_path = spawn.get("agent_path")
+    if isinstance(agent_path, str) and agent_path.strip("/"):
+        details["subagent_label"] = agent_path.strip("/").split("/")[-1]
+    elif isinstance(spawn.get("agent_nickname"), str) and spawn["agent_nickname"]:
+        details["subagent_label"] = spawn["agent_nickname"]
+    parent_thread_id = spawn.get("parent_thread_id")
+    depth = spawn.get("depth")
+    if (
+        isinstance(parent_thread_id, str)
+        and parent_thread_id
+        and parent_thread_id != root_session_id
+    ):
+        details["spawned_by_agent_id"] = parent_thread_id
+        if isinstance(depth, int) and not isinstance(depth, bool) and depth >= 2:
+            details["spawn_depth"] = depth
+    return details
+
+
+def review_thread(path: str, session_id: str) -> str | None:
+    """Return the review thread a hook's rollout belongs to, if it is one.
+
+    A Codex ``/review`` runs as its own thread whose hooks fire under the
+    reviewing session's id but point ``transcript_path`` at the review's own
+    rollout, whose ``session_meta`` says ``source: {"subagent": "review"}`` and
+    names that session as ``parent_thread_id``.
+
+    Args:
+        path: The hook's ``transcript_path``.
+        session_id: The session the hook fired under.
+
+    Returns:
+        The review thread's id, or None for any other rollout.
+    """
+    meta = _first_session_meta(path) if path else {}
+    source = meta.get("source")
+    if not (isinstance(source, dict) and source.get("subagent") == "review"):
+        return None
+    if meta.get("parent_thread_id") != session_id:
+        return None
+    thread_id = meta.get("id")
+    return thread_id if isinstance(thread_id, str) and thread_id else None
+
+
+def review_outcome(path: str) -> dict[str, Any] | None:
+    """Return how a review thread ended, once it has.
+
+    Args:
+        path: The review thread's rollout.
+
+    Returns:
+        ``started_at`` / ``ended_at`` (ISO strings) and ``last_agent_message``
+        once the rollout records a ``task_complete``; None while the review is
+        still running or when the file cannot be read.
+    """
+    started_at = None
+    try:
+        for entry in _read_lines(path):
+            payload = entry.get("payload") or {}
+            if entry.get("type") != "event_msg":
+                continue
+            if payload.get("type") == "task_started" and started_at is None:
+                started_at = entry.get("timestamp")
+            elif payload.get("type") == "task_complete":
+                message = payload.get("last_agent_message")
+                return {
+                    "started_at": started_at or entry.get("timestamp"),
+                    "ended_at": entry.get("timestamp"),
+                    "last_agent_message": message if isinstance(message, str) else "",
+                }
+    except OSError:
+        return None
+    return None
+
+
+def review_findings(path: str, review_turn_id: str) -> str:
+    """Return the findings a review's parent session recorded for it.
+
+    The reviewing session's rollout holds no ``turn_context`` for a review — only
+    a ``task_started`` naming the review's turn, then the formatted findings as
+    an assistant message — so the ordinary turn parser never reaches them.
+
+    Args:
+        path: The reviewing session's own rollout.
+        review_turn_id: The review thread's turn id.
+
+    Returns:
+        The findings text, or "" when the rollout does not hold them yet.
+    """
+    started = False
+    try:
+        for entry in _read_lines(path):
+            payload = entry.get("payload") or {}
+            if (
+                entry.get("type") == "event_msg"
+                and payload.get("type") == "task_started"
+                and payload.get("turn_id") == review_turn_id
+            ):
+                started = True
+                continue
+            if not started or entry.get("type") != "response_item":
+                continue
+            if payload.get("type") != "message" or payload.get("role") != "assistant":
+                continue
+            texts = [
+                block.get("text")
+                for block in payload.get("content") or []
+                if isinstance(block, dict)
+                and block.get("type") == "output_text"
+                and block.get("text")
+            ]
+            if texts:
+                return "\n".join(texts)
+    except OSError:
+        return ""
+    return ""
+
+
+def later_timestamp(timestamps: list[str | None], add_milliseconds: int = 0) -> str:
+    """Return a UTC ISO timestamp just after the latest of *timestamps*.
+
+    The backend orders an upload's envelopes by comparing ``received_at`` as
+    strings, and rollouts write ``…Z`` where envelopes write ``…+00:00`` — so a
+    rollout timestamp copied verbatim sorts after the same instant written the
+    other way. Everything this returns is in the envelopes' own format.
+
+    Args:
+        timestamps: Candidate ISO timestamps, in either format; unparseable ones
+            are ignored.
+        add_milliseconds: How far past the latest one to land.
+
+    Returns:
+        The latest candidate plus the offset, formatted like the envelopes'
+        ``received_at``; the current time plus the offset when none of them
+        parses.
+    """
+    parsed = [
+        moment.astimezone(timezone.utc)
+        for moment in (_parse_iso(timestamp) for timestamp in timestamps)
+        if moment is not None and moment.tzinfo is not None
+    ]
+    latest = max(parsed) if parsed else datetime.now(timezone.utc)
+    return (latest + timedelta(milliseconds=add_milliseconds)).isoformat(
+        timespec="microseconds"
+    )
+
+
+def _skill_mentions(text: str) -> list[str]:
+    """Return the skills Codex injected into a turn for a ``$skill`` mention.
+
+    Codex answers an explicit ``$skill`` mention by adding a user message
+    carrying ``<skill><name>…</name><path>…</path>…</skill>``. A skill the model
+    merely decides to read gets no such message, so none is reported for it.
+
+    Args:
+        text: A user message's text.
+
+    Returns:
+        The names of the injected skills, in order.
+    """
+    names = []
+    cursor = 0
+    while True:
+        start = text.find("<skill>", cursor)
+        if start < 0:
+            return names
+        name_start = text.find("<name>", start)
+        name_end = text.find("</name>", name_start) if name_start >= 0 else -1
+        if name_start < 0 or name_end < 0:
+            return names
+        name = text[name_start + len("<name>") : name_end].strip()
+        if name:
+            names.append(name)
+        cursor = name_end + len("</name>")
+
+
 def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
     """Walk the rollout and extract per-turn data for the given turn_id.
 
@@ -133,6 +376,8 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
                                  transcript_summary.api_calls, using the API's field names.
         model                  — the model recorded for this turn's turn_context.
         time_to_first_token_ms — captured from event_msg.task_complete.
+        skills                 — names of the skills Codex injected for the
+                                 turn's ``$skill`` mentions.
 
     Args:
         path: Rollout JSONL file to read.
@@ -147,7 +392,9 @@ def parse_turn(path: str, turn_id: str) -> dict[str, Any]:
     return _build_turn(list(_read_lines(path)), turn_id)
 
 
-def parse_transcript(path: str) -> dict[str, Any]:
+def parse_transcript(
+    path: str, exclude_turn_ids: set[str] | None = None
+) -> dict[str, Any]:
     """Build a normalized subagent transcript from a whole Codex rollout.
 
     Returns ``{"turns": [...]}`` — one turn per ``turn_context`` turn_id, in
@@ -157,17 +404,27 @@ def parse_transcript(path: str) -> dict[str, Any]:
     ``token_count`` events, matching how the main-session path aggregates
     ``api_calls``. The rollout is read once and reused across all turns.
 
+    A subagent spawned with its parent's history (``fork_turns`` omitted, or
+    ``"all"``) replays every earlier parent turn at the top of its own rollout;
+    one spawned with ``fork_turns: "none"`` replays none. Excluding the parent's
+    turn ids by identity handles both, where dropping a fixed number of leading
+    turns would delete the only real turn of the second kind.
+
     Args:
         path: Rollout JSONL file to read.
+        exclude_turn_ids: Turn ids that belong to another thread — the parent's
+            — and so are not this subagent's work.
 
     Returns:
         ``{"turns": [...]}`` — one turn per ``turn_context`` turn_id, in
         first-seen order. The list is empty when the rollout records no turns.
     """
     entries = list(_read_lines(path))
+    excluded = exclude_turn_ids or set()
     turns = [
         _to_subagent_turn(_build_turn(entries, turn_id))
         for turn_id in _iter_turn_ids(entries)
+        if turn_id not in excluded
     ]
     return {"turns": turns}
 
@@ -203,7 +460,8 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
 
     Returns:
         The same turn in the backend's child-turn shape: prompt, response,
-        per-turn token totals and tool calls.
+        per-turn token totals and tool calls, plus ``skills`` when the turn
+        mentioned any.
     """
     api_calls = turn.get("api_calls") or []
     input_tokens = sum(
@@ -225,7 +483,7 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
         }
         for tool_call in (turn.get("tool_calls") or [])
     ]
-    return {
+    subagent_turn = {
         "started_at": turn.get("started_at") or "",
         "ended_at": turn.get("ended_at") or "",
         "model": turn.get("model") or "",
@@ -237,6 +495,23 @@ def _to_subagent_turn(turn: dict[str, Any]) -> dict[str, Any]:
         "cache_creation_tokens": 0,
         "tool_calls": tool_calls,
     }
+    skill_records = mentioned_skill_records(turn)
+    if skill_records:
+        subagent_turn["skills"] = skill_records
+    return subagent_turn
+
+
+def mentioned_skill_records(turn: dict[str, Any]) -> list[dict[str, str]]:
+    """Return the backend's skill records for a turn's ``$skill`` mentions.
+
+    Args:
+        turn: A :func:`_build_turn` result.
+
+    Returns:
+        One ``{"name", "invocation": "mentioned"}`` record per distinct skill.
+    """
+    names = list(dict.fromkeys(turn.get("skills") or []))
+    return [{"name": name, "invocation": "mentioned"} for name in names]
 
 
 def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
@@ -262,6 +537,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
     turn_collaboration_mode: str = ""
     assistant_chunks: list[str] = []
     assistant_messages: list[dict[str, Any]] = []
+    skill_names: list[str] = []
     turn_started_at: datetime | None = None
     turn_ended_at: datetime | None = None
     user_prompt_text: str = ""
@@ -404,6 +680,16 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
                 match response_subtype:
                     case "message":
                         content_blocks = payload.get("content") or []
+                        if payload.get("role") == "user":
+                            for content_block in content_blocks:
+                                if (
+                                    isinstance(content_block, dict)
+                                    and content_block.get("type") == "input_text"
+                                    and isinstance(content_block.get("text"), str)
+                                ):
+                                    skill_names.extend(
+                                        _skill_mentions(content_block["text"])
+                                    )
                         message_texts = [
                             content_block.get("text")
                             for content_block in content_blocks
@@ -536,6 +822,7 @@ def _build_turn(entries: list[dict[str, Any]], turn_id: str) -> dict[str, Any]:
         "time_to_first_token_ms": time_to_first_token_ms,
         "user_prompt": user_prompt_text or None,
         "assistant_messages": assistant_messages,
+        "skills": skill_names,
         "started_at": _to_iso(turn_started_at),
         "ended_at": _to_iso(turn_ended_at),
     }
@@ -559,6 +846,7 @@ def _empty_turn() -> dict[str, Any]:
         "time_to_first_token_ms": None,
         "user_prompt": None,
         "assistant_messages": [],
+        "skills": [],
         "started_at": "",
         "ended_at": "",
     }
