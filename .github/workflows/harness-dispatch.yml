@@ -1,17 +1,9 @@
-# Starts the plugin test harness for every pull request. The harness lives in a
-# separate internal repository, named by repository variables so this file does
-# not have to know it; all it passes along is which commit to test. Needs:
-#   secret   HARNESS_REPO       the harness repository's name (same owner). A
-#                               secret, not a variable: GitHub masks secrets in
-#                               this public repository's run logs and does not
-#                               mask variables.
-#   variable HARNESS_WORKFLOW   the workflow file to start there
-#   secret   HARNESS_DISPATCH_TOKEN  a fine-grained token with Actions: read and
-#                                    write on that repository (expires yearly)
+# Starts the plugin test harness (an internal repository, named by the
+# HARNESS_REPO secret) for every pull request, passing along the commit to test.
 #
-# pull_request_target on purpose: the copy of this file on main runs, so a pull
-# request cannot rewrite it to read the token. Safe only because this workflow
-# checks out nothing and executes nothing from the pull request; keep it so.
+# pull_request_target: the copy of this file on main runs, so a pull request
+# cannot change it to read the token. Never add a checkout of, or a script
+# from, the pull request to this workflow.
 name: harness-dispatch
 
 on:
@@ -21,10 +13,13 @@ on:
 
 permissions: {}
 
+# One dispatch at a time per pull request.
+concurrency:
+  group: harness-dispatch-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   dispatch:
-    # Pull requests from forks are not started automatically; a maintainer
-    # reads the diff first and starts the harness by hand.
     if: github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -41,8 +36,6 @@ jobs:
             echo "::error title=Harness dispatch is not configured::Set the secret HARNESS_REPO and the variable HARNESS_WORKFLOW under Settings > Secrets and variables > Actions."
             exit 1
           fi
-      # Fine-grained tokens live at most one year. When this one expires the
-      # failure must say so by name, not look like a broken workflow.
       - name: Credential check (HARNESS_DISPATCH_TOKEN)
         run: |
           fail() {
@@ -73,5 +66,6 @@ jobs:
         run: |
           gh api -X POST "repos/$TARGET_REPO/actions/workflows/$TARGET_WORKFLOW/dispatches" \
             -f ref=main \
+            -f "inputs[pr]=${{ github.event.pull_request.number }}" \
             -f "inputs[head_sha]=${{ github.event.pull_request.head.sha }}" \
             -f "inputs[head_repo]=${{ github.event.pull_request.head.repo.full_name }}"

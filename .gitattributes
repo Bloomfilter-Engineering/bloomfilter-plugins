@@ -1,7 +1,5 @@
-# The launchers and manifests must reach every client byte-for-byte. A Windows
-# git client with core.autocrlf=true (the Git for Windows default) would
-# otherwise check run-hook.sh out with CRLF endings, which sh rejects at the
-# first `then`, and rewrite hooks.json, which Codex hashes for plugin trust.
+# Launchers and manifests must reach every client with LF endings, whatever
+# the client's git line-ending setting is.
 *.sh    text eol=lf
 *.ps1   text eol=lf
 *.json  text eol=lf
