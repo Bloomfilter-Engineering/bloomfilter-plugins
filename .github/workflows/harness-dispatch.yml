@@ -1,0 +1,66 @@
+# Source of truth: docs/plugins-repo/harness-dispatch-minimal.yml in bloomfilter-plugins-harness.
+#
+# The minimal variant: start the harness in bloomfilter-plugins-harness for
+# every pull request, nothing reported back onto the pull request. Needs one
+# secret, HARNESS_DISPATCH_TOKEN: a fine-grained personal access token with
+# "Actions: read and write" on bloomfilter-plugins-harness. The run and its
+# result live in that repository's Actions tab. Switch to harness-dispatch.yml
+# (GitHub App, check run on the pull request) when you want the result to gate
+# merges.
+#
+# pull_request_target on purpose: the copy of this file on main runs, so a
+# pull request cannot rewrite it to read the token. Safe only because this
+# workflow checks out nothing and executes nothing from the pull request.
+name: harness-dispatch
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  dispatch:
+    # Pull requests from forks are not run automatically; a maintainer reads
+    # the diff, then runs the harness by hand with head_repo set to the fork.
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # Fine-grained tokens live at most one year. When this one expires the
+      # failure must say so by name, not look like a broken workflow.
+      - name: Credential check (HARNESS_DISPATCH_TOKEN)
+        env:
+          TOKEN: ${{ secrets.HARNESS_DISPATCH_TOKEN }}
+        run: |
+          fail() {
+            echo "=================================================================="
+            echo "  CREDENTIAL PROBLEM: HARNESS_DISPATCH_TOKEN"
+            echo "  $1"
+            echo "  Lives in: bloomfilter-plugins > Settings > Secrets and variables > Actions"
+            echo "  Fix: rotate it (fine-grained token, Actions: read and write on bloomfilter-plugins-harness)."
+            echo "  This is not a code failure. See the harness README, Credential rotation."
+            echo "=================================================================="
+            echo "::error title=Credential problem: HARNESS_DISPATCH_TOKEN::$1 Rotate the token in this repository's Actions secrets. Not a code failure."
+            exit 1
+          }
+          [ -n "$TOKEN" ] || fail "The secret is not set."
+          headers=$(mktemp)
+          code=$(curl -sS -o /dev/null -D "$headers" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+                 -H "Accept: application/vnd.github+json" https://api.github.com/repos/${{ github.repository_owner }}/bloomfilter-plugins-harness || echo 000)
+          [ "$code" = "200" ] || fail "GitHub answered HTTP $code: the token has expired, was revoked, or lost access to bloomfilter-plugins-harness."
+          expiry=$(grep -i '^github-authentication-token-expiration:' "$headers" | cut -d' ' -f2- | tr -d '\r')
+          if [ -n "$expiry" ]; then
+            days=$(( ( $(date -u -d "$expiry" +%s) - $(date -u +%s) ) / 86400 ))
+            echo "HARNESS_DISPATCH_TOKEN expires on $expiry ($days days from now)."
+            [ "$days" -gt 30 ] || echo "::warning title=HARNESS_DISPATCH_TOKEN expires in $days days::Rotate it before $expiry (this repository's Actions secrets)."
+          fi
+      - name: Start the harness
+        env:
+          GH_TOKEN: ${{ secrets.HARNESS_DISPATCH_TOKEN }}
+        run: |
+          gh api -X POST "repos/${{ github.repository_owner }}/bloomfilter-plugins-harness/actions/workflows/harness.yml/dispatches" \
+            -f ref=main \
+            -f "inputs[head_sha]=${{ github.event.pull_request.head.sha }}" \
+            -f "inputs[head_repo]=${{ github.event.pull_request.head.repo.full_name }}"
