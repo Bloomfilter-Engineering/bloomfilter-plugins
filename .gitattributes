@@ -1,0 +1,7 @@
+# Launchers and manifests must reach every client with LF endings, whatever
+# the client's git line-ending setting is.
+*.sh    text eol=lf
+*.ps1   text eol=lf
+*.json  text eol=lf
+*.py    text eol=lf
+*.md    text eol=lf

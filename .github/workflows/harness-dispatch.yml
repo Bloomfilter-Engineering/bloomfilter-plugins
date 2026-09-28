@@ -1,0 +1,71 @@
+# Starts the plugin test harness (an internal repository, named by the
+# HARNESS_REPO secret) for every pull request, passing along the commit to test.
+#
+# pull_request_target: the copy of this file on main runs, so a pull request
+# cannot change it to read the token. Never add a checkout of, or a script
+# from, the pull request to this workflow.
+name: harness-dispatch
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions: {}
+
+# One dispatch at a time per pull request.
+concurrency:
+  group: harness-dispatch-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  dispatch:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TARGET_REPO: ${{ github.repository_owner }}/${{ secrets.HARNESS_REPO }}
+      TARGET_WORKFLOW: ${{ vars.HARNESS_WORKFLOW }}
+      TOKEN: ${{ secrets.HARNESS_DISPATCH_TOKEN }}
+    steps:
+      - name: Configuration check
+        env:
+          REPO_SECRET: ${{ secrets.HARNESS_REPO }}
+        run: |
+          if [ -z "$REPO_SECRET" ] || [ -z "$TARGET_WORKFLOW" ]; then
+            echo "::error title=Harness dispatch is not configured::Set the secret HARNESS_REPO and the variable HARNESS_WORKFLOW under Settings > Secrets and variables > Actions."
+            exit 1
+          fi
+      - name: Credential check (HARNESS_DISPATCH_TOKEN)
+        run: |
+          fail() {
+            echo "=================================================================="
+            echo "  CREDENTIAL PROBLEM: HARNESS_DISPATCH_TOKEN"
+            echo "  $1"
+            echo "  Lives in: this repository > Settings > Secrets and variables > Actions"
+            echo "  Fix: rotate it (fine-grained token, Actions: read and write on the harness repository)."
+            echo "  This is not a code failure. Nothing in this pull request is wrong."
+            echo "=================================================================="
+            echo "::error title=Credential problem: HARNESS_DISPATCH_TOKEN::$1 Rotate the token in this repository's Actions secrets. Not a code failure."
+            exit 1
+          }
+          [ -n "$TOKEN" ] || fail "The secret is not set."
+          headers=$(mktemp)
+          code=$(curl -sS -o /dev/null -D "$headers" -w '%{http_code}' -H "Authorization: Bearer $TOKEN" \
+                 -H "Accept: application/vnd.github+json" "https://api.github.com/repos/$TARGET_REPO" || echo 000)
+          [ "$code" = "200" ] || fail "GitHub answered HTTP $code: the token has expired, was revoked, or lost access to the harness repository."
+          expiry=$(grep -i '^github-authentication-token-expiration:' "$headers" | cut -d' ' -f2- | tr -d '\r')
+          if [ -n "$expiry" ]; then
+            days=$(( ( $(date -u -d "$expiry" +%s) - $(date -u +%s) ) / 86400 ))
+            echo "HARNESS_DISPATCH_TOKEN expires on $expiry ($days days from now)."
+            [ "$days" -gt 30 ] || echo "::warning title=HARNESS_DISPATCH_TOKEN expires in $days days::Rotate it before $expiry (this repository's Actions secrets)."
+          fi
+      - name: Start the harness
+        env:
+          GH_TOKEN: ${{ secrets.HARNESS_DISPATCH_TOKEN }}
+        run: |
+          gh api -X POST "repos/$TARGET_REPO/actions/workflows/$TARGET_WORKFLOW/dispatches" \
+            -f ref=main \
+            -f "inputs[pr]=${{ github.event.pull_request.number }}" \
+            -f "inputs[head_sha]=${{ github.event.pull_request.head.sha }}" \
+            -f "inputs[head_repo]=${{ github.event.pull_request.head.repo.full_name }}"
