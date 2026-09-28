@@ -374,3 +374,4 @@ Per-runtime hook diagnostics:
   It logs the exact command run for each hook, its input and output, and any timeout or error.
 - **Copilot CLI** — run `copilot --log-level debug` and look for the hook execution lines.
 
+
