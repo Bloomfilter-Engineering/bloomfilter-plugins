@@ -209,28 +209,6 @@
         ]
       }
     ],
-    "WorktreeCreate": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" WorktreeCreate; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" WorktreeCreate",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
-    "WorktreeRemove": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "Set-Variable `# <#` > /dev/null 2>&1; sh \"${CLAUDE_PLUGIN_ROOT}/hooks/run-hook.sh\" WorktreeRemove; exit #> ; powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"$env:CLAUDE_PLUGIN_ROOT\\hooks\\run-hook.ps1\" WorktreeRemove",
-            "timeout": 10
-          }
-        ]
-      }
-    ],
     "PreCompact": [
       {
         "hooks": [

@@ -190,18 +190,27 @@ Install the single cross-platform plugin **`bloomfilter-agent-miner-claude-code`
 Windows, macOS, Linux, and WSL. The `-windows` plugin is deprecated; keep it only if you already
 have it installed.
 
+The plugin requires Claude Code 2.1.116 or later (check with `claude --version`). Earlier releases
+reject the plugin's hook configuration as a whole, so the plugin captures nothing there.
+
 Add the Bloomfilter plugin marketplace:
 
 ```bash
 claude plugin marketplace add Bloomfilter-Engineering/bloomfilter-plugins
 ```
 
-Or add it manually to your Claude Code settings:
+Or add it manually to your Claude Code settings file (for example `~/.claude/settings.json`):
 
 ```json
 {
-  "plugins": {
-    "marketplaces": ["Bloomfilter-Engineering/bloomfilter-plugins"]
+  "extraKnownMarketplaces": {
+    "bloomfilter-plugins": {
+      "source": {
+        "source": "github",
+        "repo": "Bloomfilter-Engineering/bloomfilter-plugins"
+      },
+      "autoUpdate": true
+    }
   }
 }
 ```
@@ -213,6 +222,23 @@ claude plugin install bloomfilter-agent-miner-claude-code
 ```
 
 Open any project in Claude Code. The plugin creates the config file automatically on first run if it does not exist, but you still need to add your API key.
+
+Keeping the plugin up to date: Claude Code does not update plugins from third-party marketplaces
+such as this one until you turn auto-update on for the marketplace. To update now, run the
+following and then restart Claude Code (use `bloomfilter-agent-miner-claude-code-windows` if you
+still have the deprecated plugin):
+
+```bash
+claude plugin update bloomfilter-agent-miner-claude-code@bloomfilter-plugins
+```
+
+To receive updates automatically, run `/plugin` in Claude Code, open the **Marketplaces** tab,
+select `bloomfilter-plugins`, and choose **Enable auto-update**; if it offers **Disable auto-update**
+instead, auto-update is already on. Current Claude Code releases also read the `"autoUpdate": true`
+key in the settings example above, ahead of that toggle, so after adding it, check the tab once in a
+new session. Claude Code hides the toggle when `DISABLE_UPDATES`, `DISABLE_AUTOUPDATER` or
+`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` is set, and those also stop plugin updates unless
+`FORCE_AUTOUPDATE_PLUGINS=1` is set too. An update takes effect in the next session.
 
 ### Codex
 
