@@ -214,9 +214,12 @@ def _speed_from_model_params(payload: dict) -> str:
 # or effort" and shows ``effort`` in its payload examples, so that spelling is
 # from the contract. ``reasoning`` appears in no published schema — it is what
 # the Kimi tiers were observed sending live — so it is accepted as a second
-# spelling rather than assumed to be general.
+# spelling rather than assumed to be general. ``reasoning_effort`` is likewise
+# observed rather than documented: by November 2026, Grok 4.7, Gemini 4
+# Argon, Gemini 4 Hydrogen and Muse Wonder had sent it, and without it their
+# turns lost the effort the user chose.
 # Source: https://cursor.com/docs/hooks (input schema shared by every hook).
-EFFORT_PARAM_IDS = ("effort", "reasoning")
+EFFORT_PARAM_IDS = ("effort", "reasoning", "reasoning_effort")
 
 
 def _effort_from_model_params(payload: dict) -> str:
@@ -225,8 +228,8 @@ def _effort_from_model_params(payload: dict) -> str:
     ``model_params`` is part of the documented input schema every hook shares:
     a list of ``{"id", "value"}`` items carrying the selected model parameters,
     ``effort`` among the ids the vendor names. It is read rather than inferred
-    for that reason. See :data:`EFFORT_PARAM_IDS` for the second spelling,
-    which is observed rather than documented.
+    for that reason. See :data:`EFFORT_PARAM_IDS` for the other spellings,
+    which are observed rather than documented.
 
     The trailing ``-high``/``-max`` on the model id restates the same choice,
     but only as an inference, and the API resolves that suffix to a price tier
@@ -257,8 +260,8 @@ def _effort_from_model_params(payload: dict) -> str:
         if isinstance(value, str) and value.strip():
             return value.strip().lower()
         # Keep looking rather than give up on this id: the ids are alternative
-        # spellings, and a payload carrying both must not lose the usable one
-        # because the other happened to come first with an empty value.
+        # spellings, and a payload carrying several must not lose the usable one
+        # because another happened to come first with an empty value.
         continue
     return ""
 
